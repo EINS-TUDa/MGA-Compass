@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("DATA_DIR", "tests")
+
 import numpy as np
 import pytest
 import pandas as pd

@@ -1,0 +1,45 @@
+{
+  "obj_label": "TOTEX",
+  "dimension_info": {
+    "wind": "Installed wind power capacity across all nodes.",
+    "solar": "Installed solar PV capacity across all nodes.",
+    "battery": "Installed battery storage capacity across all nodes.",
+    "hydrogen": "Installed hydrogen storage capacity across all nodes.",
+    "TOTEX": "Total system expenditure (capital + operational costs). This is the objective function being minimized."
+  },
+  "dimension_unit": {
+    "wind": "MW",
+    "solar": "MW",
+    "battery": "MWh",
+    "hydrogen": "MWh",
+    "TOTEX": "€"
+  },
+  "output_datasets": {
+    "capacity": {
+      "path": "data/installed_capacity_xr.pkl",
+      "dims": ["index", "technology"]
+    },
+    "generation": {
+      "path": "data/generation_over_snapshots.pkl",
+      "dims": ["index", "snapshot", "technology"]
+    }
+  },
+  "plots": {
+    "generation": {
+      "type": "stacked_timeseries",
+      "dataset": "generation",
+      "x_dim": "snapshot",
+      "categories_dim": "technology"
+    },
+    "capacity": {
+      "type": "bar",
+      "dataset": "capacity",
+      "x_dim": "technology"
+    },
+    "total generation": {
+      "type": "timeseries",
+      "dataset": "generation",
+      "x_dim": "snapshot"
+    }
+  }
+}
