@@ -84,7 +84,7 @@ const computeYMax = (pd) => {
   return max === -Infinity ? undefined : max
 }
 
-const renderChart = () => {
+const renderChart = (notMerge = true) => {
   if (!plotRef.value) return
   if (!chartInstance) chartInstance = echarts.init(plotRef.value)
 
@@ -122,6 +122,11 @@ const renderChart = () => {
       lineStyle: { width: 1 },
       symbol: 'none',
     }))
+  }
+
+  if (!notMerge) {
+    chartInstance.setOption({ series })
+    return
   }
 
   chartInstance.setOption(
@@ -278,7 +283,7 @@ watch(() => props.path, () => {
 
 watch(() => props.beta, () => {
   if (type.value !== objLabel.value) {
-    renderChart()
+    renderChart(false)
   } else if (chartInstance) {
     const y = getObjValueAtBeta(props.beta)
     chartInstance.setOption({ series: [{}, { animation: false, data: y !== null ? [[props.beta, y]] : [] }] })
