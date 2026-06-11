@@ -207,16 +207,16 @@ def describe_changes(input_constraints: Constraints, output_constraints: Constra
             if in_dir == ">=":
                 messages.append(ConstraintChange(
                     "infeasible_lb",
-                    f"{dim}: target lower bound {(in_val+in_delta):.4g} is infeasible; "
+                    f"{dim}: targeted minimum {in_val:.4g} + {in_delta:.4g} = {(in_val+in_delta):.4g} is infeasible; "
                     f"constrained to equality within a \u00b1{out_delta:.4g} window around {in_val:.4g};"
-                    f"the maximum feasible value is {(in_val-out_delta):.4g}"
+                    f"the maximum feasible is {in_val:.4g} - {out_delta:.4g} = {(in_val-out_delta):.4g}"
                 ))
             elif in_dir == "<=":
                 messages.append(ConstraintChange(
                     "infeasible_ub",
-                    f"{dim}: target upper bound {(in_val-in_delta):.4g} is infeasible; "
+                    f"{dim}: targeted maximum {in_val:.4g} - {in_delta:.4g} = {(in_val-in_delta):.4g} is infeasible; "
                     f"constrained to equality within a \u00b1{out_delta:.4g} window around {in_val:.4g};"
-                    f"the minimum feasible value is {(in_val+out_delta):.4g}"
+                    f"the minimum feasible is {in_val:.4g} + {out_delta:.4g} = {(in_val+out_delta):.4g}"
                 ))
         else:
             if out_delta > in_delta:
