@@ -39,10 +39,14 @@ jobs:
 
       - name: Redeploy backend on Koyeb
         run: |
-          curl -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_BACKEND_SERVICE_ID }}/redeploy" \
-            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}"
+          curl -f -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_BACKEND_SERVICE_ID }}/redeploy" \
+            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{}'
 
       - name: Redeploy frontend on Koyeb
         run: |
-          curl -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_FRONTEND_SERVICE_ID }}/redeploy" \
-            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}"
+          curl -f -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_FRONTEND_SERVICE_ID }}/redeploy" \
+            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{}'
