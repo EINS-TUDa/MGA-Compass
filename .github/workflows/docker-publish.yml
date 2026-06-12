@@ -36,3 +36,13 @@ jobs:
           context: ./frontend
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/mga-frontend:latest
+
+      - name: Redeploy backend on Koyeb
+        run: |
+          curl -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_BACKEND_SERVICE_ID }}/redeploy" \
+            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}"
+
+      - name: Redeploy frontend on Koyeb
+        run: |
+          curl -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_FRONTEND_SERVICE_ID }}/redeploy" \
+            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}"
