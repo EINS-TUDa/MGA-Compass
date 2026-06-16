@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>A real-time GUI for exploring near-optimal solutions in macro-energy systems - Sina Hajikazemi</title>
+
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+		<link rel="stylesheet" href="dist/theme/white.css">
+
+		<!-- Theme used for syntax highlighted code -->
+		<link rel="stylesheet" href="plugin/highlight/monokai.css">
+
+		<style>
+			.reveal .slides .tu-logo {
+				position: absolute;
+				top: 20px;
+				right: 0;
+				height: 80px;
+				margin: 0;
+				z-index: 1000;
+			}
+
+			/* Custom Navigator at the bottom */
+			.custom-nav {
+				position: fixed;
+				bottom: 50px;
+				left: 50%;
+				transform: translateX(-50%);
+				z-index: 1000;
+				display: flex;
+				gap: 30px;
+				font-family: Arial, sans-serif;
+				font-size: 0.65em;
+				color: #000; /* Fully black for maximum readability */
+			}
+
+			.nav-group {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 5px;
+			}
+
+			.nav-dots {
+				display: flex;
+				gap: 6px;
+			}
+
+			.nav-dot {
+				width: 8px;
+				height: 8px;
+				border-radius: 50%;
+				background: #eee;
+				border: 1px solid #ccc;
+				cursor: pointer;
+			}
+
+			.nav-dot.active {
+				background: #008522;
+				border-color: #008522;
+			}
+
+			.nav-label {
+				letter-spacing: 1px;
+				cursor: pointer;
+			}
+
+			/* Align content slides to top-left with reduced margins */
+			.reveal .slides section:not(:first-child) {
+				text-align: left;
+				padding-left: 0 !important;
+				font-size: 0.8em;
+				margin-top: 20px !important; /* Reduced top margin */
+			}
+
+			.reveal .slides section:not(:first-child) h3 {
+				margin-top: 0;
+				margin-left: 20px;
+				font-size: 1.25em;
+			}
+
+			.reveal .slides section:not(:first-child) h4 {
+				margin-top: -10px;
+				margin-bottom: 0;
+				margin-left: 20px;
+				font-size: 0.8em; /* Slightly larger than content (0.7em) but smaller than title (1.25em) */
+				font-weight: normal;
+			}
+
+			.reveal .slides section:not(:first-child) hr {
+				margin-top: 15px;
+				margin-bottom: 40px;
+			}
+
+			/* Decrease font size of content below the horizontal line */
+			.reveal .slides section:not(:first-child) hr ~ * {
+				font-size: 0.7em;
+			}
+
+			.plot-wrap {
+				display: flex;
+				justify-content: center;
+				margin-top: 10px;
+			}
+
+			.columns {
+				display: flex;
+				align-items: center;
+				gap: 40px;
+			}
+
+			.columns .col-list {
+				flex: 1;
+				align-self: flex-start;
+				margin-left: 40px;
+			}
+
+			.columns .plot-wrap {
+				flex: 1;
+				align-self: flex-start;
+				margin-top: 0;
+			}
+
+			.info-box {
+				border-left: 4px solid #008522;
+				padding-left: 15px;
+			}
+
+			.info-box + .info-box {
+				margin-top: 40px;
+			}
+
+			.info-label {
+				color: #008522;
+				font-weight: bold;
+				text-transform: uppercase;
+				letter-spacing: 1px;
+				margin-bottom: 5px;
+			}
+
+			.info-text {
+				font-size: 1em;
+				font-weight: 300;
+				line-height: 1.4;
+			}
+
+			.info-box p.info-text:has(+ ul) {
+				margin-bottom: 5px;
+			}
+
+			.dots-fragment.visible {
+				display: none;
+			}
+
+			.info-text .var {
+				color: #2a76dd;
+				font-style: italic;
+			}
+
+			.info-box--blue {
+				border-left-color: #2a76dd;
+			}
+
+			.info-box--blue .info-label {
+				color: #2a76dd;
+			}
+
+			.info-box--red {
+				border-left-color: #cc0000;
+			}
+
+			.info-box--red .info-label {
+				color: #cc0000;
+			}
+
+			.info-box--yellow {
+				border-left-color: #cc9900;
+			}
+
+			.info-box--yellow .info-label {
+				color: #cc9900;
+			}
+
+			.info-box--green {
+				border-left-color: #008522;
+			}
+
+			.info-box--green .info-label {
+				color: #008522;
+			}
+
+			.reveal .slides section.section-with-footnote {
+				height: calc(100% - 20px);
+			}
+
+			.footnote-box {
+				position: absolute;
+				left: 0;
+				right: 0;
+				bottom: 10px;
+			}
+
+			.footnote-rule {
+				border: 0;
+				border-top: 1px solid #000;
+				margin: 0 0 8px 0;
+			}
+
+			.reveal .slides section:not(:first-child) hr ~ .footnote-box .footnote {
+				font-size: 0.5em;
+				color: #777;
+				margin: 0;
+			}
+
+			.reveal .slides section:not(:first-child) hr ~ .footnote-box .footnote + .footnote {
+				margin-top: 2px;
+			}
+
+			/* Keep title slide centered */
+			.reveal .slides section:first-child {
+				text-align: center;
+				top: 50% !important;
+				transform: translateY(-50%) !important;
+				left: 50% !important;
+				transform: translate(-50%, -50%) !important;
+			}
+
+			/* Keep the title slide heading away from the slide edges */
+			.reveal .slides section:first-child h3,
+			.reveal .slides section:first-child h4 {
+				max-width: 85%;
+				margin-left: auto;
+				margin-right: auto;
+			}
+
+			.reveal .slides section:first-child h3 {
+				position: relative;
+				top: -15px;
+			}
+
+			/* Center the closing slide on the page */
+			.reveal .slides section.centered-slide {
+				text-align: center;
+				top: 50% !important;
+				left: 50% !important;
+				transform: translate(-50%, -50%) !important;
+			}
+
+			/* TU Darmstadt Green for horizontal lines */
+			hr {
+				border: 0;
+				height: 2px;
+				background: #008522; /* TU Darmstadt Corporate Color Green */
+			}
+
+			/* Disable all-caps for titles */
+			.reveal h1, .reveal h2, .reveal h3, .reveal h4, .reveal h5, .reveal h6 {
+				text-transform: none;
+			}
+
+			li.bullet-green::marker { color: #008522; }
+			li.bullet-red::marker   { color: #cc0000; }
+
+			/* On the full-screen iframe slide, hide everything but the background */
+			.reveal.fullscreen-slide .tu-logo,
+			.reveal.fullscreen-slide .slide-number {
+				display: none;
+			}
+
+			/* Fake QR codes for the thank-you slide */
+			.qr-row {
+				display: flex;
+				justify-content: center;
+				gap: 130px;
+				margin-top: 60px;
+			}
+
+			.qr-item {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 15px;
+			}
+
+			.qr-code {
+				width: 180px;
+				height: 180px;
+			}
+
+			.qr-caption {
+				font-weight: bold;
+				font-size: 1em;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+				<section data-nav="Home">
+					<h3 style="color: #008522;">MGA Compass</h3>
+					<h4>A Platform for Interactive Exploration of Near-Optimal Solutions of Energy Planning Models</h4>
+					<hr>
+					<div style="position: relative; top: 25px;">
+						<p><strong>Sina Hajikazemi</strong></p>
+						<p><strong>Prof. Florian Steinke</strong></p>
+						<p><small>Technical University of Darmstadt</small></p>
+						<p><small>June 23, 2026</small></p>
+					</div>
+				</section>
+				
+				<!-- Section 1 -->
+				<section data-nav="Solutions">
+					<h3>Near Optimal Solutions</h3>
+					<h4>Geometry</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box info-box--blue fragment" data-fragment-index="0">
+								<p class="info-label">Objective</p>
+								<p class="info-text">Determine the optimal <span style="color: #2a76dd;">capacity</span> and <span style="color: #2a76dd;">operational</span> schedule of these facilities at the <span style="color: #cc0000;">minimum cost</span>.</p>
+							</div>
+							<div class="info-box info-box--green fragment" data-fragment-index="1" style="margin-top: 12px;">
+								<p class="info-label">Question?</p>
+								<p class="info-text">What are the other options if we allow the solution to be &#949;-suboptimal?</p>
+							</div>
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 440px;" role="img" aria-label="Schematic of the PyPSA model.energy single-node network: an electricity bus connected to solar, wind and load-shedding generators, a battery storage unit and the electricity demand, plus a hydrogen bus connected via electrolysis and turbine links to a hydrogen store">
+								<defs>
+									<marker id="arrow-model" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Electricity bus -->
+								<line x1="30" y1="115" x2="490" y2="115" stroke="#2a76dd" stroke-width="5"/>
+								<text x="485" y="105" text-anchor="end" font-size="15" font-weight="bold" fill="#2a76dd">Electricity</text>
+
+								<!-- Hydrogen bus -->
+								<line x1="30" y1="265" x2="490" y2="265" stroke="#008522" stroke-width="5"/>
+								<text x="485" y="257" text-anchor="end" font-size="15" font-weight="bold" fill="#008522">Hydrogen (H&#8322;)</text>
+
+								<!-- Solar PV generator -->
+								<line x1="100" y1="115" x2="100" y2="73" stroke="#333" stroke-width="2"/>
+								<rect x="80" y="38" width="40" height="35" fill="none" stroke="#333" stroke-width="2"/>
+								<line x1="100" y1="38" x2="100" y2="73" stroke="#333" stroke-width="1.5"/>
+								<line x1="80" y1="55.5" x2="120" y2="55.5" stroke="#333" stroke-width="1.5"/>
+								<text x="100" y="26" text-anchor="middle" font-size="13" fill="#333">Solar PV</text>
+
+								<!-- Wind generator -->
+								<line x1="220" y1="115" x2="220" y2="78" stroke="#333" stroke-width="2"/>
+								<line x1="220" y1="78" x2="220" y2="40" stroke="#333" stroke-width="2"/>
+								<circle cx="220" cy="38" r="3" fill="#333"/>
+								<line x1="220" y1="38" x2="220" y2="19" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="38" x2="236" y2="48" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="38" x2="204" y2="48" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<text x="220" y="12" text-anchor="middle" font-size="13" fill="#333">Wind</text>
+
+								<!-- Load shedding generator -->
+								<line x1="340" y1="115" x2="340" y2="75" stroke="#333" stroke-width="2"/>
+								<path d="M340,40 L325,72 L355,72 Z" fill="none" stroke="#333" stroke-width="2" stroke-dasharray="4,3"/>
+								<line x1="340" y1="50" x2="340" y2="62" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<circle cx="340" cy="67" r="1.5" fill="#333"/>
+								<text x="340" y="26" text-anchor="middle" font-size="13" fill="#333">Load Shedding</text>
+
+								<!-- Demand -->
+								<line x1="440" y1="115" x2="440" y2="155" stroke="#333" stroke-width="2"/>
+								<path d="M420,165 L440,150 L460,165 Z" fill="none" stroke="#333" stroke-width="2"/>
+								<rect x="425" y="165" width="30" height="30" fill="none" stroke="#333" stroke-width="2"/>
+								<text x="440" y="222" text-anchor="middle" font-size="13" fill="#333">Demand</text>
+
+								<!-- Battery storage -->
+								<line x1="150" y1="115" x2="150" y2="155" stroke="#333" stroke-width="2"/>
+								<rect x="140" y="148" width="20" height="8" fill="none" stroke="#333" stroke-width="2"/>
+								<rect x="130" y="156" width="40" height="44" fill="none" stroke="#333" stroke-width="2"/>
+								<text x="150" y="222" text-anchor="middle" font-size="13" fill="#333">Battery Storage</text>
+
+								<!-- Electrolysis link: electricity -> hydrogen -->
+								<line x1="270" y1="118" x2="270" y2="260" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
+								<text x="255" y="190" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 255 190)">Electrolysis</text>
+
+								<!-- Turbine link: hydrogen -> electricity -->
+								<line x1="300" y1="262" x2="300" y2="120" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
+								<text x="315" y="190" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 315 190)">Turbine</text>
+
+								<!-- Hydrogen storage -->
+								<line x1="150" y1="265" x2="150" y2="295" stroke="#333" stroke-width="2"/>
+								<ellipse cx="150" cy="301" rx="20" ry="6" fill="none" stroke="#333" stroke-width="2"/>
+								<line x1="130" y1="301" x2="130" y2="335" stroke="#333" stroke-width="2"/>
+								<line x1="170" y1="301" x2="170" y2="335" stroke="#333" stroke-width="2"/>
+								<path d="M130,335 A20,6 0 0 0 170,335" fill="none" stroke="#333" stroke-width="2"/>
+								<text x="150" y="353" text-anchor="middle" font-size="13" fill="#333">H&#8322; Storage</text>
+							</svg>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible space, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-geom" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-geom)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-geom)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Feasible space (unconstrained, extends further NE): corners (1,1) (2,1) (3.5,2.5) (2.5,3.5) (1,2) -->
+								<polygon points="165,275 260,275 402.5,132.5 307.5,37.5 165,180" fill="#008522" fill-opacity="0.15" class="fragment fade-out" data-fragment-index="2"/>
+								<g stroke="#008522" stroke-width="1.5" class="fragment fade-out" data-fragment-index="2">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="402.5" y2="132.5"/>
+									<line x1="307.5" y1="37.5" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+
+								<!-- Near-optimal feasible space: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15" class="fragment" data-fragment-index="2"/>
+								<g stroke="#008522" stroke-width="1.5" class="fragment" data-fragment-index="2">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="228" y="180" font-size="15" fill="#006619" class="fragment fade-out" data-fragment-index="2">Feasible space</text>
+								<text x="209" y="190" font-size="15" fill="#006619" class="fragment" data-fragment-index="2">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible space</tspan>
+								</text>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5" class="fragment" data-fragment-index="2"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)" class="fragment" data-fragment-index="2">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="0">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Objective gradient direction -c -->
+								<line x1="165" y1="275" x2="141" y2="299" stroke="#333" stroke-width="1.5" opacity="0.5" marker-end="url(#arrow-geom)" class="fragment" data-fragment-index="0"/>
+								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333" class="fragment" data-fragment-index="0">-c</text>
+							</svg>
+						</div>
+					</div>
+				</section>
+				<section data-nav="Solutions" class="section-with-footnote">
+					<h3>Near Optimal Solutions</h3>
+					<h4>Motivation</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box info-box--blue">
+								<p class="info-label">Use cases</p>
+								<ul class="info-text">
+									<li class="fragment" data-fragment-index="0"><span style="color: #2a76dd;">Preferable alternatives</span> in political, social, or environmental terms.<sup>[1]</sup></li>
+									<li class="fragment" data-fragment-index="1"><span style="color: #2a76dd;">Robust</span> solutions to weather variability<sup>[2]</sup> and cost uncertainty<sup>[3]</sup>.</li>
+									<li class="fragment" data-fragment-index="2"><span style="color: #2a76dd;">Participatory</span> modeling that lets stakeholders explore trade-offs near the optimum.<sup>[4]</sup></li>
+								</ul>
+							</div>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible space, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-why" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-why)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-why)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Near-optimal feasible space: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15"/>
+								<g stroke="#008522" stroke-width="1.5">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="209" y="190" font-size="15" fill="#006619">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible space</tspan>
+								</text>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Objective gradient direction -c -->
+								<line x1="165" y1="275" x2="141" y2="299" stroke="#333" stroke-width="1.5" opacity="0.5" marker-end="url(#arrow-why)"/>
+								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333">-c</text>
+							</svg>
+						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote fragment" data-fragment-index="0">[1] Neumann, Fabian, and Tom Brown. "The near-optimal feasible space of a renewable power system model." Electric Power Systems Research 190 (2021): 106690.</p>
+						<p class="footnote fragment" data-fragment-index="1">[2] Grochowicz, Aleksander, et al. "Intersecting near-optimal spaces: European power systems with more resilience to weather variability." Energy Economics 118 (2023): 106496.</p>
+						<p class="footnote fragment" data-fragment-index="1">[3] Neumann, Fabian, and Tom Brown. "Broad ranges of investment configurations for renewable power systems, robust to cost uncertainty and near-optimality." iScience 26.5 (2023).</p>
+						<p class="footnote fragment" data-fragment-index="2">[4] Vågerö, Oskar, et al. "Exploring near-optimal energy systems with stakeholders: a novel approach for participatory modelling." arXiv preprint arXiv:2501.05280 (2025).</p>
+					</div>
+				</section>
+
+				<section data-nav="Exploration">
+					<h3>Exploration</h3>
+					<h4>Trivial Approach</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box fragment" data-fragment-index="0">
+								<p class="info-label">Key Question</p>
+								<p class="info-text">Is there any near-optimal solution with more than <i class="var">X</i> PV Capacity and <i class="var">Y</i> Wind Turbine Capacity?</p>
+							</div>
+							<div class="info-box info-box--blue fragment" data-fragment-index="1">
+								<p class="info-label">Trivial Approach</p>
+								<p class="info-text">Add the constraints to the main problem and solve it</p>
+							</div>
+							<div class="info-box info-box--red fragment" data-fragment-index="2">
+								<p class="info-label">Disadvantage</p>
+								<ul class="info-text">
+									<li>A new problem for each question</li>
+									<li>May take several hours for large models</li>
+								</ul>
+							</div>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible space, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-trivial" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+									<marker id="arrow-trivial-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#2a76dd"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-trivial)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-trivial)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Near-optimal feasible space: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15" class="fragment fade-out" data-fragment-index="1"/>
+								<g stroke="#008522" stroke-width="1.5">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="209" y="190" font-size="15" fill="#006619" class="fragment fade-out" data-fragment-index="1">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible space</tspan>
+								</text>
+
+								<!-- New constraints from the trivial approach: PV >= X, Wind Turbine >= Y -->
+								<line x1="212.5" y1="55" x2="212.5" y2="370" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4" class="fragment" data-fragment-index="1"/>
+								<line x1="70" y1="227.5" x2="385" y2="227.5" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4" class="fragment" data-fragment-index="1"/>
+								<text x="212.5" y="390" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd" class="fragment" data-fragment-index="1">X</text>
+								<text x="58" y="232" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd" class="fragment" data-fragment-index="1">Y</text>
+
+								<!-- Direction of the new constraints (feasible side) -->
+								<line x1="212.5" y1="330" x2="242.5" y2="330" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-trivial-blue)" class="fragment" data-fragment-index="1"/>
+								<line x1="130" y1="227.5" x2="130" y2="197.5" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-trivial-blue)" class="fragment" data-fragment-index="1"/>
+
+								<!-- Intersection of the new constraints (X, Y) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="1">
+									<line x1="206.5" y1="221.5" x2="218.5" y2="233.5"/>
+									<line x1="218.5" y1="221.5" x2="206.5" y2="233.5"/>
+								</g>
+
+								<!-- Compatible feasible space: corners (1.5,1.5) (2.5,1.5) (3,2) (2,3) (1.5,2.5) -->
+								<polygon points="212.5,227.5 307.5,227.5 355,180 260,85 212.5,132.5" fill="#008522" fill-opacity="0.15" class="fragment" data-fragment-index="1"/>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment fade-out" data-fragment-index="1">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Objective gradient direction -c -->
+								<line x1="165" y1="275" x2="141" y2="299" stroke="#333" stroke-width="1.5" opacity="0.5" marker-end="url(#arrow-trivial)" class="fragment fade-out" data-fragment-index="1"/>
+								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333" class="fragment fade-out" data-fragment-index="1">-c</text>
+							</svg>
+						</div>
+					</div>
+				</section>
+
+				<section data-nav="Exploration" class="section-with-footnote">
+					<h3>Exploration</h3>
+					<h4>Real-Time Approach</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box info-box--blue">
+								<p class="info-label">Real-Time Approach</p>
+								<p class="info-text fragment" data-fragment-index="1"><strong>Preparation Phase</strong></p>
+								<ul class="info-text">
+									<li class="fragment" data-fragment-index="2">Define properties of interest (<i class="var">m</i> ~ 10<sup>1</sup>).</li>
+									<li class="fragment" data-fragment-index="3">Find the corner points (<i class="var">n</i> ~ 10<sup>3</sup>).<sup>[1]</sup></li>
+								</ul>
+								<p class="info-text fragment" data-fragment-index="8"><strong>Exploration Phase</strong></p>
+								<ul class="info-text">
+									<li class="fragment" data-fragment-index="9">Define the question.</li>
+									<li class="fragment" data-fragment-index="10" style="white-space: nowrap;">Solve the <span style="color: #2a76dd;">Navigation</span> problem (<i class="var">n</i> vars. and <i class="var">m</i> constrs.).</li>
+									<li class="fragment" data-fragment-index="11"><span style="color: #2a76dd;">Traverse</span> between the start and end point.</li>
+								</ul>
+							</div>
+							<div class="info-box info-box--blue fragment" data-fragment-index="12">
+								<p class="info-label">Pros and Cons</p>
+								<ul class="info-text">
+									<li class="fragment bullet-green" data-fragment-index="13">Size of the Navigate problem is <span style="color: #008522;">independent</span> of the main model.</li>
+									<li class="fragment bullet-green" data-fragment-index="14">For realistic <i class="var">m</i> and <i class="var">n</i> it takes <span style="color: #008522;">seconds</span>.</li>
+									<li class="fragment bullet-red" data-fragment-index="15">Finding the corner points is computationally <span style="color: #cc0000;">expensive</span> but <span class="fragment fade-out dots-fragment" data-fragment-index="16">...</span><span class="fragment" data-fragment-index="16">potentially <span style="color: #008522;">parallelizable</span>.</span></li>
+								</ul>
+							</div>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible space, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-rt" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+									<marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#2a76dd"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-rt)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-rt)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Near-optimal feasible space: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15" class="fragment fade-out" data-fragment-index="4"/>
+								<g stroke="#008522" stroke-width="1.5">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="209" y="190" font-size="15" fill="#006619" class="fragment fade-out" data-fragment-index="4">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible space</tspan>
+								</text>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Corner search: arrow points from the centre to each corner in turn -->
+								<line x1="240" y1="200" x2="253" y2="247" stroke="#333" stroke-width="1.5" marker-end="url(#arrow-rt)" class="fragment fade-in-then-out" data-fragment-index="4"/>
+								<line x1="240" y1="200" x2="288" y2="192" stroke="#333" stroke-width="1.5" marker-end="url(#arrow-rt)" class="fragment fade-in-then-out" data-fragment-index="5"/>
+								<line x1="240" y1="200" x2="248" y2="152" stroke="#333" stroke-width="1.5" marker-end="url(#arrow-rt)" class="fragment fade-in-then-out" data-fragment-index="6"/>
+								<line x1="240" y1="200" x2="193" y2="187" stroke="#333" stroke-width="1.5" marker-end="url(#arrow-rt)" class="fragment fade-in-then-out" data-fragment-index="7"/>
+
+								<!-- Corner points found so far -->
+								<circle cx="260" cy="275" r="5" fill="#cc0000" class="fragment" data-fragment-index="4"/>
+								<circle cx="355" cy="180" r="5" fill="#cc0000" class="fragment" data-fragment-index="5"/>
+								<circle cx="260" cy="85" r="5" fill="#cc0000" class="fragment" data-fragment-index="6"/>
+								<circle cx="165" cy="180" r="5" fill="#cc0000" class="fragment" data-fragment-index="7"/>
+
+								<!-- Convex hull of the optimal point and the corners found so far -->
+								<polygon points="165,275 260,275 355,180" fill="#008522" fill-opacity="0.15" class="fragment fade-in-then-out" data-fragment-index="5"/>
+								<polygon points="165,275 260,275 355,180 260,85" fill="#008522" fill-opacity="0.15" class="fragment fade-in-then-out" data-fragment-index="6"/>
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15" class="fragment" data-fragment-index="7"/>
+
+								<!-- Constraints from the previous slide: PV >= X, Wind Turbine >= Y -->
+								<g class="fragment" data-fragment-index="9">
+									<g class="fragment fade-out" data-fragment-index="11">
+										<line x1="212.5" y1="55" x2="212.5" y2="370" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4"/>
+										<line x1="70" y1="227.5" x2="385" y2="227.5" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4"/>
+										<text x="212.5" y="390" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd">X</text>
+										<text x="58" y="232" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd">Y</text>
+										<line x1="212.5" y1="330" x2="242.5" y2="330" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-blue)"/>
+										<line x1="130" y1="227.5" x2="130" y2="197.5" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-blue)"/>
+									</g>
+								</g>
+
+								<!-- Intersection of the constraints (X, Y) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="10">
+									<line x1="206.5" y1="221.5" x2="218.5" y2="233.5"/>
+									<line x1="218.5" y1="221.5" x2="206.5" y2="233.5"/>
+								</g>
+
+								<!-- Traversal: dashed line from the optimal solution to the constraint intersection -->
+								<line x1="165" y1="275" x2="212.5" y2="227.5" stroke="#cc0000" stroke-width="2" stroke-dasharray="6,4" class="fragment" data-fragment-index="11"/>
+							</svg>
+						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote fragment" data-fragment-index="3">[1] Lau, Michael, Neha Patankar, and Jesse D. Jenkins. "Measuring exploration: evaluation of modelling to generate alternatives methods in capacity expansion models." Environmental Research: Energy 1.4 (2024): 045004.</p>
+					</div>
+				</section>
+
+				<!-- Section 4 -->
+				<section data-nav="Conclusion" data-background-iframe="http://localhost:5173/" data-background-interactive>
+				</section>
+
+				<section data-nav="Conclusion" data-background-image="images/MGA-compass.png">
+				</section>
+
+				<section data-nav="Conclusion" class="centered-slide">
+					<h3 style="color: #008522;">Thank You For Your Attention!</h3>
+					<div class="qr-row">
+						<div class="qr-item">
+							<img class="qr-code" src="images/Linkedin.svg" alt="QR code linking to LinkedIn profile">
+							<p class="qr-caption">LinkedIn</p>
+						</div>
+						<div class="qr-item">
+							<img class="qr-code" src="images/Github.svg" alt="QR code linking to GitHub project">
+							<p class="qr-caption">GitHub</p>
+						</div>
+						<div class="qr-item">
+							<img class="qr-code" src="images/LiveDemo.svg" alt="QR code linking to the live demo">
+							<p class="qr-caption">Live Demo</p>
+						</div>
+					</div>
+				</section>
+				<img class="tu-logo" src="images/TU_Darmstadt_Logo.svg" alt="TU Darmstadt Logo">
+			</div>
+		</div>
+
+		<!-- <div class="custom-nav" id="custom-nav"></div> -->
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script>
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+			Reveal.initialize({
+				hash: true,
+				showHiddenSlides: true,
+				center: false,
+				width: 1200,
+				height: 800,
+				margin: 0,
+
+				slideNumber: 'c/t',
+
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+			});
+
+			// Custom Navigation Logic
+			// const navContainer = document.getElementById('custom-nav');
+			const slides = Array.from(document.querySelectorAll('.slides > section'));
+
+			// Define sections and their slides
+			// const navStructure = [
+			// 	{ label: 'Near Optimal Solutions', slides: [1, 2] },
+			// 	{ label: 'How to Explore', slides: [3, 4] },
+			// 	{ label: 'How to Solve', slides: [5] },
+			// 	{ label: 'Conclusion', slides: [6] }
+			// ];
+
+			function updateNav() {
+				const currentSlideIndex = Reveal.getIndices().h;
+				const currentSlide = slides[currentSlideIndex];
+
+				// On slides with a full background (iframe/image) or the final slide, show only the background
+				const isFullscreenSlide = currentSlideIndex === slides.length - 1
+					|| currentSlide.hasAttribute('data-background-iframe')
+					|| currentSlide.hasAttribute('data-background-image');
+				document.querySelector('.reveal').classList.toggle('fullscreen-slide', isFullscreenSlide);
+
+				/* Navigation bar disabled
+				// Hide navigation on landing page and the final full-screen slide
+				if (currentSlideIndex === 0 || currentSlideIndex === slides.length - 1) {
+					navContainer.style.display = 'none';
+					return;
+				} else {
+					navContainer.style.display = 'flex';
+				}
+
+				navContainer.innerHTML = '';
+
+				navStructure.forEach(group => {
+					const groupDiv = document.createElement('div');
+					groupDiv.className = 'nav-group';
+
+					const dotsDiv = document.createElement('div');
+					dotsDiv.className = 'nav-dots';
+
+					group.slides.forEach(slideIdx => {
+						const dot = document.createElement('div');
+						dot.className = 'nav-dot' + (slideIdx === currentSlideIndex ? ' active' : '');
+						dot.onclick = (e) => {
+							e.stopPropagation();
+							Reveal.slide(slideIdx);
+						};
+						dotsDiv.appendChild(dot);
+					});
+
+					const label = document.createElement('div');
+					label.className = 'nav-label';
+					label.innerText = group.label;
+					label.onclick = (e) => {
+						e.stopPropagation();
+						Reveal.slide(group.slides[0]);
+					};
+
+					groupDiv.appendChild(label);
+					groupDiv.appendChild(dotsDiv);
+					navContainer.appendChild(groupDiv);
+				});
+				*/
+			}
+
+			Reveal.on('slidechanged', updateNav);
+			Reveal.on('ready', updateNav);
+		</script>
+	</body>
+</html>
