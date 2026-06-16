@@ -1,9 +1,11 @@
-name: Docker Publish
+name: Publish Frontend
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'frontend/**'
 
 jobs:
   docker:
@@ -23,26 +25,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push backend
-        uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/mga-backend:latest
-
       - name: Build and push frontend
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/mga-frontend:latest
-
-      - name: Redeploy backend on Koyeb
-        run: |
-          curl -f -X POST "https://app.koyeb.com/v1/services/${{ secrets.KOYEB_BACKEND_SERVICE_ID }}/redeploy" \
-            -H "Authorization: Bearer ${{ secrets.KOYEB_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{}'
 
       - name: Redeploy frontend on Koyeb
         run: |
