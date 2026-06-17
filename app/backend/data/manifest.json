@@ -1,16 +1,16 @@
 {
   "obj_label": "TOTEX",
   "dimension_info": {
-    "wind": "Installed wind power capacity across all nodes.",
-    "solar": "Installed solar PV capacity across all nodes.",
-    "battery": "Installed battery storage capacity across all nodes.",
-    "hydrogen": "Installed hydrogen storage capacity across all nodes.",
+    "wind": "Installed wind power capacity.",
+    "solar": "Installed solar PV capacity.",
+    "battery": "Installed battery storage power (charge/discharge) rating. Energy capacity (MWh) equals this value times the storage unit's max_hours (3h for this model).",
+    "hydrogen": "Installed hydrogen storage capacity.",
     "TOTEX": "Total system expenditure (capital + operational costs). This is the objective function being minimized."
   },
   "dimension_unit": {
     "wind": "MW",
     "solar": "MW",
-    "battery": "MWh",
+    "battery": "MW",
     "hydrogen": "MWh",
     "TOTEX": "€"
   },

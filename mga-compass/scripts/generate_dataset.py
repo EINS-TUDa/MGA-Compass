@@ -5,10 +5,11 @@ several sub-optimality (slack) levels via mga_compass, and writes the production
 files consumed by the server (points.pkl, duals.pkl, installed_capacity.pkl,
 generation_over_snapshots.pkl).
 
-Run with: uv run python -c "from generate_dataset import main; main(slack_levels=[0.02, 0.05, 0.08])"
+Run with: uv run python scripts/generate_dataset.py --slack-levels 0.02 0.05 0.08
 """
+import argparse
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -53,12 +54,13 @@ class RunConfig:
     solver_options: dict
     n_directions: int  # sampled directions per slack level
     obj_label: str
+    slack_levels: list[float]
     output_dir: Path = Path(__file__).parent / "output"
     seed: int = 0
     max_parallel: int = 4
 
 
-RUN_CONFIG = RunConfig(*_detect_solver(), n_directions=200, obj_label="TOTEX")
+RUN_CONFIG = RunConfig(*_detect_solver(), n_directions=200, obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08])
 
 
 @dataclass
@@ -101,7 +103,6 @@ MODEL_ENERGY = NetworkConfig(
 def run_mga(
     n: pypsa.Network,
     optimal_cost: float,
-    slack_levels: list[float],
     network: NetworkConfig,
     config: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[Path]]:
@@ -132,7 +133,7 @@ def run_mga(
     all_duals.append(pd.Series(0.0, index=list(network.dimensions.keys())))
     all_nc_paths.append(optimum_nc)
 
-    for slack in slack_levels:
+    for slack in config.slack_levels:
         slack_dir = output_dir / f"slack_{slack}"
         cache_path = slack_dir / "results.pkl"
         if cache_path.exists():
@@ -186,15 +187,22 @@ def extract_generation_and_capacity(
     # netCDF4 directly is ~20x faster than xr.open_dataset for these files (the
     # xarray wrapper's overhead dominates when opening many small files in a loop).
     with Dataset(nc_files[0]) as ds0:
-        gen_techs = [str(x) for x in ds0["generators_t_p_i"][:]]
+        # The static component list (generators_i), not the time-varying one
+        # (generators_t_p_i): PyPSA only exports a generator's p time series if
+        # it's ever dispatched, so generators_t_p_i's columns vary between
+        # files (e.g. "load shedding" is absent whenever it's never used) and
+        # can't be relied on for a consistent technology axis across files.
+        gen_techs = [str(x) for x in ds0["generators_i"][:]]
         cap_techs = [str(x) for comp, _ in capacity_vars for x in ds0[f"{comp}_i"][:]]
 
-    gen_data = np.empty((len(nc_files), len(snapshots), len(gen_techs)))
+    gen_data = np.zeros((len(nc_files), len(snapshots), len(gen_techs)))
     cap_data = np.empty((len(nc_files), len(cap_techs)))
 
     for pos, nc_file in enumerate(nc_files):
         with Dataset(nc_file) as ds:
-            gen_data[pos] = np.asarray(ds["generators_t_p"][:])
+            file_gen_techs = [str(x) for x in ds["generators_t_p_i"][:]]
+            tech_positions = [gen_techs.index(tech) for tech in file_gen_techs]
+            gen_data[pos, :, tech_positions] = np.asarray(ds["generators_t_p"][:]).T
             cap_data[pos] = np.concatenate([np.asarray(ds[var][:]) for _, var in capacity_vars])
 
     generation = xr.DataArray(
@@ -213,14 +221,12 @@ def extract_generation_and_capacity(
     return generation, installed_capacity
 
 
-def main(
-    slack_levels: list[float], network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG
-) -> None:
+def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) -> None:
     n = network.build(config.solver_name, config.solver_options)
     optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
     print(f"Optimal {config.obj_label}: {optimal_cost:,.0f}")
 
-    points_df, duals_df, nc_files = run_mga(n, optimal_cost, slack_levels, network, config)
+    points_df, duals_df, nc_files = run_mga(n, optimal_cost, network, config)
     print(f"Total points: {len(points_df)}")
 
     points_df.to_pickle(config.output_dir / "points.pkl")
@@ -238,5 +244,15 @@ def main(
     print(duals_df)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir", type=Path, default=RUN_CONFIG.output_dir, help="Directory to write outputs to."
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main(slack_levels=[0.02, 0.05, 0.08])
+    args = parse_args()
+    config = replace(RUN_CONFIG, output_dir=args.output_dir)
+    main(config=config)
