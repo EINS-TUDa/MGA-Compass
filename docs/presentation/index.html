@@ -301,7 +301,7 @@
 			<div class="slides">
 				<section data-nav="Home">
 					<h3 style="color: #008522;">MGA Compass</h3>
-					<h4>A Platform for Interactive Exploration of Near-Optimal Solutions of Energy Planning Models</h4>
+					<h4>A Platform for Interactive Exploration of Near-Optimal Solutions of Linear Energy Planning Models</h4>
 					<hr>
 					<div style="position: relative; top: 25px;">
 						<p><strong>Sina Hajikazemi</strong></p>
@@ -312,7 +312,7 @@
 				</section>
 				
 				<!-- Section 1 -->
-				<section data-nav="Solutions">
+				<section data-nav="Solutions" class="section-with-footnote">
 					<h3>Near Optimal Solutions</h3>
 					<h4>Geometry</h4>
 					<hr>
@@ -335,54 +335,55 @@
 
 								<!-- Electricity bus -->
 								<line x1="30" y1="115" x2="490" y2="115" stroke="#2a76dd" stroke-width="5"/>
-								<text x="485" y="105" text-anchor="end" font-size="15" font-weight="bold" fill="#2a76dd">Electricity</text>
+								<text x="485" y="105" text-anchor="end" font-size="18" font-weight="bold" fill="#2a76dd">Electricity</text>
 
 								<!-- Hydrogen bus -->
 								<line x1="30" y1="265" x2="490" y2="265" stroke="#008522" stroke-width="5"/>
-								<text x="485" y="257" text-anchor="end" font-size="15" font-weight="bold" fill="#008522">Hydrogen (H&#8322;)</text>
+								<text x="485" y="257" text-anchor="end" font-size="18" font-weight="bold" fill="#008522">Hydrogen (H&#8322;)</text>
 
 								<!-- Solar PV generator -->
 								<line x1="100" y1="115" x2="100" y2="73" stroke="#333" stroke-width="2"/>
 								<rect x="80" y="38" width="40" height="35" fill="none" stroke="#333" stroke-width="2"/>
 								<line x1="100" y1="38" x2="100" y2="73" stroke="#333" stroke-width="1.5"/>
 								<line x1="80" y1="55.5" x2="120" y2="55.5" stroke="#333" stroke-width="1.5"/>
-								<text x="100" y="26" text-anchor="middle" font-size="13" fill="#333">Solar PV</text>
+								<text x="100" y="26" text-anchor="middle" font-size="16" fill="#333">Solar PV</text>
 
 								<!-- Wind generator -->
 								<line x1="220" y1="115" x2="220" y2="78" stroke="#333" stroke-width="2"/>
-								<line x1="220" y1="78" x2="220" y2="40" stroke="#333" stroke-width="2"/>
-								<circle cx="220" cy="38" r="3" fill="#333"/>
-								<line x1="220" y1="38" x2="220" y2="19" stroke="#333" stroke-width="2" stroke-linecap="round"/>
-								<line x1="220" y1="38" x2="236" y2="48" stroke="#333" stroke-width="2" stroke-linecap="round"/>
-								<line x1="220" y1="38" x2="204" y2="48" stroke="#333" stroke-width="2" stroke-linecap="round"/>
-								<text x="220" y="12" text-anchor="middle" font-size="13" fill="#333">Wind</text>
+								<line x1="220" y1="78" x2="220" y2="55" stroke="#333" stroke-width="2"/>
+								<circle cx="220" cy="53" r="3" fill="#333"/>
+								<line x1="220" y1="53" x2="220" y2="34" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="53" x2="236" y2="63" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="53" x2="204" y2="63" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<text x="220" y="27" text-anchor="middle" font-size="16" fill="#333">Wind</text>
 
 								<!-- Load shedding generator -->
 								<line x1="340" y1="115" x2="340" y2="75" stroke="#333" stroke-width="2"/>
 								<path d="M340,40 L325,72 L355,72 Z" fill="none" stroke="#333" stroke-width="2" stroke-dasharray="4,3"/>
 								<line x1="340" y1="50" x2="340" y2="62" stroke="#333" stroke-width="2" stroke-linecap="round"/>
 								<circle cx="340" cy="67" r="1.5" fill="#333"/>
-								<text x="340" y="26" text-anchor="middle" font-size="13" fill="#333">Load Shedding</text>
+								<text x="340" y="26" text-anchor="middle" font-size="16" fill="#333">Load Shedding</text>
 
 								<!-- Demand -->
-								<line x1="440" y1="115" x2="440" y2="155" stroke="#333" stroke-width="2"/>
+								<line x1="440" y1="115" x2="440" y2="150" stroke="#333" stroke-width="2"/>
 								<path d="M420,165 L440,150 L460,165 Z" fill="none" stroke="#333" stroke-width="2"/>
 								<rect x="425" y="165" width="30" height="30" fill="none" stroke="#333" stroke-width="2"/>
-								<text x="440" y="222" text-anchor="middle" font-size="13" fill="#333">Demand</text>
+								<text x="440" y="222" text-anchor="middle" font-size="16" fill="#333">Demand</text>
 
 								<!-- Battery storage -->
-								<line x1="150" y1="115" x2="150" y2="155" stroke="#333" stroke-width="2"/>
-								<rect x="140" y="148" width="20" height="8" fill="none" stroke="#333" stroke-width="2"/>
-								<rect x="130" y="156" width="40" height="44" fill="none" stroke="#333" stroke-width="2"/>
-								<text x="150" y="222" text-anchor="middle" font-size="13" fill="#333">Battery Storage</text>
+								<line x1="150" y1="115" x2="150" y2="148" stroke="#333" stroke-width="2"/>
+								<rect x="142" y="148" width="16" height="8" fill="none" stroke="#333" stroke-width="2"/>
+								<rect x="132" y="156" width="36" height="44" rx="6" ry="6" fill="none" stroke="#333" stroke-width="2"/>
+								<path d="M156,160 L140,182 L148,182 L144,196 L160,174 L152,174 Z" fill="#333"/>
+								<text x="150" y="222" text-anchor="middle" font-size="16" fill="#333">Battery Storage</text>
 
 								<!-- Electrolysis link: electricity -> hydrogen -->
 								<line x1="270" y1="118" x2="270" y2="260" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
-								<text x="255" y="190" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 255 190)">Electrolysis</text>
+								<text x="255" y="190" text-anchor="middle" font-size="15" fill="#333" transform="rotate(-90 255 190)">Electrolysis</text>
 
 								<!-- Turbine link: hydrogen -> electricity -->
 								<line x1="300" y1="262" x2="300" y2="120" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
-								<text x="315" y="190" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 315 190)">Turbine</text>
+								<text x="315" y="190" text-anchor="middle" font-size="15" fill="#333" transform="rotate(-90 315 190)">Turbine</text>
 
 								<!-- Hydrogen storage -->
 								<line x1="150" y1="265" x2="150" y2="295" stroke="#333" stroke-width="2"/>
@@ -390,7 +391,7 @@
 								<line x1="130" y1="301" x2="130" y2="335" stroke="#333" stroke-width="2"/>
 								<line x1="170" y1="301" x2="170" y2="335" stroke="#333" stroke-width="2"/>
 								<path d="M130,335 A20,6 0 0 0 170,335" fill="none" stroke="#333" stroke-width="2"/>
-								<text x="150" y="353" text-anchor="middle" font-size="13" fill="#333">H&#8322; Storage</text>
+								<text x="150" y="353" text-anchor="middle" font-size="16" fill="#333">H&#8322; Storage</text>
 							</svg>
 						</div>
 						<div class="plot-wrap">
@@ -448,6 +449,10 @@
 								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333" class="fragment" data-fragment-index="0">-c</text>
 							</svg>
 						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote">Network schematic based on PyPSA's <a href="https://docs.pypsa.org/v1.0.3/examples/capacity-expansion-planning-single-node/" target="_blank" rel="noopener">single-node capacity expansion example</a>.</p>
 					</div>
 				</section>
 				<section data-nav="Solutions" class="section-with-footnote">
@@ -528,7 +533,7 @@
 						<div class="col-list">
 							<div class="info-box fragment" data-fragment-index="0">
 								<p class="info-label">Key Question</p>
-								<p class="info-text">Is there any near-optimal solution with more than <i class="var">X</i> PV Capacity and <i class="var">Y</i> Wind Turbine Capacity?</p>
+								<p class="info-text">Is there any near-optimal solution with more than <span style="white-space: nowrap;"><i class="var">X</i> PV Capacity</span> and <i class="var">Y</i> Wind Turbine Capacity?</p>
 							</div>
 							<div class="info-box info-box--blue fragment" data-fragment-index="1">
 								<p class="info-label">Trivial Approach</p>
@@ -538,7 +543,7 @@
 								<p class="info-label">Disadvantage</p>
 								<ul class="info-text">
 									<li>A new problem for each question</li>
-									<li>May take several hours for large models</li>
+									<li>May take <span style="color: #cc0000;">several hours</span> for large models (~10<sup>6</sup> vars.)</li>
 								</ul>
 							</div>
 						</div>
