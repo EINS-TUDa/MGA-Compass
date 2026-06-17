@@ -6,8 +6,9 @@ import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
 
+from mga_compass import Alpha, Breakpoint
+
 from mgaserver.main import app
-from mgaserver.schemes import Alpha, Breakpoint
 
 
 @pytest.fixture(scope="module")
@@ -295,7 +296,7 @@ class TestLowerBoundEndpoint:
 
     @pytest.fixture(autouse=True)
     def mock_lower_bound_internals(self):
-        from mgaserver.schemes import LowerBoundPoint
+        from mga_compass import LowerBoundPoint
         mock_envelope = [LowerBoundPoint(beta=0.0, value=35.0), LowerBoundPoint(beta=1.0, value=32.0)]
         with (
             patch("mgaserver.main.linear_lower_bounds", return_value=[]),

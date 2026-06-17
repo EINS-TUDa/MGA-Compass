@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'frontend/**'
+      - 'app/frontend/**'
 
 jobs:
   docker:
@@ -28,7 +28,7 @@ jobs:
       - name: Build and push frontend
         uses: docker/build-push-action@v6
         with:
-          context: ./frontend
+          context: ./app/frontend
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/mga-frontend:latest
 

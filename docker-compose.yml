@@ -1,13 +1,15 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
     ports:
       - "8000:8000"
     environment:
       - ALLOWED_ORIGINS=["http://localhost"]
 
   frontend:
-    build: ./frontend
+    build: ./app/frontend
     ports:
       - "80:80"
     environment:

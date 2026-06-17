@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from mgaserver.schemes import (
+from mga_compass.schemes import (
     Alpha, NegativeAlphaError, AlphaSumError,
     Constraints, ConstraintsIndexError, ConstraintsColumnsError,
     ConstraintsDirectionError, ConstraintsDeltaError, ConstraintsValueError,

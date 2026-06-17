@@ -2,8 +2,8 @@ import linopy
 import pytest
 import pandas as pd
 import xarray as xr
-from mgaserver.core import navigate, interpolate, alpha_2_point, point_2_alpha, describe_changes, linear_lower_bounds, upper_envelope, build_outer_approximation, navigate_outer_approximation, aggregate_by_alpha
-from mgaserver.schemes import Alpha, Breakpoint, Constraints, ConstraintChange, LinearBound, LowerBoundPoint
+from mga_compass.core import navigate, interpolate, alpha_2_point, point_2_alpha, describe_changes, linear_lower_bounds, upper_envelope, build_outer_approximation, navigate_outer_approximation, aggregate_by_alpha
+from mga_compass.schemes import Alpha, Breakpoint, Constraints, ConstraintChange, LinearBound, LowerBoundPoint
 
 
 def test_alpha_2_point(points_df, dimensions):

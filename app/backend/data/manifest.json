@@ -16,7 +16,7 @@
   },
   "output_datasets": {
     "capacity": {
-      "path": "data/installed_capacity_xr.pkl",
+      "path": "data/installed_capacity.pkl",
       "dims": ["index", "technology"]
     },
     "generation": {

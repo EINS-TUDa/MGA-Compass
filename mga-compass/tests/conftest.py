@@ -1,11 +1,9 @@
-import os
-os.environ.setdefault("DATA_DIR", "tests")
-
 import numpy as np
 import pytest
 import pandas as pd
-from mgaserver.schemes import Constraints
-from mgaserver.config import load_manifest, settings, Manifest
+from mga_compass.schemes import Constraints
+
+OBJ_LABEL = "TOTEX"
 
 
 @pytest.fixture(scope="session")
@@ -24,15 +22,10 @@ def dimensions(points_df):
     return points_df.columns.tolist()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def manifest() -> Manifest:
-    return load_manifest(settings.manifest_path)
-
-
 @pytest.fixture(scope="session")
-def duals_df(points_df, manifest) -> pd.DataFrame:
+def duals_df(points_df) -> pd.DataFrame:
     rng = np.random.default_rng(0)
-    cols = [c for c in points_df.columns if c != manifest.obj_label]
+    cols = [c for c in points_df.columns if c != OBJ_LABEL]
     return pd.DataFrame(
         rng.random((len(points_df), len(cols))),
         columns=cols,

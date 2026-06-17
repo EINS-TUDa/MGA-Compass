@@ -20,7 +20,7 @@ Near-optimal solutions cost a small percentage more than the optimum. While slig
 ### Backend
 
 ```bash
-cd backend
+cd app/backend
 uv sync
 uv run uvicorn mgaserver.main:app --reload
 ```
@@ -28,7 +28,7 @@ uv run uvicorn mgaserver.main:app --reload
 ### Frontend
 
 ```bash
-cd frontend
+cd app/frontend
 npm install
 npm run dev
 ```

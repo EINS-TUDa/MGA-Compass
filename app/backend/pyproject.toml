@@ -12,9 +12,10 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi[standard]>=0.136.1",
-    "linopy>=0.6.7",
-    "pandera>=0.31.1",
-    "pypsa>=1.2.0",
+    "mga-compass",
     "pytest>=9.0.3",
     "slowapi>=0.1.9",
 ]
+
+[tool.uv.sources]
+mga-compass = { path = "../../mga-compass" }

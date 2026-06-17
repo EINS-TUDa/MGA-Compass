@@ -5,22 +5,29 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .config import settings, Plot
+from pathlib import Path
+
+from .manifest import Plot
 from .schemes import Constraints, Breakpoint, Point, Points, Alpha, ConstraintChange, LinearBound, LowerBoundPoint
 
-_solver_handler = logging.FileHandler(settings.solver_log_path)
-_solver_handler.setLevel(logging.DEBUG)
-_solver_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
-for _logger_name in ("linopy.model", "linopy.io", "linopy.constants", "google.cloud.storage"):
-    _log = logging.getLogger(_logger_name)
-    _log.addHandler(_solver_handler)
-    _log.propagate = False  # don't echo to console
+
+def configure_solver_logging(log_path: Path) -> None:
+    """Route linopy/solver logs to a file instead of the console. Call this once at startup."""
+    handler = logging.FileHandler(log_path)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    for logger_name in ("linopy.model", "linopy.io", "linopy.constants", "google.cloud.storage"):
+        logger = logging.getLogger(logger_name)
+        logger.addHandler(handler)
+        logger.propagate = False  # don't echo to console
 
 
 def navigate(
     points: Points,
     constraints: Constraints,
     obj_label: str,
+    solver_name: str = "highs",
+    solver_options: dict | None = None,
 ) -> tuple[Constraints, Point]:
     constraints.validate(points)
     output_df = constraints.copy(deep=True)
@@ -36,7 +43,7 @@ def navigate(
     for func in constraints.index:
         if constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             delta = (f.loc[func].solution - constraints.loc[func, "value"]).values
             if delta >= 0:
                 if delta >= constraints.loc[func, "delta"]:
@@ -52,7 +59,7 @@ def navigate(
                 mdl.add_constraints(f.loc[func] <= constraints.loc[func, "value"] + np.abs(delta))
         elif constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             delta = (constraints.loc[func, "value"] - f.loc[func].solution).values
             if delta >= 0:
                 if delta >= constraints.loc[func, "delta"]:
@@ -69,7 +76,7 @@ def navigate(
             mdl.add_constraints(abs_delta.loc[func] >= f.loc[func] - constraints.loc[func, "value"])
             mdl.add_constraints(abs_delta.loc[func] >= constraints.loc[func, "value"] - f.loc[func])
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             if mdl.status != "ok" or mdl.termination_condition != "optimal":
                 raise ValueError(f"Solver failed for '==' constraint on '{func}': status={mdl.status}, condition={mdl.termination_condition}")
             delta = np.abs((f.loc[func].solution - constraints.loc[func, "value"]).values)
@@ -89,18 +96,18 @@ def navigate(
             continue
         elif constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
         elif constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
         elif constraints.loc[func, "direction"] == "==":
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
         mdl.add_constraints(f.loc[func] == f.loc[func].solution)
 
     # Find the solution with the minimum cost
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
-    mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+    mdl.solve(solver_name=solver_name, **(solver_options or {}))
 
     point = f.solution.to_series()
     return output_df, point
@@ -115,13 +122,15 @@ def interpolate(
     point_end: Point,
     obj_label: str,
     threshold: float = 1e-3,
+    solver_name: str = "highs",
+    solver_options: dict | None = None,
 ) -> list[Breakpoint]:
     output = []
 
     def _period_interpolate(beta_start, p_start, beta_end, p_end, depth=0):
         beta_mid = (beta_start + beta_end) / 2
         p_mid = (p_start + p_end) / 2
-        alpha_mid_interpolate = point_2_alpha(p_mid, points, obj_label)
+        alpha_mid_interpolate = point_2_alpha(p_mid, points, obj_label, solver_name, solver_options)
         p_mid_interpolate = alpha_2_point(alpha_mid_interpolate, points)
         gap = p_mid[obj_label] - p_mid_interpolate[obj_label]
         abs_threshold = threshold * abs(p_mid[obj_label])
@@ -133,8 +142,8 @@ def interpolate(
 
     _interpolate_logger.info("point_start:\n%s", point_start.to_string())
     _interpolate_logger.info("point_end:\n%s", point_end.to_string())
-    alpha_start = point_2_alpha(point_start, points, obj_label)
-    alpha_end = point_2_alpha(point_end, points, obj_label)
+    alpha_start = point_2_alpha(point_start, points, obj_label, solver_name, solver_options)
+    alpha_end = point_2_alpha(point_end, points, obj_label, solver_name, solver_options)
     p_start = alpha_2_point(alpha_start, points)
     p_end = alpha_2_point(alpha_end, points)
     output.append(Breakpoint(0, alpha_start, p_start))
@@ -169,7 +178,13 @@ def xr_to_series(da: xr.DataArray, plot: Plot) -> dict | list:
     return aggregated.values.tolist()
 
 
-def point_2_alpha(point: Point, points: Points, obj_label: str) -> Alpha:
+def point_2_alpha(
+    point: Point,
+    points: Points,
+    obj_label: str,
+    solver_name: str = "highs",
+    solver_options: dict | None = None,
+) -> Alpha:
     mdl = linopy.Model()
     alpha = mdl.add_variables(coords=[points.index], lower=0, name="alpha")
     mdl.add_constraints(alpha.sum() == 1)
@@ -177,7 +192,7 @@ def point_2_alpha(point: Point, points: Points, obj_label: str) -> Alpha:
         if func != obj_label:
             mdl.add_constraints((points[func] * alpha).sum() == point[func])
     mdl.add_objective((points[obj_label] * alpha).sum(), sense="min")
-    mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+    mdl.solve(solver_name=solver_name, **(solver_options or {}))
     return Alpha(alpha.solution.clip(min=0))
 
 
@@ -305,6 +320,8 @@ def navigate_outer_approximation(
     outer_approximation: linopy.Model,
     input_constraints: Constraints,
     obj_label: str,
+    solver_name: str = "highs",
+    solver_options: dict | None = None,
 ) -> tuple[Constraints, Point]:
     output_df = input_constraints.copy(deep=True)
     mdl = outer_approximation
@@ -315,7 +332,7 @@ def navigate_outer_approximation(
     for func in input_constraints.index:
         if input_constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             delta = (f.loc[func].solution - input_constraints.loc[func, "value"]).values
             if delta >= 0:
                 if delta >= input_constraints.loc[func, "delta"]:
@@ -330,7 +347,7 @@ def navigate_outer_approximation(
                 mdl.add_constraints(f.loc[func] <= input_constraints.loc[func, "value"] + np.abs(delta))
         elif input_constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             delta = (input_constraints.loc[func, "value"] - f.loc[func].solution).values
             if delta >= 0:
                 if delta >= input_constraints.loc[func, "delta"]:
@@ -347,7 +364,7 @@ def navigate_outer_approximation(
             mdl.add_constraints(abs_delta.loc[func] >= f.loc[func] - input_constraints.loc[func, "value"])
             mdl.add_constraints(abs_delta.loc[func] >= input_constraints.loc[func, "value"] - f.loc[func])
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             delta = np.abs((f.loc[func].solution - input_constraints.loc[func, "value"]).values)
             if delta <= input_constraints.loc[func, "delta"]:
                 mdl.add_constraints(abs_delta.loc[func] <= input_constraints.loc[func, "delta"])
@@ -363,19 +380,19 @@ def navigate_outer_approximation(
     for func in input_constraints.index:
         if input_constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
             mdl.add_constraints(f.loc[func] == f.loc[func].solution)
         elif input_constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
         elif input_constraints.loc[func, "direction"] == "==":
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+            mdl.solve(solver_name=solver_name, **(solver_options or {}))
         mdl.add_constraints(f.loc[func] == f.loc[func].solution)
 
     # Find the solution with the minimum cost
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
-    mdl.solve(solver_name=settings.solver_name, **settings.solver_options)
+    mdl.solve(solver_name=solver_name, **(solver_options or {}))
 
     return output_df, f.solution.to_series()
 
