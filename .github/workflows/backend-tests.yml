@@ -3,10 +3,12 @@ name: Backend Tests
 on:
   push:
     paths:
-      - 'backend/**'
+      - 'app/backend/**'
+      - 'mga-compass/**'
   pull_request:
     paths:
-      - 'backend/**'
+      - 'app/backend/**'
+      - 'mga-compass/**'
 
 jobs:
   test:
@@ -20,12 +22,12 @@ jobs:
 
       - name: Install Python
         run: uv python install 3.14
-        working-directory: backend
+        working-directory: app/backend
 
       - name: Install dependencies
         run: uv sync --frozen
-        working-directory: backend
+        working-directory: app/backend
 
       - name: Run tests
         run: uv run pytest
-        working-directory: backend
+        working-directory: app/backend
