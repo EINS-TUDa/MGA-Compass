@@ -69,20 +69,20 @@
 			}
 
 			/* Align content slides to top-left with reduced margins */
-			.reveal .slides section:not(:first-child) {
+			.reveal .slides section:not(.title-slide) {
 				text-align: left;
 				padding-left: 0 !important;
 				font-size: 0.8em;
 				margin-top: 20px !important; /* Reduced top margin */
 			}
 
-			.reveal .slides section:not(:first-child) h3 {
+			.reveal .slides section:not(.title-slide) h3 {
 				margin-top: 0;
 				margin-left: 20px;
 				font-size: 1.25em;
 			}
 
-			.reveal .slides section:not(:first-child) h4 {
+			.reveal .slides section:not(.title-slide) h4 {
 				margin-top: -10px;
 				margin-bottom: 0;
 				margin-left: 20px;
@@ -90,13 +90,13 @@
 				font-weight: normal;
 			}
 
-			.reveal .slides section:not(:first-child) hr {
+			.reveal .slides section:not(.title-slide) hr {
 				margin-top: 15px;
 				margin-bottom: 40px;
 			}
 
 			/* Decrease font size of content below the horizontal line */
-			.reveal .slides section:not(:first-child) hr ~ * {
+			.reveal .slides section:not(.title-slide) hr ~ * {
 				font-size: 0.7em;
 			}
 
@@ -201,52 +201,75 @@
 				left: 0;
 				right: 0;
 				bottom: 10px;
+				margin-left: 20px;
 			}
 
 			.footnote-rule {
 				border: 0;
 				border-top: 1px solid #000;
-				margin: 0 0 8px 0;
+				margin: 0 0 8px -20px;
+				width: calc(100% + 20px);
 			}
 
-			.reveal .slides section:not(:first-child) hr ~ .footnote-box .footnote {
+			.reveal .slides section:not(.title-slide) hr ~ .footnote-box .footnote {
 				font-size: 0.5em;
 				color: #777;
 				margin: 0;
 			}
 
-			.reveal .slides section:not(:first-child) hr ~ .footnote-box .footnote + .footnote {
+			.reveal .slides section:not(.title-slide) hr ~ .footnote-box .footnote + .footnote {
 				margin-top: 2px;
 			}
 
-			/* Keep title slide centered */
-			.reveal .slides section:first-child {
+			/* Keep title slide centered. Uses inset + margin: auto rather than
+			   transform: translate(...), since reveal's print/pdf stylesheet
+			   forces transform: none !important on every slide, which would
+			   otherwise break this centering when exporting to PDF. */
+			.reveal .slides section.title-slide {
 				text-align: center;
-				top: 50% !important;
-				transform: translateY(-50%) !important;
-				left: 50% !important;
-				transform: translate(-50%, -50%) !important;
+				top: 0 !important;
+				left: 0 !important;
+				right: 0 !important;
+				bottom: 0 !important;
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* reveal's print/pdf stylesheet scopes its own overrides under
+			   html.reveal-print with a more specific selector (forcing
+			   margin: 0 !important among others), which otherwise beats the
+			   rule above and collapses this centering. Match that specificity
+			   here so our centering wins in the exported PDF too. */
+			html.reveal-print .reveal .slides section.title-slide {
+				margin: auto !important;
+				height: fit-content !important;
 			}
 
 			/* Keep the title slide heading away from the slide edges */
-			.reveal .slides section:first-child h3,
-			.reveal .slides section:first-child h4 {
+			.reveal .slides section.title-slide h3,
+			.reveal .slides section.title-slide h4 {
 				max-width: 85%;
 				margin-left: auto;
 				margin-right: auto;
 			}
 
-			.reveal .slides section:first-child h3 {
-				position: relative;
-				top: -15px;
-			}
 
-			/* Center the closing slide on the page */
+			/* Center the closing slide on the page. See the section.title-slide
+			   rule above for why this avoids transform: translate(...). */
 			.reveal .slides section.centered-slide {
 				text-align: center;
-				top: 50% !important;
-				left: 50% !important;
-				transform: translate(-50%, -50%) !important;
+				top: 0 !important;
+				left: 0 !important;
+				right: 0 !important;
+				bottom: 0 !important;
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* See the equivalent html.reveal-print override for .title-slide above. */
+			html.reveal-print .reveal .slides section.centered-slide {
+				margin: auto !important;
+				height: fit-content !important;
 			}
 
 			/* TU Darmstadt Green for horizontal lines */
@@ -299,7 +322,7 @@
 	<body>
 		<div class="reveal">
 			<div class="slides">
-				<section data-nav="Home">
+				<section data-nav="Home" class="title-slide">
 					<h3 style="color: #008522;">MGA Compass</h3>
 					<h4>A Platform for Interactive Exploration of Near-Optimal Solutions of Linear Energy Planning Models</h4>
 					<hr>
@@ -739,7 +762,7 @@
 				<section data-nav="Conclusion" data-background-iframe="https://enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app/" data-background-interactive>
 				</section>
 
-				<section data-nav="Conclusion" data-background-image="images/MGA-compass.png">
+				<section data-nav="Conclusion" data-background-image="images/MGA-compass.png" data-background-size="contain">
 				</section>
 
 				<section data-nav="Conclusion" class="centered-slide">

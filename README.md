@@ -5,6 +5,8 @@
 
 **Live demo:** [enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app](https://enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app/)
 
+**Presentation:** [eins-tuda.github.io/MGA-Compass](https://eins-tuda.github.io/MGA-Compass/)
+
 Near-optimal solutions cost a small percentage more than the optimum. While slightly expensive, they can be preferable for political feasibility, social acceptance, or environmental impact. This platform helps you explore them in real time.
 
 ![MGA Compass](docs/MGA-compass.png)
