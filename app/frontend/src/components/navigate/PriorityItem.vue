@@ -66,7 +66,7 @@ const selectDirection = (direction) => {
   directionModel.value = directionModel.value === direction ? '' : direction
 }
 
-defineEmits(['handle-mousedown'])
+defineEmits(['handle-pointerdown'])
 
 const showInfo = ref(false)
 const infoBtnRef = ref(null)
@@ -265,15 +265,19 @@ const onDeltaBlur = () => {
 
 const progressRef = ref(null)
 let dragging = false
+let activePointerId = null
 
-const onIndicatorMouseDown = (event) => {
+const onIndicatorPointerDown = (event) => {
   if (isDeltaDisabled.value) return
   dragging = true
+  activePointerId = event.pointerId
+  event.target.setPointerCapture?.(event.pointerId)
   event.preventDefault()
 }
 
-const onMouseMove = (event) => {
-  if (!dragging || !progressRef.value) return
+const onPointerMove = (event) => {
+  if (!dragging || event.pointerId !== activePointerId || !progressRef.value) return
+  event.preventDefault()
   const rect = progressRef.value.getBoundingClientRect()
   const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
   const draggedValue = props.min + pct * (props.max - props.min)
@@ -283,16 +287,22 @@ const onMouseMove = (event) => {
   else if (directionModel.value === '==') deltaModel.value = Math.abs(draggedValue - base)
 }
 
-const onMouseUp = () => { dragging = false }
+const onPointerUp = (event) => {
+  if (event.pointerId !== activePointerId) return
+  dragging = false
+  activePointerId = null
+}
 
 onMounted(() => {
-  document.addEventListener('mousemove', onMouseMove)
-  document.addEventListener('mouseup', onMouseUp)
+  document.addEventListener('pointermove', onPointerMove)
+  document.addEventListener('pointerup', onPointerUp)
+  document.addEventListener('pointercancel', onPointerUp)
 })
 
 onUnmounted(() => {
-  document.removeEventListener('mousemove', onMouseMove)
-  document.removeEventListener('mouseup', onMouseUp)
+  document.removeEventListener('pointermove', onPointerMove)
+  document.removeEventListener('pointerup', onPointerUp)
+  document.removeEventListener('pointercancel', onPointerUp)
 })
 </script>
 
@@ -300,7 +310,7 @@ onUnmounted(() => {
   <section class="priority-card" :class="{ 'is-disabled': props.disabled, 'is-objective': props.objective }">
     <div class="priority-header">
       <div class="priority-title-wrap">
-        <span class="drag-handle" aria-hidden="true" title="Drag to reorder" @mousedown="$emit('handle-mousedown')">
+        <span class="drag-handle" aria-hidden="true" title="Drag to reorder" @pointerdown="$emit('handle-pointerdown', $event)">
           <svg viewBox="0 0 24 24" width="18" height="18">
             <path fill="currentColor" d="M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
           </svg>
@@ -387,7 +397,7 @@ onUnmounted(() => {
         class="target-indicator"
         :class="ind.dir"
         :style="{ left: ind.left, cursor: isDeltaDisabled ? 'default' : 'ew-resize' }"
-        @mousedown="onIndicatorMouseDown"
+        @pointerdown="onIndicatorPointerDown"
       ></div>
     </div>
 
@@ -444,6 +454,7 @@ onUnmounted(() => {
   justify-content: center;
   color: #9ca3af;
   cursor: grab;
+  touch-action: none;
 }
 
 .priority-index {
@@ -622,6 +633,7 @@ onUnmounted(() => {
   height: calc(100% + 16px);
   background-color: #ffdd57;
   z-index: 3;
+  touch-action: none;
 }
 
 .target-indicator::after,

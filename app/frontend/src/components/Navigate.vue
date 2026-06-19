@@ -233,30 +233,53 @@ watch(() => props.active, (active) => {
 })
 
 const draggedIndex = ref(null)
-const isDragReady = ref(false)
+const itemRefs = ref([])
+const setItemRef = (el, index) => { itemRefs.value[index] = el }
+let activePointerId = null
 
-const onDragStart = (index, event) => {
-  if (!isDragReady.value) { event.preventDefault(); return }
-  draggedIndex.value = index
-  event.dataTransfer.effectAllowed = 'move'
-}
-
-const onDragOver = (event) => { event.preventDefault() }
-
-const onDrop = (index) => {
-  if (draggedIndex.value === null || draggedIndex.value === index) return
+const reorderTo = (newIndex) => {
   const list = visiblePriorities.value
+  newIndex = Math.max(0, Math.min(list.length - 1, newIndex))
+  if (newIndex === draggedIndex.value) return
   const item = list.splice(draggedIndex.value, 1)[0]
-  list.splice(index, 0, item)
+  list.splice(newIndex, 0, item)
   list.forEach((p, i) => { p.order = i })
   if (list[0]?.direction === '==') list[0].direction = ''
-  draggedIndex.value = null
-  isDragReady.value = false
+  draggedIndex.value = newIndex
 }
 
-const onDragEnd = () => {
+const onHandlePointerDown = (index, event) => {
+  if (!props.active) return
+  event.preventDefault()
+  draggedIndex.value = index
+  activePointerId = event.pointerId
+  window.addEventListener('pointermove', onHandlePointerMove)
+  window.addEventListener('pointerup', onHandlePointerUp)
+  window.addEventListener('pointercancel', onHandlePointerUp)
+}
+
+const onHandlePointerMove = (event) => {
+  if (draggedIndex.value === null || event.pointerId !== activePointerId) return
+  event.preventDefault()
+  const list = visiblePriorities.value
+  for (let i = 0; i < list.length; i++) {
+    const el = itemRefs.value[i]
+    if (!el) continue
+    const rect = el.getBoundingClientRect()
+    if (event.clientY >= rect.top && event.clientY <= rect.bottom) {
+      reorderTo(i)
+      break
+    }
+  }
+}
+
+const onHandlePointerUp = (event) => {
+  if (event.pointerId !== activePointerId) return
   draggedIndex.value = null
-  isDragReady.value = false
+  activePointerId = null
+  window.removeEventListener('pointermove', onHandlePointerMove)
+  window.removeEventListener('pointerup', onHandlePointerUp)
+  window.removeEventListener('pointercancel', onHandlePointerUp)
 }
 
 const visiblePriorities = computed(() => priorities.value)
@@ -340,9 +363,9 @@ onMounted(() => {
       <div class="priority-content">
         <PriorityItem
           v-for="(priority, index) in visiblePriorities"
-          :key="`${priority.name}-${index}`"
+          :key="priority.name"
+          :ref="(el) => setItemRef(el?.$el ?? el, index)"
           class="priority-list-item"
-          :draggable="active && isDragReady"
           :class="{ 'is-dragging': draggedIndex === index }"
           :name="priority.name"
           :order="priority.order"
@@ -358,11 +381,7 @@ onMounted(() => {
           :disabled="!active"
           :normalize="normalize"
           :objective="priority.name === objLabel"
-          @handle-mousedown="active && (isDragReady = true)"
-          @dragstart="onDragStart(index, $event)"
-          @dragover="onDragOver"
-          @drop="onDrop(index)"
-          @dragend="onDragEnd"
+          @handle-pointerdown="onHandlePointerDown(index, $event)"
         />
       </div>
     </div>
