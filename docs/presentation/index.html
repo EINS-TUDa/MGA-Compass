@@ -6,6 +6,8 @@
 
 		<title>A Platform for Interactive Exploration of Near-Optimal Solutions of Linear Energy Planning Models - Sina Hajikazemi</title>
 
+		<link rel="icon" href="images/mga_logo.svg">
+
 		<link rel="stylesheet" href="dist/reset.css">
 		<link rel="stylesheet" href="dist/reveal.css">
 		<link rel="stylesheet" href="dist/theme/white.css">
@@ -660,12 +662,12 @@
 									<li class="fragment" data-fragment-index="11"><span style="color: #2a76dd;">Traverse</span> between the start and end point.</li>
 								</ul>
 							</div>
-							<div class="info-box info-box--blue fragment" data-fragment-index="12">
+							<div class="info-box info-box--blue fragment" data-fragment-index="16">
 								<p class="info-label">Pros and Cons</p>
 								<ul class="info-text">
-									<li class="fragment bullet-green" data-fragment-index="13">Size of the Navigate problem is <span style="color: #008522;">independent</span> of the main model.</li>
-									<li class="fragment bullet-green" data-fragment-index="14">For realistic <i class="var">m</i> and <i class="var">n</i> it takes <span style="color: #008522;">seconds</span>.</li>
-									<li class="fragment bullet-red" data-fragment-index="15">Finding the corner points is computationally <span style="color: #cc0000;">expensive</span> but <span class="fragment fade-out dots-fragment" data-fragment-index="16">...</span><span class="fragment" data-fragment-index="16">potentially <span style="color: #008522;">parallelizable</span>.</span></li>
+									<li class="fragment bullet-green" data-fragment-index="17">Size of the Navigate problem is <span style="color: #008522;">independent</span> of the main model.</li>
+									<li class="fragment bullet-green" data-fragment-index="18">For realistic <i class="var">m</i> and <i class="var">n</i> it takes <span style="color: #008522;">seconds</span>.</li>
+									<li class="fragment bullet-red" data-fragment-index="19">Finding the corner points is computationally <span style="color: #cc0000;">expensive</span> but <span class="fragment fade-out dots-fragment" data-fragment-index="20">...</span><span class="fragment" data-fragment-index="20">potentially <span style="color: #008522;">parallelizable</span>.</span></li>
 								</ul>
 							</div>
 						</div>
@@ -707,7 +709,7 @@
 								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)">cost &#8804; (1+&#949;) cost*</text>
 
 								<!-- Optimal solution at (1,1) -->
-								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round">
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment fade-out" data-fragment-index="15">
 									<line x1="159" y1="269" x2="171" y2="281"/>
 									<line x1="171" y1="269" x2="159" y2="281"/>
 								</g>
@@ -742,13 +744,44 @@
 								</g>
 
 								<!-- Intersection of the constraints (X, Y) -->
-								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="10">
-									<line x1="206.5" y1="221.5" x2="218.5" y2="233.5"/>
-									<line x1="218.5" y1="221.5" x2="206.5" y2="233.5"/>
+								<g class="fragment" data-fragment-index="10">
+									<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment fade-out" data-fragment-index="15">
+										<line x1="206.5" y1="221.5" x2="218.5" y2="233.5"/>
+										<line x1="218.5" y1="221.5" x2="206.5" y2="233.5"/>
+									</g>
 								</g>
 
 								<!-- Traversal: dashed line from the optimal solution to the constraint intersection -->
-								<line x1="165" y1="275" x2="212.5" y2="227.5" stroke="#cc0000" stroke-width="2" stroke-dasharray="6,4" class="fragment" data-fragment-index="11"/>
+								<g class="fragment" data-fragment-index="11">
+									<line x1="165" y1="275" x2="212.5" y2="227.5" stroke="#cc0000" stroke-width="2" stroke-dasharray="6,4" class="fragment fade-out" data-fragment-index="15"/>
+								</g>
+
+								<!-- Second exploration cycle: user stops partway along the first traversal -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="12">
+									<line x1="182.75" y1="245.25" x2="194.75" y2="257.25"/>
+									<line x1="194.75" y1="245.25" x2="182.75" y2="257.25"/>
+								</g>
+
+								<!-- New constraints (X2, Y2) defined from the new current point -->
+								<g class="fragment" data-fragment-index="13">
+									<g class="fragment fade-out" data-fragment-index="15">
+										<line x1="235" y1="55" x2="235" y2="370" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4"/>
+										<line x1="70" y1="150" x2="385" y2="150" stroke="#2a76dd" stroke-width="2" stroke-dasharray="6,4"/>
+										<text x="235" y="390" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd">X</text>
+										<text x="58" y="155" text-anchor="middle" font-size="16" font-style="italic" fill="#2a76dd">Y</text>
+										<line x1="235" y1="330" x2="265" y2="330" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-blue)"/>
+										<line x1="130" y1="150" x2="130" y2="120" stroke="#2a76dd" stroke-width="2" marker-end="url(#arrow-blue)"/>
+									</g>
+								</g>
+
+								<!-- New point found by solving the Navigation problem again -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="14">
+									<line x1="229" y1="144" x2="241" y2="156"/>
+									<line x1="241" y1="144" x2="229" y2="156"/>
+								</g>
+
+								<!-- Second traversal: dashed line from the new current point to the new point -->
+								<line x1="188.75" y1="251.25" x2="235" y2="150" stroke="#cc0000" stroke-width="2" stroke-dasharray="6,4" class="fragment" data-fragment-index="15"/>
 							</svg>
 						</div>
 					</div>
