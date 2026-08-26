@@ -8,7 +8,14 @@ packages = ["src/mga_surveyor"]
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "DEBUG"
-testpaths = ["tests"]
+# "tests": this repo's own pytest-only tests (never shipped in the wheel).
+# "src/mga_surveyor/tests": the ported sandbox test/example subpackage,
+# which IS shipped as part of mga_surveyor (its own files import it as
+# `mga_surveyor.tests.X`, e.g. `from mga_surveyor.tests.lp_region import ...`).
+testpaths = ["tests", "src/mga_surveyor/tests"]
+markers = [
+    "slow: computationally expensive (MILP solves and/or hundreds of iterations across method/norm combinations) -- deselect with -m 'not slow'",
+]
 
 [project]
 name = "mga-surveyor"
@@ -20,8 +27,24 @@ dependencies = [
     "pypsa>=1.2.0",
     "pandas",
     "netCDF4",
-    "gurobipy>=13.0.2",
+    "numpy",
+    "scipy",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
+# closest_point_on_hull backends (methods/vertex_enum.py, methods/cdd.py) and
+# BilevelMethod's MILP -- both gurobipy/highspy are imported lazily, so
+# picking one backend never requires the other to be installed.
+# Also required (non-lazily -- a top-level import) by mga_surveyor.tests.lp_region,
+# the test/example true-region oracle used by tests/test_*_icosahedron.py.
+gurobi = ["gurobipy>=13.0.2"]
+highs = ["highspy>=1.14.0"]
+# methods/cdd.py's ground-truth vertex computation (CddMethod, and
+# VertexEnumMethod.resync's default checkpoint). Imported lazily inside
+# cdd_vertices_of, so the package works without this extra as long as
+# CddMethod/resync are never actually called. No PyPI wheel for Python >3.13
+# on Windows as of this writing -- if `uv sync --extra cdd` fails to find a
+# build, that's why; check availability for your platform/Python before
+# depending on this extra.
+cdd = ["pycddlib>=3.0.0"]
