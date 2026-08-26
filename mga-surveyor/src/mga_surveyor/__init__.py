@@ -28,11 +28,15 @@ model, or `mga_surveyor.tests.lp_region` against an explicit LP for
 testing), or write your own bootstrap/loop.
 
 `pypsa_ext` is the PyPSA-side adapter (still under construction) meant to
-supply `runner.FurthestPointFn`/`ClosestFeasiblePointFn` against a real
+supply the two oracle queries `mga_surveyor.runner` needs against a real
 PyPSA network's own solve, so the engine above can run against an actual
 system model instead of only a test example. `make_furthest_point_fn`
-supplies the former; a `ClosestFeasiblePointFn` builder is still to come.
-It also still wraps PyPSA's own built-in MGA (`optimize_mga_in_direction`/
+supplies a batched support-function query (solved in parallel via
+`optimize_mga_in_multiple_directions`, not `runner.FurthestPointFn`'s
+single-direction contract); a `ClosestFeasiblePointFn` for `runner.run`'s
+main loop is still to come -- that one can't be batched the same way, since
+each iteration depends on the previous one's result. `pypsa_ext` also still
+wraps PyPSA's own built-in MGA (`optimize_mga_in_direction`/
 `optimize_mga_in_multiple_directions`), independently of the engine above.
 """
 from .common import VALID_NORMS, gaps

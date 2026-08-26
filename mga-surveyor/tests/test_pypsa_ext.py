@@ -5,7 +5,6 @@ import pytest
 
 from mga_surveyor import (
     VertexEnumMethod,
-    bootstrap_box,
     make_furthest_point_fn,
     optimize_mga_in_direction,
     optimize_mga_in_multiple_directions,
@@ -83,48 +82,59 @@ def test_optimize_mga_in_direction_resolve_main_objective_false_skips_pin_resolv
 
 def test_make_furthest_point_fn_matches_optimize_mga_in_direction():
     n = _build_network()
-    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=2)
 
-    # keys order fixes the array axes: DIMENSIONS = {"wind": ..., "solar": ...}
-    direction = np.array([-1.0, 0.0])
-    point = furthest_point(direction)
+    # keys order fixes the array axes: DIMENSIONS = {"wind": ..., "solar": ...}.
+    # Two directions in one batched call -- solved in parallel underneath via
+    # optimize_mga_in_multiple_directions, not two serial single-direction calls.
+    directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
+    points = furthest_point(directions)
+    assert points.shape == (2, 2)
 
-    # Cross-check against optimize_mga_in_direction's own direction-objective
-    # solve (before its pinned re-solve, which shouldn't move the coordinates
-    # at all -- that's the whole point of pinning). Same direction, same
-    # network state (a fresh, independently solved network, so the two calls
-    # don't interfere with each other's linopy model / n.model state).
-    n2 = _build_network()
-    direction_dict = dict(zip(DIMENSIONS.keys(), direction.tolist()))
-    _, _, coordinates, _ = optimize_mga_in_direction(
-        n2, direction=direction_dict, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
-    )
-    np.testing.assert_allclose(point, coordinates.loc[list(DIMENSIONS.keys())].to_numpy(), atol=1e-4)
+    # Cross-check each row against optimize_mga_in_direction's own
+    # direction-objective solve (before its pinned re-solve, which shouldn't
+    # move the coordinates at all -- that's the whole point of pinning).
+    # Fresh, independently solved networks, so these reference calls don't
+    # interfere with each other's (or the batch's) linopy model / n.model state.
+    for row, direction in enumerate(directions):
+        n2 = _build_network()
+        direction_dict = dict(zip(DIMENSIONS.keys(), direction.tolist()))
+        _, _, coordinates, _ = optimize_mga_in_direction(
+            n2, direction=direction_dict, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
+        )
+        np.testing.assert_allclose(
+            points[row], coordinates.loc[list(DIMENSIONS.keys())].to_numpy(), atol=1e-4,
+        )
 
 
 def test_make_furthest_point_fn_direction_pushes_to_bound():
     n = _build_network()
-    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=2)
+    optimal_wind = n.generators.at["wind", "p_nom_opt"]
 
-    # direction=[-1, 0] maximizes -wind (i.e. minimizes wind) -- the furthest
-    # point in that direction should have wind capacity at or below the
-    # network's own cost-optimal wind capacity.
-    point = furthest_point(np.array([-1.0, 0.0]))
-    assert point[0] <= n.generators.at["wind", "p_nom_opt"] + 1e-6
-
-    # direction=[1, 0] maximizes wind -- at or above the optimum instead.
-    point = furthest_point(np.array([1.0, 0.0]))
-    assert point[0] >= n.generators.at["wind", "p_nom_opt"] - 1e-6
+    # direction=[-1, 0] maximizes -wind (minimizes wind); direction=[1, 0]
+    # maximizes wind -- both solved together in one batched call.
+    points = furthest_point(np.array([[-1.0, 0.0], [1.0, 0.0]]))
+    assert points[0, 0] <= optimal_wind + 1e-6
+    assert points[1, 0] >= optimal_wind - 1e-6
 
 
-def test_make_furthest_point_fn_with_bootstrap_box():
-    """End-to-end: make_furthest_point_fn is a valid FurthestPointFn for
-    runner.bootstrap_box, seeding a real Method against a real network."""
+def test_make_furthest_point_fn_bootstraps_method_directly():
+    """End-to-end: pass all 2k box directions to make_furthest_point_fn in
+    one batched call (solved in parallel), then bootstrap a real Method
+    directly from the resulting points/halfspaces -- the same state
+    runner.bootstrap_box would seed for the single-direction FurthestPointFn
+    case, but built from one parallel batch instead of a 2k-call loop."""
     n = _build_network()
-    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
 
-    method = VertexEnumMethod(k=2, norm="linf", backend="highs")
-    bootstrap_box(method, furthest_point, k=2)
+    k = len(DIMENSIONS)
+    box_directions = np.vstack([np.eye(k), -np.eye(k)])
+    points = furthest_point(box_directions)
+    assert points.shape == (2 * k, k)
+
+    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method.bootstrap(list(points), list(zip(box_directions, points)))
 
     assert method.outer_vertices is not None
     assert len(method.outer_vertices) > 0

@@ -15,14 +15,20 @@ as-is, with two behavioral differences:
   labeled ``obj_label``) to the returned coordinates, so downstream code can extract
   per-point timeseries/capacity data from the saved networks.
 
-make_furthest_point_fn builds a `mga_surveyor.runner.FurthestPointFn` (the
-support-function oracle `runner.bootstrap_box` needs) against a real,
-already-solved PyPSA network -- the PyPSA-side half of plugging a real system
-model into `mga_surveyor`'s inner/outer approximation engine instead of only
-`mga_surveyor.tests.lp_region`'s explicit-LP test region. The other half,
-a `ClosestFeasiblePointFn` for `runner.run`'s main loop, is still under
+make_furthest_point_fn builds a batched support-function query against a
+real, already-solved PyPSA network -- the PyPSA-side half of plugging a real
+system model into `mga_surveyor`'s inner/outer approximation engine instead
+of only `mga_surveyor.tests.lp_region`'s explicit-LP test region. Unlike
+`mga_surveyor.runner.FurthestPointFn` (one direction in, one point out, e.g.
+`runner.bootstrap_box`'s per-direction loop), it takes several directions at
+once and solves them in parallel via `optimize_mga_in_multiple_directions`'s
+multiprocessing.Pool -- e.g. call it once with all `2k` box directions
+instead of looping a single-direction query `2k` times. The other oracle
+half, a `ClosestFeasiblePointFn` for `runner.run`'s main loop, is still under
 construction -- PyPSA has no equivalent query built in (only direction-based
-ones), so it has to be written from scratch here.
+ones), so it has to be written from scratch here. Unlike the box directions,
+`run`'s loop can't be batched the same way: each iteration's query depends
+on the previous iteration's result.
 """
 from __future__ import annotations
 
@@ -37,10 +43,8 @@ import pandas as pd
 from pypsa._options import options
 from pypsa.optimization.mga import _convert_to_dict, _worker_init
 
-from .runner import FurthestPointFn
-
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from pypsa import Network
 
@@ -59,59 +63,88 @@ __all__ = [
 def make_furthest_point_fn(
     n: Network,
     dimensions: dict,
+    output_dir: str | Path | None = None,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
     slack: float = 0.05,
     model_kwargs: dict | None = None,
+    max_parallel: int = 4,
     **kwargs: Any,
-) -> FurthestPointFn:
-    """Build a `FurthestPointFn` (support-function query) against a real,
-    already-solved PyPSA network `n`.
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Build a batched support-function query against a real,
+    already-solved PyPSA network `n`, backed by
+    `optimize_mga_in_multiple_directions`'s `multiprocessing.Pool` so that
+    passing several directions at once solves them in parallel.
 
-    The returned callable answers "the point in `n`'s own near-optimal
-    feasible region maximizing `direction @ x`" in the `dimensions` space --
-    exactly what `mga_surveyor.runner.bootstrap_box` needs to seed a
-    `Method`'s initial inner/outer approximation. It's a thin adapter around
-    `optimize_mga_in_direction(..., resolve_main_objective=False)`: bootstrapping
-    only needs the projected point, not the pinned re-solve/duals that flag
-    skips (see that function's docstring for exactly what it skips and why).
+    The returned callable takes `directions` -- an `(n_directions, k)` array
+    (a single 1D `(k,)` direction is promoted to a length-1 batch) -- and
+    returns the corresponding `(n_directions, k)` array of points in `n`'s
+    own near-optimal feasible region, each maximizing its direction. E.g.
+    call it once with all `2k` box directions
+    (`np.vstack([np.eye(k), -np.eye(k)])`) to bootstrap a `Method`, instead
+    of looping a single-direction query `2k` times.
 
-    `dimensions`' key order fixes the axis order of both the `direction`
-    array the returned callable takes and the `point` array it returns --
-    the same fixed `k`-dimensional order `mga_surveyor` assumes throughout
-    (see `mga_surveyor.common`).
+    `dimensions`' key order fixes the axis order of both `directions` and
+    the returned points -- the same fixed `k`-dimensional order
+    `mga_surveyor` assumes throughout (see `mga_surveyor.common`).
 
-    Rebuilds the linopy model from scratch on every call, exactly like
-    PyPSA's own per-direction MGA methods already do (see
-    `optimize_mga_in_direction`, `optimize_mga_in_multiple_directions`) --
-    consistent with, not a regression against, established precedent, and
-    `bootstrap_box` only calls this `2k` times (once per box direction), far
-    too few to justify the added complexity of a persistent model (contrast
-    `gurobi_projection`/`highs_projection`, called once per outer vertex on
-    every iteration, where that complexity pays for itself).
+    Every call passes `resolve_main_objective=False` through to
+    `optimize_mga_in_multiple_directions`: only the projected points are
+    needed here, not the pinned re-solve/duals that flag skips (see
+    `optimize_mga_in_direction`'s docstring).
 
-    :raises RuntimeError: If a direction's solve does not reach `status="ok"`
-        -- see `optimize_mga_in_direction` for why that's treated as a real
-        failure worth raising on, not a sentinel to return.
+    Parameters
+    ----------
+    output_dir : str | Path | None
+        Where each direction's solved network gets exported (required by
+        `optimize_mga_in_multiple_directions`). If None (the default), a
+        fresh temporary directory is used per call and deleted afterward --
+        pass your own to keep those networks around instead.
+
+    :raises RuntimeError: If any direction doesn't come back solved.
+        `optimize_mga_in_multiple_directions` itself already raises on a
+        genuine solve failure (see its docstring for why a well-formed
+        direction should never actually fail); the only other way to come
+        back short is a worker being interrupted (e.g. Ctrl+C), treated the
+        same as a failure here since a partial batch isn't useful to the
+        caller.
     """
     keys = list(dimensions.keys())
 
-    def furthest_point(direction: np.ndarray) -> np.ndarray:
-        direction_dict = dict(zip(keys, np.asarray(direction, dtype=float).tolist()))
-        _status, _condition, coordinates, _duals = optimize_mga_in_direction(
-            n,
-            direction=direction_dict,
-            dimensions=dimensions,
-            snapshots=snapshots,
-            multi_investment_periods=multi_investment_periods,
-            slack=slack,
-            model_kwargs=model_kwargs,
-            resolve_main_objective=False,
-            **kwargs,
-        )
-        return coordinates.loc[keys].to_numpy(dtype=float)
+    def furthest_points(directions: np.ndarray) -> np.ndarray:
+        directions = np.atleast_2d(np.asarray(directions, dtype=float))
+        directions_df = pd.DataFrame(directions, columns=keys)
 
-    return furthest_point
+        cleanup_output_dir = output_dir is None
+        tmp_dir = tempfile.TemporaryDirectory(prefix="mga_surveyor_furthest_points_") if cleanup_output_dir else None
+        try:
+            _dirs_df, coordinates_df, _duals_df = optimize_mga_in_multiple_directions(
+                n,
+                directions=directions_df,
+                dimensions=dimensions,
+                output_dir=tmp_dir.name if cleanup_output_dir else output_dir,
+                snapshots=snapshots,
+                multi_investment_periods=multi_investment_periods,
+                slack=slack,
+                model_kwargs=model_kwargs,
+                resolve_main_objective=False,
+                max_parallel=max_parallel,
+                **kwargs,
+            )
+        finally:
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
+
+        if len(coordinates_df) != len(directions):
+            msg = (
+                f"Expected all {len(directions)} directions to solve successfully, "
+                f"got {len(coordinates_df)}."
+            )
+            raise RuntimeError(msg)
+        # coordinates_df is indexed 0..n-1 (default point_ids), same row order as `directions`.
+        return coordinates_df.loc[range(len(directions)), keys].to_numpy(dtype=float)
+
+    return furthest_points
 
 
 def optimize_mga_in_direction(
@@ -253,6 +286,7 @@ def _solve_single_direction(
     multi_investment_periods: bool,
     slack: float,
     model_kwargs: dict,
+    resolve_main_objective: bool,
     kwargs: dict,
     output_fn: str,
 ) -> tuple[dict, None, None, None] | tuple[dict, pd.Series, pd.Series, float]:
@@ -279,6 +313,7 @@ def _solve_single_direction(
             multi_investment_periods=multi_investment_periods,
             slack=slack,
             model_kwargs=model_kwargs,
+            resolve_main_objective=resolve_main_objective,
             **kwargs,
         )
         n.export_to_netcdf(output_fn)
@@ -303,6 +338,7 @@ def optimize_mga_in_multiple_directions(
     multi_investment_periods: bool = False,
     slack: float = 0.05,
     model_kwargs: dict | None = None,
+    resolve_main_objective: bool = True,
     max_parallel: int = 4,
     **kwargs: Any,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -341,6 +377,12 @@ def optimize_mga_in_multiple_directions(
         exists are not re-solved; only the still-missing directions are run. Useful
         for resuming an interrupted or incrementally-extended dataset generation
         run. Requires `point_ids` to be stable across runs.
+    resolve_main_objective : bool
+        Forwarded to `optimize_mga_in_direction` in every worker (see its
+        docstring). Defaults to True for this function's usual dataset-
+        generation use case, which needs `duals_df`; pass False for a
+        cheaper, duals-free batch (e.g. `make_furthest_point_fn`, which
+        only needs `coordinates_df`).
 
     Returns
     -------
@@ -413,6 +455,7 @@ def optimize_mga_in_multiple_directions(
                             multi_investment_periods,
                             slack,
                             model_kwargs,
+                            resolve_main_objective,
                             kwargs,
                             str(output_fns[pid]),
                         )
