@@ -14,6 +14,15 @@ as-is, with two behavioral differences:
   ``output_dir/mga_result_{i}.nc`` and appends the objective value (capex + opex,
   labeled ``obj_label``) to the returned coordinates, so downstream code can extract
   per-point timeseries/capacity data from the saved networks.
+
+make_furthest_point_fn builds a `mga_surveyor.runner.FurthestPointFn` (the
+support-function oracle `runner.bootstrap_box` needs) against a real,
+already-solved PyPSA network -- the PyPSA-side half of plugging a real system
+model into `mga_surveyor`'s inner/outer approximation engine instead of only
+`mga_surveyor.tests.lp_region`'s explicit-LP test region. The other half,
+a `ClosestFeasiblePointFn` for `runner.run`'s main loop, is still under
+construction -- PyPSA has no equivalent query built in (only direction-based
+ones), so it has to be written from scratch here.
 """
 from __future__ import annotations
 
@@ -23,9 +32,12 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 from pypsa._options import options
 from pypsa.optimization.mga import _convert_to_dict, _worker_init
+
+from .runner import FurthestPointFn
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,9 +50,78 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 __all__ = [
+    "make_furthest_point_fn",
     "optimize_mga_in_direction",
     "optimize_mga_in_multiple_directions",
 ]
+
+
+def make_furthest_point_fn(
+    n: Network,
+    dimensions: dict,
+    snapshots: Sequence | None = None,
+    multi_investment_periods: bool = False,
+    slack: float = 0.05,
+    model_kwargs: dict | None = None,
+    **kwargs: Any,
+) -> FurthestPointFn:
+    """Build a `FurthestPointFn` (support-function query) against a real,
+    already-solved PyPSA network `n`.
+
+    The returned callable answers "the point in `n`'s own near-optimal
+    feasible region maximizing `direction @ x`" in the `dimensions` space --
+    exactly what `mga_surveyor.runner.bootstrap_box` needs to seed a
+    `Method`'s initial inner/outer approximation. Structurally this is
+    PyPSA's own `optimize_mga_in_direction` (see this module's and
+    `optimize_mga_in_direction`'s docstrings), stripped down to just the
+    point: no pinned re-solve, no duals -- bootstrapping only needs the
+    projected coordinates.
+
+    `dimensions`' key order fixes the axis order of both the `direction`
+    array the returned callable takes and the `point` array it returns --
+    the same fixed `k`-dimensional order `mga_surveyor` assumes throughout
+    (see `mga_surveyor.common`).
+
+    Rebuilds the linopy model from scratch on every call, exactly like
+    PyPSA's own per-direction MGA methods already do (see
+    `optimize_mga_in_direction`, `optimize_mga_in_multiple_directions`) --
+    consistent with, not a regression against, established precedent, and
+    `bootstrap_box` only calls this `2k` times (once per box direction), far
+    too few to justify the added complexity of a persistent model (contrast
+    `gurobi_projection`/`highs_projection`, called once per outer vertex on
+    every iteration, where that complexity pays for itself).
+
+    :raises RuntimeError: If a direction's solve does not reach `status="ok"`
+        -- see `optimize_mga_in_direction` for why that's treated as a real
+        failure worth raising on, not a sentinel to return.
+    """
+    keys = list(dimensions.keys())
+    if model_kwargs is None:
+        model_kwargs = options.params.optimize.model_kwargs.copy()
+    if snapshots is None:
+        snapshots = n.snapshots
+
+    def furthest_point(direction: np.ndarray) -> np.ndarray:
+        direction_dict = dict(zip(keys, np.asarray(direction, dtype=float).tolist()))
+
+        m = n.optimize.create_model(
+            snapshots=snapshots,
+            multi_investment_periods=multi_investment_periods,
+            **model_kwargs,
+        )
+        n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
+        m.objective = -sum(
+            direction_dict[key] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
+            for key in keys
+        )
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = f"MGA solve in direction {direction_dict} failed: status={status}, condition={condition}"
+            raise RuntimeError(msg)
+        coordinates = n.optimize.project_solved(dimensions)
+        return coordinates.loc[keys].to_numpy(dtype=float)
+
+    return furthest_point
 
 
 def optimize_mga_in_direction(

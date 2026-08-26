@@ -30,9 +30,10 @@ testing), or write your own bootstrap/loop.
 `pypsa_ext` is the PyPSA-side adapter (still under construction) meant to
 supply `runner.FurthestPointFn`/`ClosestFeasiblePointFn` against a real
 PyPSA network's own solve, so the engine above can run against an actual
-system model instead of only a test example; for now it still just wraps
-PyPSA's own built-in MGA (`optimize_mga_in_direction`/
-`optimize_mga_in_multiple_directions`).
+system model instead of only a test example. `make_furthest_point_fn`
+supplies the former; a `ClosestFeasiblePointFn` builder is still to come.
+It also still wraps PyPSA's own built-in MGA (`optimize_mga_in_direction`/
+`optimize_mga_in_multiple_directions`), independently of the engine above.
 """
 from .common import VALID_NORMS, gaps
 from .gurobi_projection import closest_point_on_hull
@@ -48,12 +49,12 @@ from .methods import (
     CddMethod, cdd_vertices_of,
 )
 from .runner import run, bootstrap_box
-from .pypsa_ext import optimize_mga_in_direction, optimize_mga_in_multiple_directions
+from .pypsa_ext import make_furthest_point_fn, optimize_mga_in_direction, optimize_mga_in_multiple_directions
 
 __all__ = [
     "VALID_NORMS", "closest_point_on_hull", "gaps",
     "closest_point_on_hull_highs", "VALID_NORMS_HIGHS",
     "Method", "VertexEnumMethod", "BilevelMethod", "solve_farthest_outer_point_milp",
     "CddMethod", "cdd_vertices_of", "run", "bootstrap_box",
-    "optimize_mga_in_direction", "optimize_mga_in_multiple_directions",
+    "make_furthest_point_fn", "optimize_mga_in_direction", "optimize_mga_in_multiple_directions",
 ]

@@ -1,8 +1,15 @@
+import numpy as np
 import pandas as pd
 import pypsa
 import pytest
 
-from mga_surveyor import optimize_mga_in_direction, optimize_mga_in_multiple_directions
+from mga_surveyor import (
+    VertexEnumMethod,
+    bootstrap_box,
+    make_furthest_point_fn,
+    optimize_mga_in_direction,
+    optimize_mga_in_multiple_directions,
+)
 
 DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},
@@ -49,6 +56,56 @@ def test_optimize_mga_in_direction_matches_projected_coordinates():
     # pinned (direction == 0), so no constraint was added for it and its dual is 0.
     assert set(duals.index) == {"wind", "solar"}
     assert duals["solar"] == 0.0
+
+
+def test_make_furthest_point_fn_matches_optimize_mga_in_direction():
+    n = _build_network()
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+
+    # keys order fixes the array axes: DIMENSIONS = {"wind": ..., "solar": ...}
+    direction = np.array([-1.0, 0.0])
+    point = furthest_point(direction)
+
+    # Cross-check against optimize_mga_in_direction's own direction-objective
+    # solve (before its pinned re-solve, which shouldn't move the coordinates
+    # at all -- that's the whole point of pinning). Same direction, same
+    # network state (a fresh, independently solved network, so the two calls
+    # don't interfere with each other's linopy model / n.model state).
+    n2 = _build_network()
+    direction_dict = dict(zip(DIMENSIONS.keys(), direction.tolist()))
+    _, _, coordinates, _ = optimize_mga_in_direction(
+        n2, direction=direction_dict, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
+    )
+    np.testing.assert_allclose(point, coordinates.loc[list(DIMENSIONS.keys())].to_numpy(), atol=1e-4)
+
+
+def test_make_furthest_point_fn_direction_pushes_to_bound():
+    n = _build_network()
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+
+    # direction=[-1, 0] maximizes -wind (i.e. minimizes wind) -- the furthest
+    # point in that direction should have wind capacity at or below the
+    # network's own cost-optimal wind capacity.
+    point = furthest_point(np.array([-1.0, 0.0]))
+    assert point[0] <= n.generators.at["wind", "p_nom_opt"] + 1e-6
+
+    # direction=[1, 0] maximizes wind -- at or above the optimum instead.
+    point = furthest_point(np.array([1.0, 0.0]))
+    assert point[0] >= n.generators.at["wind", "p_nom_opt"] - 1e-6
+
+
+def test_make_furthest_point_fn_with_bootstrap_box():
+    """End-to-end: make_furthest_point_fn is a valid FurthestPointFn for
+    runner.bootstrap_box, seeding a real Method against a real network."""
+    n = _build_network()
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
+
+    method = VertexEnumMethod(k=2, norm="linf", backend="highs")
+    bootstrap_box(method, furthest_point, k=2)
+
+    assert method.outer_vertices is not None
+    assert len(method.outer_vertices) > 0
+    assert method.max_gap() >= 0.0
 
 
 def test_optimize_mga_in_multiple_directions_exports_nc_files(tmp_path):
