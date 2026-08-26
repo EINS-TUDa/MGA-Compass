@@ -2,7 +2,7 @@ import pandas as pd
 import pypsa
 import pytest
 
-from mga_compass.pypsa_ext import optimize_mga_in_direction, optimize_mga_in_multiple_directions
+from mga_surveyor import optimize_mga_in_direction, optimize_mga_in_multiple_directions
 
 DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},

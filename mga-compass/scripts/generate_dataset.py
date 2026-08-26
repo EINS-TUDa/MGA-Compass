@@ -1,9 +1,11 @@
 """Generate the MGA dataset consumed by the MGA Compass server.
 
 Solves a PyPSA example network, runs Modelling-to-Generate-Alternatives (MGA) across
-several sub-optimality (slack) levels via mga_compass, and writes the production-ready
+several sub-optimality (slack) levels via mga_surveyor, and writes the production-ready
 files consumed by the server (points.pkl, duals.pkl, installed_capacity.pkl,
 generation_over_snapshots.pkl).
+
+Requires the "scripts" extra (`uv sync --extra scripts`) for mga-surveyor/pypsa/netCDF4/gurobipy.
 
 Run with: uv run python scripts/generate_dataset.py --slack-levels 0.02 0.05 0.08
 """
@@ -20,7 +22,7 @@ import xarray as xr
 from netCDF4 import Dataset
 from pypsa.optimization.mga import generate_directions_halton
 
-from mga_compass import optimize_mga_in_multiple_directions
+from mga_surveyor import optimize_mga_in_multiple_directions
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 

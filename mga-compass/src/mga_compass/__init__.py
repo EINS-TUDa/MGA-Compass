@@ -33,7 +33,6 @@ from .schemes import (
     ConstraintChange,
 )
 from .solvers import default_solver_options
-from .pypsa_ext import optimize_mga_in_direction, optimize_mga_in_multiple_directions
 
 __all__ = [
     "configure_solver_logging",
@@ -71,6 +70,4 @@ __all__ = [
     "LowerBoundPoint",
     "ConstraintChange",
     "default_solver_options",
-    "optimize_mga_in_direction",
-    "optimize_mga_in_multiple_directions",
 ]

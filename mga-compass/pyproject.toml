@@ -19,14 +19,22 @@ requires-python = ">=3.11"
 dependencies = [
     "linopy>=0.6.7",
     "pandera>=0.31.1",
-    "pypsa>=1.2.0",
     "pandas",
     "numpy",
     "xarray",
     "pydantic",
-    "netCDF4",
-    "gurobipy>=13.0.2",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
+# Only needed by scripts/generate_dataset.py, which uses `mga-surveyor` to solve a
+# PyPSA network's near-optimal space and produce the dataset the server reads.
+scripts = [
+    "mga-surveyor",
+    "pypsa>=1.2.0",
+    "netCDF4",
+    "gurobipy>=13.0.2",
+]
+
+[tool.uv.sources]
+mga-surveyor = { path = "../mga-surveyor" }
