@@ -71,11 +71,10 @@ def make_furthest_point_fn(
     The returned callable answers "the point in `n`'s own near-optimal
     feasible region maximizing `direction @ x`" in the `dimensions` space --
     exactly what `mga_surveyor.runner.bootstrap_box` needs to seed a
-    `Method`'s initial inner/outer approximation. Structurally this is
-    PyPSA's own `optimize_mga_in_direction` (see this module's and
-    `optimize_mga_in_direction`'s docstrings), stripped down to just the
-    point: no pinned re-solve, no duals -- bootstrapping only needs the
-    projected coordinates.
+    `Method`'s initial inner/outer approximation. It's a thin adapter around
+    `optimize_mga_in_direction(..., resolve_main_objective=False)`: bootstrapping
+    only needs the projected point, not the pinned re-solve/duals that flag
+    skips (see that function's docstring for exactly what it skips and why).
 
     `dimensions`' key order fixes the axis order of both the `direction`
     array the returned callable takes and the `point` array it returns --
@@ -96,29 +95,20 @@ def make_furthest_point_fn(
         failure worth raising on, not a sentinel to return.
     """
     keys = list(dimensions.keys())
-    if model_kwargs is None:
-        model_kwargs = options.params.optimize.model_kwargs.copy()
-    if snapshots is None:
-        snapshots = n.snapshots
 
     def furthest_point(direction: np.ndarray) -> np.ndarray:
         direction_dict = dict(zip(keys, np.asarray(direction, dtype=float).tolist()))
-
-        m = n.optimize.create_model(
+        _status, _condition, coordinates, _duals = optimize_mga_in_direction(
+            n,
+            direction=direction_dict,
+            dimensions=dimensions,
             snapshots=snapshots,
             multi_investment_periods=multi_investment_periods,
-            **model_kwargs,
+            slack=slack,
+            model_kwargs=model_kwargs,
+            resolve_main_objective=False,
+            **kwargs,
         )
-        n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
-        m.objective = -sum(
-            direction_dict[key] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
-            for key in keys
-        )
-        status, condition = n.optimize.solve_model(**kwargs)
-        if status != "ok":
-            msg = f"MGA solve in direction {direction_dict} failed: status={status}, condition={condition}"
-            raise RuntimeError(msg)
-        coordinates = n.optimize.project_solved(dimensions)
         return coordinates.loc[keys].to_numpy(dtype=float)
 
     return furthest_point
@@ -132,12 +122,14 @@ def optimize_mga_in_direction(
     multi_investment_periods: bool = False,
     slack: float = 0.05,
     model_kwargs: dict | None = None,
+    resolve_main_objective: bool = True,
     **kwargs: Any,
 ) -> tuple[str, str, pd.Series, pd.Series]:
-    """Run MGA in a given direction, then re-solve pinned to the resulting coordinates.
+    """Run MGA in a given direction, optionally re-solving pinned to the resulting coordinates.
 
-    Same as pypsa's `n.optimize.optimize_mga_in_direction`, except after finding the
-    MGA point's projected coordinates, the network is re-solved with the original
+    Same as pypsa's `n.optimize.optimize_mga_in_direction`, except (when
+    `resolve_main_objective` is True, the default) after finding the MGA
+    point's projected coordinates, the network is re-solved with the original
     objective under added equality constraints fixing those coordinates exactly.
 
     Both solves are guaranteed feasible for well-formed inputs: the budget constraint
@@ -146,6 +138,19 @@ def optimize_mga_in_direction(
     non-"ok" status here means either a bug (e.g. `direction`/`dimensions` mismatch)
     or a genuine solver/numerical problem — either way this raises rather than
     returning a sentinel, so callers don't silently lose data points.
+
+    Parameters
+    ----------
+    resolve_main_objective : bool
+        If True (default), re-solve the original cost objective pinned to the
+        MGA point's coordinates, so the network ends up at a feasible solution
+        matching them exactly and `duals` holds the shadow price of each
+        pinned-coordinate constraint. If False, skip that second solve
+        entirely and return right after the direction-objective solve --
+        `duals` is then all-zero (no pinning constraints were ever added, so
+        there's nothing to price). Set this to False when only the projected
+        coordinates are needed and the extra solve isn't worth paying for,
+        e.g. a support-function query like `make_furthest_point_fn`'s.
 
     Returns
     -------
@@ -156,7 +161,8 @@ def optimize_mga_in_direction(
     duals : pd.Series
         Shadow price of each dimension's pinned-coordinate constraint, indexed by
         the same keys as `dimensions`. Dimensions with `direction[key] == 0` (no
-        constraint was added for them) get 0.0.
+        constraint was added for them) get 0.0 -- as does every dimension when
+        `resolve_main_objective` is False (no constraints were added at all).
 
     """
     if model_kwargs is None:
@@ -182,11 +188,12 @@ def optimize_mga_in_direction(
         **model_kwargs,
     )
 
-    # m.objective is already populated by create_model (the network's normal cost
-    # objective) — no need to solve first just to capture it. n's component tables
-    # (read by _add_near_opt_constraint below) still hold the values from the
-    # network's prior n.optimize() call, since m hasn't been solved yet.
-    main_obj = m.objective
+    if resolve_main_objective:
+        # m.objective is already populated by create_model (the network's normal cost
+        # objective) — no need to solve first just to capture it. n's component tables
+        # (read by _add_near_opt_constraint below) still hold the values from the
+        # network's prior n.optimize() call, since m hasn't been solved yet.
+        main_obj = m.objective
 
     n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
 
@@ -200,6 +207,14 @@ def optimize_mga_in_direction(
         msg = f"MGA solve in direction {direction} failed: status={status}, condition={condition}"
         raise RuntimeError(msg)
     coordinates = n.optimize.project_solved(dimensions)
+
+    n.meta["slack"] = slack
+    n.meta["dimensions"] = _convert_to_dict(dimensions)
+    n.meta["direction"] = direction
+
+    if not resolve_main_objective:
+        duals = pd.Series(0.0, index=list(dimensions.keys()))
+        return status, condition, coordinates, duals
 
     pinned_keys = [key for key in dimensions.keys() if direction[key] != 0]
     for key in pinned_keys:
@@ -226,10 +241,6 @@ def optimize_mga_in_direction(
     duals = pd.Series(
         {key: float(m.constraints[f"coord_{key}"].dual) for key in pinned_keys}
     ).reindex(dimensions.keys(), fill_value=0.0)
-
-    n.meta["slack"] = slack
-    n.meta["dimensions"] = _convert_to_dict(dimensions)
-    n.meta["direction"] = direction
 
     return status, condition, coordinates, duals
 

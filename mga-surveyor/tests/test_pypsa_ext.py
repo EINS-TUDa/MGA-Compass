@@ -58,6 +58,29 @@ def test_optimize_mga_in_direction_matches_projected_coordinates():
     assert duals["solar"] == 0.0
 
 
+def test_optimize_mga_in_direction_resolve_main_objective_false_skips_pin_resolve():
+    n = _build_network()
+    optimal_wind = n.generators.at["wind", "p_nom_opt"]
+
+    status, condition, coordinates, duals = optimize_mga_in_direction(
+        n, direction={"wind": -1, "solar": 0}, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
+        resolve_main_objective=False,
+    )
+    assert status == "ok"
+    assert condition == "optimal"
+    # no pinning constraints were ever added, so every dual is 0 -- not just solar's
+    assert (duals == 0.0).all()
+    # No pin-resolve happened, so n is left wherever the one (direction-
+    # objective) solve put it -- solve_model writes solution values back onto
+    # n's component tables regardless of which objective was solved. That's
+    # not necessarily the network's own cost-optimal point (that's exactly
+    # what the skipped pin-resolve would otherwise restore/preserve): the
+    # MGA direction pushes wind down within the slack budget, so it ends up
+    # at or below the original optimum, not equal to it.
+    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(coordinates["wind"], abs=1e-4)
+    assert coordinates["wind"] <= optimal_wind + 1e-6
+
+
 def test_make_furthest_point_fn_matches_optimize_mga_in_direction():
     n = _build_network()
     furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs")
