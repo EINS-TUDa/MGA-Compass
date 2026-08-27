@@ -40,16 +40,28 @@ paying for a full model rebuild every time. A separate, independent batch
 path exists for callers issuing several targets in one call (e.g. a
 `Method.find_trial_point` returning more than one worst point at once):
 that path follows the same design as `optimize_mga_in_multiple_directions`,
-at the same granularity -- one `pool.starmap` task per target, not per
-worker-assigned chunk, matching `_solve_single_direction`'s one-task-per-
-direction exactly rather than trying to amortize the model-build cost
-across multiple targets. Worth it since a closest-point solve is expensive
-regardless of that rebuild cost (confirmed: linopy has no
-warm-start/persistent-solve path, so every solve re-exports and re-solves
-the whole problem from scratch every time), so spreading the batch across a
-real `multiprocessing.Pool` is worth the process-startup overhead. Only
-`l1`/`linf` are supported for now (LP-representable, HiGHS-compatible);
-`l2` would need a quadratic objective, Gurobi-only like everywhere else L2
+at the same granularity -- one `pool.starmap` task per target, not a
+pre-split chunk, matching `_solve_single_direction`'s one-task-per-
+direction, letting the Pool's own queue decide which worker handles which
+target rather than fixing that assignment upfront. Unlike
+`_solve_single_direction` (which does pay a fresh model rebuild every
+task, since each direction needs a different objective anyway), the
+closest-point model is IDENTICAL across every target in one batch call --
+only the RHS differs -- so each worker process builds the solver exactly
+once, before it is dispatched any tasks at all, via
+`_init_closest_point_worker` (this batch `Pool`'s own `initializer`, per
+`multiprocessing.Pool`'s `initializer`/`initargs`), and
+`_solve_closest_point_target` then just reuses that cached solver (see
+`_worker_closest_point_solver`) for every task that worker happens to pick
+up, rather than rebuilding per task. Worth spreading across a real
+`multiprocessing.Pool` at all (instead of solving the whole batch serially
+in one process) since a closest-point solve is expensive regardless of the
+build cost (confirmed: linopy has no warm-start/persistent-solve path, so
+every solve re-solves the whole problem from scratch every time) -- the
+process-startup overhead pays for itself even before counting the
+model-build savings above. Only `l1`/`linf` are supported for now
+(LP-representable, HiGHS-compatible); `l2` would need a quadratic
+objective, Gurobi-only like everywhere else L2
 shows up in this package.
 
 Both multiprocessing.Pool paths above (this module's and
@@ -249,8 +261,8 @@ def _build_closest_point_solver(
     """Build the closest-point model against `n` exactly once, and return a
     single-target `(point, normal)` solver reusing it -- the shared core
     both `make_closest_point_fn` (in-process, for `runner.run`'s
-    single-target calls) and `_solve_closest_point_target` (one per worker
-    process per target, for the batch path) are built on.
+    single-target calls) and `_init_closest_point_worker` (once per worker
+    process, for the batch path) are built on.
 
     Model: one residual variable per dimension, `r_key == target_key -
     dim_key(x)` i.e. `r_key + dim_key(x) == target_key` (RHS starts at 0,
@@ -328,7 +340,21 @@ def _build_closest_point_solver(
     return solve_one
 
 
-def _solve_closest_point_target(
+#: Each worker process's own closest-point solver, built once by
+#: `_init_closest_point_worker` (a `multiprocessing.Pool` `initializer` --
+#: runs once per worker process, before that worker is handed any tasks)
+#: and reused by `_solve_closest_point_target` for every task that worker
+#: goes on to handle. Module-level, not per-call, is fine here the same way
+#: it would be for any other `initializer`-populated worker state: each
+#: `make_closest_point_fn` batch call creates a brand-new `Pool` (so
+#: brand-new worker processes, each running the initializer exactly once
+#: before its first task) and every task within one such call is against
+#: the exact same `(n, dimensions, norm, slack, ...)` -- only `target`
+#: differs -- so there's no risk of a stale/wrong solver being reused.
+_worker_closest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None
+
+
+def _init_closest_point_worker(
     n: Network,
     dimensions: dict,
     norm: str,
@@ -337,32 +363,44 @@ def _solve_closest_point_target(
     multi_investment_periods: bool,
     model_kwargs: dict | None,
     kwargs: dict,
-    target: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Solve a single target for parallel execution (helper for
-    `make_closest_point_fn`'s batch path) -- same granularity as
-    `_solve_single_direction`: one `pool.starmap` task per target, not per
-    chunk, matching it deliberately rather than amortizing the model-build
-    cost across multiple targets landing on the same worker.
-    `optimize_mga_in_multiple_directions` doesn't do that amortization
-    either (`_solve_single_direction` rebuilds fresh every call, even when
-    the same worker process ends up handling several directions over its
-    lifetime), so this stays consistent with that rather than being a
-    special case.
+) -> None:
+    """`Pool(initializer=...)` for `make_closest_point_fn`'s batch path --
+    runs once per worker process, before that worker is dispatched any
+    tasks (see `multiprocessing.Pool`'s `initializer`/`initargs`), rather
+    than being built lazily on a task's first arrival. Does the same two
+    things `initializer=_worker_init` alone does elsewhere in this module
+    (ignore SIGINT in the worker, quiet its logging -- see `_worker_init`),
+    plus builds this worker's closest-point solver once via
+    `_build_closest_point_solver`, caching it in
+    `_worker_closest_point_solver` for `_solve_closest_point_target` to
+    reuse across every task this worker process ends up handling.
 
-    `n` is passed directly (multiprocessing pickles a fresh, independent
-    copy per task) rather than reloaded from a file -- see this module's
-    docstring for why that's now the right call on PyPSA >=1.3.0. Builds
-    the closest-point model via `_build_closest_point_solver` and solves
-    `target` against it.
-
-    Real failures propagate and abort the whole batch (via `pool.starmap`),
-    same policy as `_solve_single_direction` -- see its docstring for why.
+    Also means `n` (and the rest of this closure's fixed arguments) is
+    pickled once per *worker* (via `initargs`) rather than once per
+    *target* (via every task's `pool.starmap` args) -- fewer, not more,
+    since `n_workers <= len(target_2d)` always.
     """
-    solve_one = _build_closest_point_solver(
+    _worker_init()
+    global _worker_closest_point_solver
+    _worker_closest_point_solver = _build_closest_point_solver(
         n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
     )
-    return solve_one(target)
+
+
+def _solve_closest_point_target(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Solve a single target for parallel execution (helper for
+    `make_closest_point_fn`'s batch path) -- one `pool.starmap` task per
+    target, not per pre-split chunk, same granularity as
+    `_solve_single_direction`'s one task per direction: the Pool's own work
+    queue decides which worker handles which target, rather than us fixing
+    that assignment upfront.
+
+    Solves directly against this worker's already-built solver -- see
+    `_init_closest_point_worker`, the `Pool` initializer that builds it
+    once per worker process before any tasks are dispatched, so no per-task
+    build (or lazy build-on-first-task check) happens here at all.
+    """
+    return _worker_closest_point_solver(target)
 
 
 def make_closest_point_fn(
@@ -429,15 +467,19 @@ def make_closest_point_fn(
           `pool.starmap` task (`_solve_closest_point_target`), exactly the
           same granularity `optimize_mga_in_multiple_directions` uses (one
           task per direction, not per chunk) -- the Pool's own work queue
-          spreads the targets across `min(max_parallel, n_targets)`
-          worker processes. Worth doing because a closest-point solve is
-          genuinely expensive (linopy has no warm-start/persistent-solve
-          path; confirmed, it logs a fresh "Writing time" on every
-          `solve_model()` call even when only an RHS changed, so every
-          solve re-solves the whole problem regardless), so it's worth
-          paying the process-startup overhead and a fresh model-build per
-          target to get true parallel solving, rather than solving the
-          whole batch serially in one process.
+          spreads the targets across `min(max_parallel, n_targets)` worker
+          processes, each of which builds its own closest-point solver
+          exactly once, before it is handed any tasks at all (see
+          `_init_closest_point_worker`, this `Pool`'s `initializer`), and
+          reuses it across every task it happens to pick up. Worth spreading across
+          a `multiprocessing.Pool` at all because a closest-point solve is
+          genuinely expensive regardless of that build cost (linopy has no
+          warm-start/persistent-solve path; confirmed, it logs a fresh
+          "Writing time" on every `solve_model()` call even when only an
+          RHS changed, so every solve re-solves the whole problem
+          regardless), so true parallel solving is worth the
+          process-startup overhead, rather than solving the whole batch
+          serially in one process.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
@@ -457,18 +499,16 @@ def make_closest_point_fn(
             # rows across processes=min(max_parallel, len(target_2d)) workers
             # instead of pre-splitting into fixed chunks ourselves.
             n_workers = min(max_parallel, len(target_2d))
-            with get_context("spawn").Pool(processes=n_workers, initializer=_worker_init) as pool:
+            with get_context("spawn").Pool(
+                processes=n_workers,
+                initializer=_init_closest_point_worker,
+                initargs=(
+                    pristine_n, dimensions, norm, slack, snapshots,
+                    multi_investment_periods, model_kwargs, kwargs,
+                ),
+            ) as pool:
                 try:
-                    results = pool.starmap(
-                        _solve_closest_point_target,
-                        [
-                            (
-                                pristine_n, dimensions, norm, slack, snapshots,
-                                multi_investment_periods, model_kwargs, kwargs, row,
-                            )
-                            for row in target_2d
-                        ],
-                    )
+                    results = pool.starmap(_solve_closest_point_target, [(row,) for row in target_2d])
                 except Exception:
                     pool.terminate()
                     pool.join()
