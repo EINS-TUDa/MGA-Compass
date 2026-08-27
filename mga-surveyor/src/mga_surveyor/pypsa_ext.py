@@ -316,10 +316,18 @@ def make_closest_point_fn(
         corresponding `(n_targets, k)` arrays of points and normals.
 
         Solved as a plain sequential loop over `target`'s rows, reusing the
-        one persistent model built above (just an RHS update + re-solve per
-        row) -- unlike `make_furthest_point_fn`'s multiprocessing.Pool,
-        there's no per-direction `create_model` cost here to parallelize
-        away; each row is already cheap against a warm model.
+        one persistent model built above -- an RHS update + re-solve per
+        row, rather than `make_furthest_point_fn`'s multiprocessing.Pool
+        (there's no per-direction `create_model` cost here to parallelize
+        away). "Re-solve" is not a warm start, though: linopy has no
+        persistent-solve path (confirmed -- it logs a fresh "Writing time"
+        on every `solve_model()` call, even when only an RHS changed), so
+        each row still pays a full write-problem-out-and-invoke-the-solver
+        round trip, same as `highs_projection`'s docstring already notes
+        about linopy generally. Only the model *structure* (`create_model`,
+        `_add_near_opt_constraint`) is actually spared repeat cost here, not
+        the solve itself -- unlike `gurobi_projection`/`highs_projection`'s
+        genuinely persistent, in-memory, no-file-I/O solver objects.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
