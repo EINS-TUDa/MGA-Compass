@@ -141,6 +141,62 @@ def test_make_furthest_point_fn_bootstraps_method_directly():
     assert method.max_gap() >= 0.0
 
 
+def test_make_furthest_point_fn_reads_cache_instead_of_resolving(tmp_path):
+    n = _build_network()
+    cache_dir = tmp_path / "furthest_point_cache"
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, output_dir=cache_dir, slack=0.1, solver_name="highs", max_parallel=2,
+    )
+
+    direction = np.array([[-1.0, 0.0]])
+    first = furthest_point(direction, point_ids=[0])
+    cached_fn = cache_dir / "mga_result_0.nc"
+    assert cached_fn.exists()
+
+    # Tamper with the cached result's stashed coordinates -- a value no
+    # genuine solve of this direction could ever produce -- so getting it
+    # back on the next call proves the cache was actually read, not
+    # silently re-solved underneath.
+    cached_n = pypsa.Network(cached_fn)
+    cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.export_to_netcdf(cached_fn)
+
+    second = furthest_point(direction, point_ids=[0])
+    np.testing.assert_allclose(second, [[999.0, 999.0]])
+    assert not np.allclose(second, first)
+
+
+def test_make_furthest_point_fn_caches_alongside_new_directions(tmp_path):
+    n = _build_network()
+    cache_dir = tmp_path / "furthest_point_cache"
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, output_dir=cache_dir, slack=0.1, solver_name="highs", max_parallel=2,
+    )
+
+    directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
+    furthest_point(directions, point_ids=[0, 1])
+    assert {p.name for p in cache_dir.glob("mga_result_*.nc")} == {"mga_result_0.nc", "mga_result_1.nc"}
+
+    # Corrupt point 0's cache so a real re-solve vs. a cache read are
+    # unambiguously distinguishable, same trick as the test above.
+    cached_n = pypsa.Network(cache_dir / "mga_result_0.nc")
+    cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.export_to_netcdf(cache_dir / "mga_result_0.nc")
+
+    # point 0 repeats (should read the tampered cache); point 2 is new
+    # (should actually solve) -- one batched call mixing a cache hit and a
+    # cache miss.
+    directions2 = np.array([[-1.0, 0.0], [1.0, 0.0]])
+    second = furthest_point(directions2, point_ids=[0, 2])
+    assert {p.name for p in cache_dir.glob("mga_result_*.nc")} == {
+        "mga_result_0.nc", "mga_result_1.nc", "mga_result_2.nc",
+    }
+    # point 0: served from the tampered cache, not re-solved.
+    np.testing.assert_allclose(second[0], [999.0, 999.0])
+    # point 2: a genuine new solve, nowhere near the tampered sentinel value.
+    assert not np.allclose(second[1], [999.0, 999.0])
+
+
 def test_optimize_mga_in_multiple_directions_exports_nc_files(tmp_path):
     n = _build_network()
     directions = pd.DataFrame({"wind": [-1, 0], "solar": [0, -1]})

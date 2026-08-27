@@ -70,7 +70,7 @@ def make_furthest_point_fn(
     model_kwargs: dict | None = None,
     max_parallel: int = 4,
     **kwargs: Any,
-) -> Callable[[np.ndarray], np.ndarray]:
+) -> Callable[..., np.ndarray]:
     """Build a batched support-function query against a real,
     already-solved PyPSA network `n`, backed by
     `optimize_mga_in_multiple_directions`'s `multiprocessing.Pool` so that
@@ -93,17 +93,36 @@ def make_furthest_point_fn(
     needed here, not the pinned re-solve/duals that flag skips (see
     `optimize_mga_in_direction`'s docstring).
 
+    Caching: pass a real, persistent `output_dir` (one that already exists,
+    or should be created and kept) to cache each direction's result there
+    across separate calls -- a later call whose `point_ids` line up with an
+    already-solved `output_dir/mga_result_{point_id}.nc` reads that
+    direction's point straight off disk (via `n.meta["coordinates"]`,
+    stashed there for exactly this by `optimize_mga_in_direction`) instead
+    of re-solving it, on top of `optimize_mga_in_multiple_directions`'s own
+    `skip_existing` already skipping the solve itself. This is an exact,
+    ID-keyed cache, the same tradeoff `optimize_mga_in_multiple_directions`'s
+    `skip_existing` already documents: it's the CALLER's job to use a fresh
+    `output_dir` (or `point_ids`) whenever `dimensions`/`slack`/`n`'s own
+    state changes in a way that would make an old cached result wrong --
+    nothing here detects that automatically. `point_ids` defaults to
+    `range(len(directions))`, i.e. each direction's row position -- already
+    a stable, natural key for the common case of repeatedly calling this
+    with the same `2k` box directions built the same way every time.
+
     Parameters
     ----------
     output_dir : str | Path | None
-        Where each direction's solved network gets exported (required by
-        `optimize_mga_in_multiple_directions`). If None (the default), a
-        fresh temporary directory is used per call and deleted afterward --
-        pass your own to keep those networks around instead.
+        Where each direction's solved network gets exported, and (see
+        "Caching" above) where a later call reads already-solved directions
+        back from instead of re-solving. If None (the default), a fresh
+        temporary directory is used per call and deleted afterward -- no
+        caching is possible across separate calls in that case, only
+        (trivially) within a single call's own batch.
 
-    :raises RuntimeError: If any direction doesn't come back solved.
-        `optimize_mga_in_multiple_directions` itself already raises on a
-        genuine solve failure (see its docstring for why a well-formed
+    :raises RuntimeError: If any direction doesn't come back solved or
+        cached. `optimize_mga_in_multiple_directions` itself already raises
+        on a genuine solve failure (see its docstring for why a well-formed
         direction should never actually fail); the only other way to come
         back short is a worker being interrupted (e.g. Ctrl+C), treated the
         same as a failure here since a partial batch isn't useful to the
@@ -111,18 +130,26 @@ def make_furthest_point_fn(
     """
     keys = list(dimensions.keys())
 
-    def furthest_points(directions: np.ndarray) -> np.ndarray:
+    def furthest_points(directions: np.ndarray, point_ids: Sequence[Any] | None = None) -> np.ndarray:
         directions = np.atleast_2d(np.asarray(directions, dtype=float))
         directions_df = pd.DataFrame(directions, columns=keys)
+        if point_ids is None:
+            point_ids = list(range(len(directions)))
 
-        cleanup_output_dir = output_dir is None
-        tmp_dir = tempfile.TemporaryDirectory(prefix="mga_surveyor_furthest_points_") if cleanup_output_dir else None
+        # Caching only makes sense against a persistent directory -- a fresh
+        # temp dir deleted at the end of this call could never produce a hit
+        # on a later call anyway, so skip_existing would just be dead weight.
+        caching = output_dir is not None
+        tmp_dir = None if caching else tempfile.TemporaryDirectory(prefix="mga_surveyor_furthest_points_")
+        resolved_output_dir = Path(output_dir) if caching else Path(tmp_dir.name)
         try:
             _dirs_df, coordinates_df, _duals_df = optimize_mga_in_multiple_directions(
                 n,
                 directions=directions_df,
                 dimensions=dimensions,
-                output_dir=tmp_dir.name if cleanup_output_dir else output_dir,
+                output_dir=resolved_output_dir,
+                point_ids=point_ids,
+                skip_existing=caching,
                 snapshots=snapshots,
                 multi_investment_periods=multi_investment_periods,
                 slack=slack,
@@ -131,18 +158,29 @@ def make_furthest_point_fn(
                 max_parallel=max_parallel,
                 **kwargs,
             )
+
+            points_by_id = {
+                pid: coordinates_df.loc[pid, keys].to_numpy(dtype=float) for pid in coordinates_df.index
+            }
+            # Anything not just solved: either a cache hit skip_existing made
+            # (caching=True) or -- if it's still missing after that -- a
+            # genuinely failed/interrupted point, which is an error either way.
+            for pid in point_ids:
+                if pid in points_by_id:
+                    continue
+                cached_fn = resolved_output_dir / f"mga_result_{pid}.nc"
+                if not cached_fn.exists():
+                    msg = f"Direction {pid!r} was neither solved nor found cached at {cached_fn}."
+                    raise RuntimeError(msg)
+                from pypsa.networks import Network as _Network  # noqa: PLC0415
+
+                cached_coordinates = pd.Series(_Network(cached_fn).meta["coordinates"])
+                points_by_id[pid] = cached_coordinates.loc[keys].to_numpy(dtype=float)
         finally:
             if tmp_dir is not None:
                 tmp_dir.cleanup()
 
-        if len(coordinates_df) != len(directions):
-            msg = (
-                f"Expected all {len(directions)} directions to solve successfully, "
-                f"got {len(coordinates_df)}."
-            )
-            raise RuntimeError(msg)
-        # coordinates_df is indexed 0..n-1 (default point_ids), same row order as `directions`.
-        return coordinates_df.loc[range(len(directions)), keys].to_numpy(dtype=float)
+        return np.array([points_by_id[pid] for pid in point_ids])
 
     return furthest_points
 
@@ -244,6 +282,11 @@ def optimize_mga_in_direction(
     n.meta["slack"] = slack
     n.meta["dimensions"] = _convert_to_dict(dimensions)
     n.meta["direction"] = direction
+    # Stashed so a network reloaded from a plain NetCDF export (no live
+    # linopy model attached -- project_solved would fail on it) can still
+    # recover its own coordinates, e.g. to read a cached result back without
+    # re-solving; see make_furthest_point_fn.
+    n.meta["coordinates"] = {key: float(value) for key, value in coordinates.items()}
 
     if not resolve_main_objective:
         duals = pd.Series(0.0, index=list(dimensions.keys()))
