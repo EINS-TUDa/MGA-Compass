@@ -31,21 +31,30 @@ PyPSA has no equivalent query built in (only direction-based ones), so it's
 written from scratch here, structurally mirroring
 `mga_surveyor.tests.lp_region.closest_point_in_region`'s residual-variables-
 plus-norm-specific-objective construction but against `n`'s own real
-constraints instead of an explicit `(A_ub, b_ub)`. Unlike the box
-directions, `run`'s loop can't be batched: each iteration's query depends on
-the previous iteration's result. It also can't be rebuilt from scratch every
-call the way `make_furthest_point_fn` is (that's fine there -- only `2k`
-calls; `run`'s loop can take hundreds): the near-optimal region itself never
-changes across calls, only `target` does, so the model is built once and
-each call just updates the residual constraints' RHS in place and re-solves.
-Only `l1`/`linf` are supported for now (LP-representable, HiGHS-compatible);
-`l2` would need a quadratic objective, Gurobi-only like everywhere else L2
-shows up in this package.
+constraints instead of an explicit `(A_ub, b_ub)`. `run`'s loop calls this
+one target at a time (each iteration's query depends on the previous
+iteration's result, so those calls can't be batched against each other) --
+for that path the model is built once, in-process, and each call just
+updates the residual constraints' RHS in place and re-solves, rather than
+paying for a full model rebuild every time. A separate, independent batch
+path exists for callers issuing several targets in one call (e.g. a
+`Method.find_trial_point` returning more than one worst point at once):
+that path follows the same design as `optimize_mga_in_multiple_directions`
+-- since a closest-point solve is expensive (confirmed: linopy has no
+warm-start/persistent-solve path, so every solve re-exports and re-solves
+the whole problem from scratch regardless) and each worker still amortizes
+its own model-build cost across the whole chunk it's assigned, spreading
+the batch across a real `multiprocessing.Pool` is worth the process-startup
+and network-export/reimport overhead, the same tradeoff that pattern
+already makes. Only `l1`/`linf` are supported for now (LP-representable,
+HiGHS-compatible); `l2` would need a quadratic objective, Gurobi-only like
+everywhere else L2 shows up in this package.
 """
 from __future__ import annotations
 
 import logging
 import tempfile
+import weakref
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -203,53 +212,40 @@ def make_furthest_point_fn(
 _CLOSEST_POINT_SUPPORTED_NORMS = ("l1", "linf")
 
 
-def make_closest_point_fn(
+def _build_closest_point_solver(
     n: Network,
     dimensions: dict,
     norm: str,
     slack: float,
-    snapshots: Sequence | None = None,
-    multi_investment_periods: bool = False,
-    model_kwargs: dict | None = None,
-    **kwargs: Any,
-) -> ClosestFeasiblePointFn:
-    """Build a `mga_surveyor.runner.ClosestFeasiblePointFn` against a real,
-    already-solved PyPSA network `n` -- the query `runner.run`'s main loop
-    needs: the closest point in `n`'s own near-optimal feasible region to a
-    given `target`, together with a valid separating-hyperplane normal there.
-    Also batch-capable, like `make_furthest_point_fn` -- see the returned
-    `closest_point`'s own docstring.
+    snapshots: Sequence | None,
+    multi_investment_periods: bool,
+    model_kwargs: dict | None,
+    kwargs: dict,
+) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """Build the closest-point model against `n` exactly once, and return a
+    single-target `(point, normal)` solver reusing it -- the shared core
+    both `make_closest_point_fn` (in-process, for `runner.run`'s
+    single-target calls) and `_solve_closest_point_chunk` (one per worker
+    process, for the batch path) are built on.
 
-    Structurally this mirrors `mga_surveyor.tests.lp_region.closest_point_in_region`
-    (same residual-variables-plus-norm-specific-objective construction, same
-    `r_j == target_j - dim_j(x)` sign convention for the residual and for
-    reading the normal off its dual, unmodified), but against `n`'s own real
-    constraints (`create_model` + `_add_near_opt_constraint`) instead of an
-    explicit `(A_ub, b_ub)`.
+    Model: one residual variable per dimension, `r_key == target_key -
+    dim_key(x)` i.e. `r_key + dim_key(x) == target_key` (RHS starts at 0,
+    updated to the real target on every solver call), plus a norm-specific
+    objective -- `t >= |r_key|` minimized for `linf`, `sum(s_key) with
+    s_key >= |r_key|` minimized for `l1`. Structurally mirrors
+    `mga_surveyor.tests.lp_region.closest_point_in_region` (same residual
+    sign convention, same dual-of-the-residual-constraint normal,
+    unmodified), but against `n`'s own real constraints (`create_model` +
+    `_add_near_opt_constraint`) instead of an explicit `(A_ub, b_ub)`.
 
-    Only `norm in ('l1', 'linf')` is supported for now -- both are
-    LP-representable via the usual auxiliary-variable linearization, so this
-    works with any solver `n.optimize.solve_model` supports (HiGHS
-    included). `l2` would need a quadratic objective -- Gurobi-only, like
-    everywhere else L2 shows up in this package (`gurobi_projection`,
-    `BilevelMethod`) -- and isn't implemented here yet.
-
-    Unlike `make_furthest_point_fn` (rebuilt from scratch every call --
-    fine there, `bootstrap_box` only calls it `2k` times), the model here is
-    built ONCE, before the returned callable is ever invoked: `run`'s main
-    loop can call this hundreds of times, but the near-optimal region itself
-    (the budget constraint plus everything `create_model` built) never
-    changes across those calls, only `target` does -- so each call just
-    updates the residual constraints' RHS in place
-    (`linopy.Constraint.update(rhs=...)`) and re-solves, rather than paying
-    for a full model rebuild every time.
-
-    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
-    :raises RuntimeError: If a call's solve does not reach `status="ok"`.
+    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'` (`l2`
+        would need a quadratic objective -- Gurobi-only, like everywhere
+        else L2 shows up in this package).
+    :raises RuntimeError: If a solve does not reach `status="ok"`.
     """
     if norm not in _CLOSEST_POINT_SUPPORTED_NORMS:
         raise NotImplementedError(
-            f"make_closest_point_fn only supports norm in {_CLOSEST_POINT_SUPPORTED_NORMS} for now, "
+            f"closest-point solving only supports norm in {_CLOSEST_POINT_SUPPORTED_NORMS} for now, "
             f"got {norm!r} -- l2 needs a quadratic objective (Gurobi-only, like gurobi_projection."
             f"closest_point_on_hull)."
         )
@@ -269,9 +265,6 @@ def make_closest_point_fn(
     )
     n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
 
-    # r_key == target_key - dim_key(x), i.e. r_key + dim_key(x) == target_key
-    # -- RHS starts at 0 (target=0) and is updated to the real target on
-    # every call to `closest_point` below.
     resid_constrs = {}
     for key in keys:
         r = m.add_variables(lower=-np.inf, name=f"mga_surveyor_resid_{key}")
@@ -295,7 +288,7 @@ def make_closest_point_fn(
             s_vars.append(s)
         m.objective = sum(s_vars)
 
-    def _solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
 
@@ -308,6 +301,90 @@ def make_closest_point_fn(
         normal = np.array([float(resid_constrs[key].dual) for key in keys])
         return point, normal
 
+    return solve_one
+
+
+def _solve_closest_point_chunk(
+    fn: str,
+    dimensions: dict,
+    norm: str,
+    slack: float,
+    snapshots: Sequence | None,
+    multi_investment_periods: bool,
+    model_kwargs: dict | None,
+    kwargs: dict,
+    targets_chunk: np.ndarray,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Solve one worker's chunk of targets for parallel execution (helper
+    for `make_closest_point_fn`'s batch path).
+
+    Same reason `_solve_single_direction` takes a path instead of a
+    `Network`: a live `Network` can't cross a process boundary (not
+    picklable), so the worker reconstructs its own from `fn`. Unlike
+    `_solve_single_direction` (one direction, one solve), this worker
+    builds the closest-point model exactly once (via
+    `_build_closest_point_solver`) and then solves every target in
+    `targets_chunk` against that one model -- amortizing the model-build
+    cost across the whole chunk, not just one target.
+
+    Real failures propagate and abort the whole batch (via `pool.starmap`),
+    same policy as `_solve_single_direction` -- see its docstring for why.
+    """
+    from pypsa.networks import Network  # noqa: PLC0415
+
+    n = Network(fn)
+    solve_one = _build_closest_point_solver(
+        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
+    )
+    results = [solve_one(row) for row in targets_chunk]
+    logger.info("closest_point: solved %d target(s) in this worker", len(targets_chunk))
+    return results
+
+
+def make_closest_point_fn(
+    n: Network,
+    dimensions: dict,
+    norm: str,
+    slack: float,
+    snapshots: Sequence | None = None,
+    multi_investment_periods: bool = False,
+    model_kwargs: dict | None = None,
+    max_parallel: int = 4,
+    **kwargs: Any,
+) -> ClosestFeasiblePointFn:
+    """Build a `mga_surveyor.runner.ClosestFeasiblePointFn` against a real,
+    already-solved PyPSA network `n` -- the query `runner.run`'s main loop
+    needs: the closest point in `n`'s own near-optimal feasible region to a
+    given `target`, together with a valid separating-hyperplane normal
+    there. Also batch-capable -- see the returned `closest_point`'s own
+    docstring for the two very different paths a single vs. a batched call
+    takes.
+
+    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
+    :raises RuntimeError: If a call's solve does not reach `status="ok"`.
+    """
+    # Snapshot n's state to disk right now, before any solve gets a chance
+    # to touch it: n.optimize.solve_model() writes solution values back onto
+    # n's own component tables regardless of which objective was solved
+    # (confirmed for optimize_mga_in_direction's resolve_main_objective=False
+    # path, and the closest-point model here reuses n's own variables the
+    # same way), so calling `closest_point` even once already leaves n in a
+    # different state than the network's true original optimum. The batch
+    # path's workers need that TRUE original state -- it's what
+    # _add_near_opt_constraint's budget is supposed to be relative to, and
+    # it's what the single-target path below already uses (its own budget
+    # constraint's RHS is computed once, at build time, right here, before
+    # any mutation can happen) -- so every batch call reuses this one
+    # pristine export instead of re-exporting n's current (by then possibly
+    # mutated) state.
+    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as f:
+        pristine_fn = f.name
+    n.export_to_netcdf(pristine_fn)
+
+    solve_one = _build_closest_point_solver(
+        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
+    )
+
     def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Shape-preserving: a single `(k,)` target returns a single
         `(point, normal)` pair -- matching `ClosestFeasiblePointFn`'s
@@ -315,25 +392,58 @@ def make_closest_point_fn(
         unmodified. An `(n_targets, k)` batch instead returns the
         corresponding `(n_targets, k)` arrays of points and normals.
 
-        Solved as a plain sequential loop over `target`'s rows, reusing the
-        one persistent model built above -- an RHS update + re-solve per
-        row, rather than `make_furthest_point_fn`'s multiprocessing.Pool
-        (there's no per-direction `create_model` cost here to parallelize
-        away). "Re-solve" is not a warm start, though: linopy has no
-        persistent-solve path (confirmed -- it logs a fresh "Writing time"
-        on every `solve_model()` call, even when only an RHS changed), so
-        each row still pays a full write-problem-out-and-invoke-the-solver
-        round trip, same as `highs_projection`'s docstring already notes
-        about linopy generally. Only the model *structure* (`create_model`,
-        `_add_near_opt_constraint`) is actually spared repeat cost here, not
-        the solve itself -- unlike `gurobi_projection`/`highs_projection`'s
-        genuinely persistent, in-memory, no-file-I/O solver objects.
+        The two cases are solved completely differently:
+
+        - Single target: solved directly against the one persistent
+          in-process model built when `make_closest_point_fn` was called --
+          just an RHS update + re-solve, no multiprocessing. There's only
+          one query; nothing to parallelize, and every extra process would
+          just be overhead.
+        - Batch (>1 targets): split into up to `max_parallel` chunks and
+          solved via a real `multiprocessing.Pool`
+          (`_solve_closest_point_chunk`), the same design
+          `optimize_mga_in_multiple_directions` uses and for the same
+          reason -- a closest-point solve is genuinely expensive (linopy
+          has no warm-start/persistent-solve path; confirmed, it logs a
+          fresh "Writing time" on every `solve_model()` call even when only
+          an RHS changed, so every solve re-exports and re-solves the whole
+          problem regardless), so it's worth paying the network
+          export/reimport and one model-build per worker to get true
+          parallel solving across chunks, rather than solving the whole
+          batch serially in one process.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
         target_2d = np.atleast_2d(target)
 
-        results = [_solve_one(row) for row in target_2d]
+        if len(target_2d) == 1:
+            results = [solve_one(target_2d[0])]
+        else:
+            # Reuses `pristine_fn` (n's state as of when make_closest_point_fn
+            # was called) rather than re-exporting n's CURRENT state here --
+            # see the comment above `pristine_fn`'s export for why: n may
+            # already have been mutated by earlier single-target calls above.
+            n_workers = min(max_parallel, len(target_2d))
+            chunks = np.array_split(target_2d, n_workers)
+
+            with get_context("spawn").Pool(processes=n_workers, initializer=_worker_init) as pool:
+                try:
+                    chunk_results = pool.starmap(
+                        _solve_closest_point_chunk,
+                        [
+                            (
+                                pristine_fn, dimensions, norm, slack, snapshots,
+                                multi_investment_periods, model_kwargs, kwargs, chunk,
+                            )
+                            for chunk in chunks
+                        ],
+                    )
+                except Exception:
+                    pool.terminate()
+                    pool.join()
+                    raise
+            results = [r for chunk in chunk_results for r in chunk]
+
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
 
@@ -341,6 +451,7 @@ def make_closest_point_fn(
             return points[0], normals[0]
         return points, normals
 
+    weakref.finalize(closest_point, lambda: Path(pristine_fn).unlink(missing_ok=True))
     return closest_point
 
 

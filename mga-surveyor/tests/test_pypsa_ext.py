@@ -259,7 +259,11 @@ def test_make_closest_point_fn_is_batch_capable():
     assert normals.shape == (3, 2)
 
     # row 0 of the batch is the exact same query as the single-target call
-    # above -- same persistent model, same solve -- so results must match.
+    # above, which ran first -- guards specifically against the batch path's
+    # multiprocessing.Pool workers computing a different near-optimal budget
+    # baseline than the single-target path, e.g. by re-exporting n's CURRENT
+    # (by-then-mutated, since solve_model() writes solution values back onto
+    # n regardless of objective) state instead of n's true original optimum.
     np.testing.assert_allclose(points[0], point)
     np.testing.assert_allclose(normals[0], normal)
 
