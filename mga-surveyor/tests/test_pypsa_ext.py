@@ -241,6 +241,33 @@ def test_make_closest_point_fn_returns_valid_separating_hyperplane():
     assert (violations <= 1e-6).all(), f"normal is not a valid separating hyperplane: {violations}"
 
 
+def test_make_closest_point_fn_is_batch_capable():
+    n = _build_network()
+    closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
+
+    # single target: shape-preserving, matches ClosestFeasiblePointFn's
+    # contract exactly -- (k,) in, one (point, normal) pair out.
+    target = np.array([-100.0, -100.0])
+    point, normal = closest_point(target)
+    assert point.shape == (2,)
+    assert normal.shape == (2,)
+
+    # batch of targets: (n_targets, k) in, (n_targets, k) arrays out.
+    targets = np.array([[-100.0, -100.0], [100.0, 100.0], [-100.0, 100.0]])
+    points, normals = closest_point(targets)
+    assert points.shape == (3, 2)
+    assert normals.shape == (3, 2)
+
+    # row 0 of the batch is the exact same query as the single-target call
+    # above -- same persistent model, same solve -- so results must match.
+    np.testing.assert_allclose(points[0], point)
+    np.testing.assert_allclose(normals[0], normal)
+
+    # the three targets pull in different directions -- not all identical.
+    assert not np.allclose(points[0], points[1])
+    assert not np.allclose(points[0], points[2])
+
+
 def test_make_closest_point_fn_end_to_end_with_runner_run():
     """The strongest check: bootstrap a real VertexEnumMethod from a real
     network (via make_furthest_point_fn) and drive it through

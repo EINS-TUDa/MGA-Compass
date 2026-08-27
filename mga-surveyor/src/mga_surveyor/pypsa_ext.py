@@ -217,6 +217,8 @@ def make_closest_point_fn(
     already-solved PyPSA network `n` -- the query `runner.run`'s main loop
     needs: the closest point in `n`'s own near-optimal feasible region to a
     given `target`, together with a valid separating-hyperplane normal there.
+    Also batch-capable, like `make_furthest_point_fn` -- see the returned
+    `closest_point`'s own docstring.
 
     Structurally this mirrors `mga_surveyor.tests.lp_region.closest_point_in_region`
     (same residual-variables-plus-norm-specific-objective construction, same
@@ -293,19 +295,43 @@ def make_closest_point_fn(
             s_vars.append(s)
         m.objective = sum(s_vars)
 
-    def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        target = np.asarray(target, dtype=float)
-        for key, target_value in zip(keys, target):
+    def _solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
 
         status, condition = n.optimize.solve_model(**kwargs)
         if status != "ok":
-            msg = f"Closest-point solve for target {dict(zip(keys, target.tolist()))} failed: status={status}, condition={condition}"
+            msg = f"Closest-point solve for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         normal = np.array([float(resid_constrs[key].dual) for key in keys])
         return point, normal
+
+    def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Shape-preserving: a single `(k,)` target returns a single
+        `(point, normal)` pair -- matching `ClosestFeasiblePointFn`'s
+        contract exactly, so this still plugs straight into `runner.run`
+        unmodified. An `(n_targets, k)` batch instead returns the
+        corresponding `(n_targets, k)` arrays of points and normals.
+
+        Solved as a plain sequential loop over `target`'s rows, reusing the
+        one persistent model built above (just an RHS update + re-solve per
+        row) -- unlike `make_furthest_point_fn`'s multiprocessing.Pool,
+        there's no per-direction `create_model` cost here to parallelize
+        away; each row is already cheap against a warm model.
+        """
+        target = np.asarray(target, dtype=float)
+        single = target.ndim == 1
+        target_2d = np.atleast_2d(target)
+
+        results = [_solve_one(row) for row in target_2d]
+        points = np.array([r[0] for r in results])
+        normals = np.array([r[1] for r in results])
+
+        if single:
+            return points[0], normals[0]
+        return points, normals
 
     return closest_point
 
