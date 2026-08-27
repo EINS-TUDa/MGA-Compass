@@ -780,7 +780,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pycddlib", marker = "extra == 'cdd'", specifier = ">=3.0.0" },
-    { name = "pypsa", specifier = ">=1.2.0" },
+    { name = "pypsa", specifier = ">=1.3.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },
     { name = "scipy" },
 ]

@@ -39,22 +39,45 @@ updates the residual constraints' RHS in place and re-solves, rather than
 paying for a full model rebuild every time. A separate, independent batch
 path exists for callers issuing several targets in one call (e.g. a
 `Method.find_trial_point` returning more than one worst point at once):
-that path follows the same design as `optimize_mga_in_multiple_directions`
--- since a closest-point solve is expensive (confirmed: linopy has no
+that path follows the same design as `optimize_mga_in_multiple_directions`,
+at the same granularity -- one `pool.starmap` task per target, not per
+worker-assigned chunk, matching `_solve_single_direction`'s one-task-per-
+direction exactly rather than trying to amortize the model-build cost
+across multiple targets. Worth it since a closest-point solve is expensive
+regardless of that rebuild cost (confirmed: linopy has no
 warm-start/persistent-solve path, so every solve re-exports and re-solves
-the whole problem from scratch regardless) and each worker still amortizes
-its own model-build cost across the whole chunk it's assigned, spreading
-the batch across a real `multiprocessing.Pool` is worth the process-startup
-and network-export/reimport overhead, the same tradeoff that pattern
-already makes. Only `l1`/`linf` are supported for now (LP-representable,
-HiGHS-compatible); `l2` would need a quadratic objective, Gurobi-only like
-everywhere else L2 shows up in this package.
+the whole problem from scratch every time), so spreading the batch across a
+real `multiprocessing.Pool` is worth the process-startup overhead. Only
+`l1`/`linf` are supported for now (LP-representable, HiGHS-compatible);
+`l2` would need a quadratic objective, Gurobi-only like everywhere else L2
+shows up in this package.
+
+Both multiprocessing.Pool paths above (this module's and
+optimize_mga_in_multiple_directions's) pass the PyPSA `Network` object
+directly to worker processes, rather than exporting it to a NetCDF file and
+reloading it inside each worker. PyPSA networks -- including solved ones
+with a linopy model attached -- are picklable as of PyPSA 1.3.0
+(github.com/PyPSA/PyPSA/pull/1889, fixing a `SubNetwork` weakref that used
+to break it); confirmed to work correctly, including re-solving inside the
+worker, over an actual spawn-context Pool, for both HiGHS and Gurobi. The
+old export-and-reload approach was a real, necessary workaround for
+essentially all of PyPSA's history before that fix -- not a design mistake
+at the time -- but on PyPSA >=1.3.0 it was measured to cost ~15x (direction
+solves) to ~7x (closest-point solves) more per task than passing `n`
+directly, dominated by `Network(fn)`'s own reconstruction cost (~5.7s on
+the package's test network, regardless of network size or process
+warm-up state) rather than anything about the actual model-building or
+solving. `make_closest_point_fn`'s batch path additionally needs an
+independent, unmutated snapshot of `n` (a single-target call already
+mutates `n` via `solve_model()`'s side effect of writing solution values
+back onto it) -- taken via a `pickle` round-trip rather than PyPSA's own
+`Network.copy()`, which refuses on a network with an attached solver model.
 """
 from __future__ import annotations
 
 import logging
+import pickle
 import tempfile
-import weakref
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -225,8 +248,8 @@ def _build_closest_point_solver(
     """Build the closest-point model against `n` exactly once, and return a
     single-target `(point, normal)` solver reusing it -- the shared core
     both `make_closest_point_fn` (in-process, for `runner.run`'s
-    single-target calls) and `_solve_closest_point_chunk` (one per worker
-    process, for the batch path) are built on.
+    single-target calls) and `_solve_closest_point_target` (one per worker
+    process per target, for the batch path) are built on.
 
     Model: one residual variable per dimension, `r_key == target_key -
     dim_key(x)` i.e. `r_key + dim_key(x) == target_key` (RHS starts at 0,
@@ -304,8 +327,8 @@ def _build_closest_point_solver(
     return solve_one
 
 
-def _solve_closest_point_chunk(
-    fn: str,
+def _solve_closest_point_target(
+    n: Network,
     dimensions: dict,
     norm: str,
     slack: float,
@@ -313,32 +336,32 @@ def _solve_closest_point_chunk(
     multi_investment_periods: bool,
     model_kwargs: dict | None,
     kwargs: dict,
-    targets_chunk: np.ndarray,
-) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Solve one worker's chunk of targets for parallel execution (helper
-    for `make_closest_point_fn`'s batch path).
+    target: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve a single target for parallel execution (helper for
+    `make_closest_point_fn`'s batch path) -- same granularity as
+    `_solve_single_direction`: one `pool.starmap` task per target, not per
+    chunk, matching it deliberately rather than amortizing the model-build
+    cost across multiple targets landing on the same worker.
+    `optimize_mga_in_multiple_directions` doesn't do that amortization
+    either (`_solve_single_direction` rebuilds fresh every call, even when
+    the same worker process ends up handling several directions over its
+    lifetime), so this stays consistent with that rather than being a
+    special case.
 
-    Same reason `_solve_single_direction` takes a path instead of a
-    `Network`: a live `Network` can't cross a process boundary (not
-    picklable), so the worker reconstructs its own from `fn`. Unlike
-    `_solve_single_direction` (one direction, one solve), this worker
-    builds the closest-point model exactly once (via
-    `_build_closest_point_solver`) and then solves every target in
-    `targets_chunk` against that one model -- amortizing the model-build
-    cost across the whole chunk, not just one target.
+    `n` is passed directly (multiprocessing pickles a fresh, independent
+    copy per task) rather than reloaded from a file -- see this module's
+    docstring for why that's now the right call on PyPSA >=1.3.0. Builds
+    the closest-point model via `_build_closest_point_solver` and solves
+    `target` against it.
 
     Real failures propagate and abort the whole batch (via `pool.starmap`),
     same policy as `_solve_single_direction` -- see its docstring for why.
     """
-    from pypsa.networks import Network  # noqa: PLC0415
-
-    n = Network(fn)
     solve_one = _build_closest_point_solver(
         n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
     )
-    results = [solve_one(row) for row in targets_chunk]
-    logger.info("closest_point: solved %d target(s) in this worker", len(targets_chunk))
-    return results
+    return solve_one(target)
 
 
 def make_closest_point_fn(
@@ -363,23 +386,25 @@ def make_closest_point_fn(
     :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
     :raises RuntimeError: If a call's solve does not reach `status="ok"`.
     """
-    # Snapshot n's state to disk right now, before any solve gets a chance
-    # to touch it: n.optimize.solve_model() writes solution values back onto
-    # n's own component tables regardless of which objective was solved
-    # (confirmed for optimize_mga_in_direction's resolve_main_objective=False
-    # path, and the closest-point model here reuses n's own variables the
-    # same way), so calling `closest_point` even once already leaves n in a
-    # different state than the network's true original optimum. The batch
-    # path's workers need that TRUE original state -- it's what
+    # Snapshot n right now, before any solve gets a chance to touch it:
+    # n.optimize.solve_model() writes solution values back onto n's own
+    # component tables regardless of which objective was solved (confirmed
+    # for optimize_mga_in_direction's resolve_main_objective=False path, and
+    # the closest-point model here reuses n's own variables the same way),
+    # so calling `closest_point` even once already leaves n in a different
+    # state than the network's true original optimum. The batch path's
+    # workers need that TRUE original state -- it's what
     # _add_near_opt_constraint's budget is supposed to be relative to, and
     # it's what the single-target path below already uses (its own budget
     # constraint's RHS is computed once, at build time, right here, before
-    # any mutation can happen) -- so every batch call reuses this one
-    # pristine export instead of re-exporting n's current (by then possibly
-    # mutated) state.
-    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as f:
-        pristine_fn = f.name
-    n.export_to_netcdf(pristine_fn)
+    # any mutation can happen) -- so every batch call passes this one
+    # pristine, independent copy instead of n's current (by then possibly
+    # mutated) state. A pickle round-trip, not n.copy() -- PyPSA's own
+    # Network.copy() refuses on a network with an attached solver model,
+    # while pickling one works fine (confirmed; see this module's
+    # docstring) and is ~440x faster than the netcdf-export equivalent this
+    # used to be.
+    pristine_n = pickle.loads(pickle.dumps(n))
 
     solve_one = _build_closest_point_solver(
         n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
@@ -399,18 +424,19 @@ def make_closest_point_fn(
           just an RHS update + re-solve, no multiprocessing. There's only
           one query; nothing to parallelize, and every extra process would
           just be overhead.
-        - Batch (>1 targets): split into up to `max_parallel` chunks and
-          solved via a real `multiprocessing.Pool`
-          (`_solve_closest_point_chunk`), the same design
-          `optimize_mga_in_multiple_directions` uses and for the same
-          reason -- a closest-point solve is genuinely expensive (linopy
-          has no warm-start/persistent-solve path; confirmed, it logs a
-          fresh "Writing time" on every `solve_model()` call even when only
-          an RHS changed, so every solve re-exports and re-solves the whole
-          problem regardless), so it's worth paying the network
-          export/reimport and one model-build per worker to get true
-          parallel solving across chunks, rather than solving the whole
-          batch serially in one process.
+        - Batch (>1 targets): each row dispatched as its own
+          `pool.starmap` task (`_solve_closest_point_target`), exactly the
+          same granularity `optimize_mga_in_multiple_directions` uses (one
+          task per direction, not per chunk) -- the Pool's own work queue
+          spreads the targets across `min(max_parallel, n_targets)`
+          worker processes. Worth doing because a closest-point solve is
+          genuinely expensive (linopy has no warm-start/persistent-solve
+          path; confirmed, it logs a fresh "Writing time" on every
+          `solve_model()` call even when only an RHS changed, so every
+          solve re-solves the whole problem regardless), so it's worth
+          paying the process-startup overhead and a fresh model-build per
+          target to get true parallel solving, rather than solving the
+          whole batch serially in one process.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
@@ -419,30 +445,33 @@ def make_closest_point_fn(
         if len(target_2d) == 1:
             results = [solve_one(target_2d[0])]
         else:
-            # Reuses `pristine_fn` (n's state as of when make_closest_point_fn
-            # was called) rather than re-exporting n's CURRENT state here --
-            # see the comment above `pristine_fn`'s export for why: n may
-            # already have been mutated by earlier single-target calls above.
+            # Passes `pristine_n` (n's state as of when make_closest_point_fn
+            # was called) rather than n's CURRENT state here -- see the
+            # comment above `pristine_n`'s creation for why: n may already
+            # have been mutated by earlier single-target calls above.
+            #
+            # One pool.starmap task per target row, not per chunk -- same
+            # granularity as optimize_mga_in_multiple_directions's one task
+            # per direction, letting the Pool's own work queue distribute
+            # rows across processes=min(max_parallel, len(target_2d)) workers
+            # instead of pre-splitting into fixed chunks ourselves.
             n_workers = min(max_parallel, len(target_2d))
-            chunks = np.array_split(target_2d, n_workers)
-
             with get_context("spawn").Pool(processes=n_workers, initializer=_worker_init) as pool:
                 try:
-                    chunk_results = pool.starmap(
-                        _solve_closest_point_chunk,
+                    results = pool.starmap(
+                        _solve_closest_point_target,
                         [
                             (
-                                pristine_fn, dimensions, norm, slack, snapshots,
-                                multi_investment_periods, model_kwargs, kwargs, chunk,
+                                pristine_n, dimensions, norm, slack, snapshots,
+                                multi_investment_periods, model_kwargs, kwargs, row,
                             )
-                            for chunk in chunks
+                            for row in target_2d
                         ],
                     )
                 except Exception:
                     pool.terminate()
                     pool.join()
                     raise
-            results = [r for chunk in chunk_results for r in chunk]
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
@@ -451,7 +480,6 @@ def make_closest_point_fn(
             return points[0], normals[0]
         return points, normals
 
-    weakref.finalize(closest_point, lambda: Path(pristine_fn).unlink(missing_ok=True))
     return closest_point
 
 
@@ -592,7 +620,7 @@ def optimize_mga_in_direction(
 
 
 def _solve_single_direction(
-    fn: str,
+    n: Network,
     direction: dict,
     dimensions: dict,
     snapshots: Sequence | None,
@@ -605,8 +633,12 @@ def _solve_single_direction(
 ) -> tuple[dict, None, None, None] | tuple[dict, pd.Series, pd.Series, float]:
     """Solve a single direction for parallel execution (helper for `optimize_mga_in_multiple_directions`).
 
-    The network is read from `fn`, solved, and exported to `output_fn` as a NetCDF
-    file so downstream code can extract per-point data from it later.
+    `n` is passed directly (multiprocessing pickles a fresh, independent
+    copy per task, so mutating it here never affects the caller's `n` or
+    other workers') rather than reloaded from a file -- see this module's
+    docstring for why that's the right call on PyPSA >=1.3.0. The (this
+    worker's own, mutated) `n` is solved and exported to `output_fn` as a
+    NetCDF file so downstream code can extract per-point data from it later.
 
     Real failures (a bug, or a genuine solver/numerical problem — see
     `optimize_mga_in_direction`) are deliberately not caught here: they propagate
@@ -614,10 +646,7 @@ def _solve_single_direction(
     dropping a point. The only case handled here is a worker being interrupted
     (e.g. Ctrl+C), which is not a failure to report, just a graceful shutdown.
     """
-    from pypsa.networks import Network  # noqa: PLC0415
-
     try:
-        n = Network(fn)
         _, _, coordinates, duals = optimize_mga_in_direction(
             n,
             direction=direction,
@@ -736,74 +765,67 @@ def optimize_mga_in_multiple_directions(
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         point_ids, directions = (list(x) for x in zip(*todo, strict=True))
 
-    # Export the network to a temporary file. Note: cannot pass the network as an
-    # argument directly since it is not picklable.
-    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False, dir=output_dir) as f:
-        fn = f.name
-
-    try:
-        n.export_to_netcdf(fn)
-
-        with (
-            get_context("spawn").Pool(
-                processes=max_parallel,
-                initializer=_worker_init,
-                # No maxtasksperchild: each worker re-imports the whole scientific
-                # stack (pypsa, linopy, pandas, xarray) on every cold start, which
-                # dwarfs the actual solve time. Reusing workers across directions
-                # pays that import cost ~max_parallel times instead of once per
-                # direction. Revisit if per-worker memory growth becomes an issue
-                # over very large direction counts.
-            ) as pool
-        ):
-            try:
-                results = pool.starmap(
-                    _solve_single_direction,
-                    [
-                        (
-                            fn,
-                            direction,
-                            dimensions,
-                            snapshots,
-                            multi_investment_periods,
-                            slack,
-                            model_kwargs,
-                            resolve_main_objective,
-                            kwargs,
-                            str(output_fns[pid]),
-                        )
-                        for pid, direction in zip(point_ids, directions)
-                    ],
-                )
-            except Exception:
-                pool.terminate()
-                pool.join()
-                raise
-
-        # coords is only None here if that worker was interrupted (e.g. Ctrl+C):
-        # real solve failures raise inside the worker and abort the whole batch
-        # via the `except Exception: pool.terminate(); ...; raise` above.
-        successful = [
-            (pid, direction, pd.concat([coords, pd.Series({obj_label: obj})]), duals)
-            for pid, (direction, coords, duals, obj) in zip(point_ids, results)
-            if coords is not None
-        ]
-        interrupted_count = len(results) - len(successful)
-        if interrupted_count > 0:
-            logger.warning(
-                "%s out of %s directions were interrupted before solving", interrupted_count, len(results)
+    # n is passed directly to each worker task below (multiprocessing pickles
+    # a fresh, independent copy per task) rather than exported to a temp file
+    # and reloaded in each worker -- see this module's docstring for why
+    # that's the right call on PyPSA >=1.3.0.
+    with (
+        get_context("spawn").Pool(
+            processes=max_parallel,
+            initializer=_worker_init,
+            # No maxtasksperchild: each worker re-imports the whole scientific
+            # stack (pypsa, linopy, pandas, xarray) on every cold start, which
+            # dwarfs the actual solve time. Reusing workers across directions
+            # pays that import cost ~max_parallel times instead of once per
+            # direction. Revisit if per-worker memory growth becomes an issue
+            # over very large direction counts.
+        ) as pool
+    ):
+        try:
+            results = pool.starmap(
+                _solve_single_direction,
+                [
+                    (
+                        n,
+                        direction,
+                        dimensions,
+                        snapshots,
+                        multi_investment_periods,
+                        slack,
+                        model_kwargs,
+                        resolve_main_objective,
+                        kwargs,
+                        str(output_fns[pid]),
+                    )
+                    for pid, direction in zip(point_ids, directions)
+                ],
             )
+        except Exception:
+            pool.terminate()
+            pool.join()
+            raise
 
-        if not successful:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-        successful_ids, successful_directions, successful_coordinates, successful_duals = zip(*successful, strict=True)
-        index = pd.Index(successful_ids)
-        return (
-            pd.DataFrame(successful_directions, index=index),
-            pd.DataFrame(successful_coordinates, index=index),
-            pd.DataFrame(successful_duals, index=index),
+    # coords is only None here if that worker was interrupted (e.g. Ctrl+C):
+    # real solve failures raise inside the worker and abort the whole batch
+    # via the `except Exception: pool.terminate(); ...; raise` above.
+    successful = [
+        (pid, direction, pd.concat([coords, pd.Series({obj_label: obj})]), duals)
+        for pid, (direction, coords, duals, obj) in zip(point_ids, results)
+        if coords is not None
+    ]
+    interrupted_count = len(results) - len(successful)
+    if interrupted_count > 0:
+        logger.warning(
+            "%s out of %s directions were interrupted before solving", interrupted_count, len(results)
         )
-    finally:
-        if Path(fn).exists():
-            Path(fn).unlink()
+
+    if not successful:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    successful_ids, successful_directions, successful_coordinates, successful_duals = zip(*successful, strict=True)
+    index = pd.Index(successful_ids)
+    return (
+        pd.DataFrame(successful_directions, index=index),
+        pd.DataFrame(successful_coordinates, index=index),
+        pd.DataFrame(successful_duals, index=index),
+    )

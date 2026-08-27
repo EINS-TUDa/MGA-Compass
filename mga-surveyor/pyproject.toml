@@ -24,7 +24,11 @@ description = "Near-optimal solution space exploration for PyPSA models — a dr
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pypsa>=1.2.0",
+    # >=1.3.0 specifically: pypsa_ext.py's multiprocessing.Pool paths pass
+    # Network objects directly to worker processes, which needs PyPSA's fix
+    # for https://github.com/PyPSA/PyPSA/issues/1888 (a SubNetwork weakref
+    # that broke pickling networks with sub-networks), released in 1.3.0.
+    "pypsa>=1.3.0",
     "pandas",
     "netCDF4",
     "numpy",
