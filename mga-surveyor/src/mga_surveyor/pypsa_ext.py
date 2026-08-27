@@ -23,12 +23,24 @@ of only `mga_surveyor.tests.lp_region`'s explicit-LP test region. Unlike
 `runner.bootstrap_box`'s per-direction loop), it takes several directions at
 once and solves them in parallel via `optimize_mga_in_multiple_directions`'s
 multiprocessing.Pool -- e.g. call it once with all `2k` box directions
-instead of looping a single-direction query `2k` times. The other oracle
-half, a `ClosestFeasiblePointFn` for `runner.run`'s main loop, is still under
-construction -- PyPSA has no equivalent query built in (only direction-based
-ones), so it has to be written from scratch here. Unlike the box directions,
-`run`'s loop can't be batched the same way: each iteration's query depends
-on the previous iteration's result.
+instead of looping a single-direction query `2k` times.
+
+make_closest_point_fn builds the other oracle half, a
+`mga_surveyor.runner.ClosestFeasiblePointFn` for `runner.run`'s main loop --
+PyPSA has no equivalent query built in (only direction-based ones), so it's
+written from scratch here, structurally mirroring
+`mga_surveyor.tests.lp_region.closest_point_in_region`'s residual-variables-
+plus-norm-specific-objective construction but against `n`'s own real
+constraints instead of an explicit `(A_ub, b_ub)`. Unlike the box
+directions, `run`'s loop can't be batched: each iteration's query depends on
+the previous iteration's result. It also can't be rebuilt from scratch every
+call the way `make_furthest_point_fn` is (that's fine there -- only `2k`
+calls; `run`'s loop can take hundreds): the near-optimal region itself never
+changes across calls, only `target` does, so the model is built once and
+each call just updates the residual constraints' RHS in place and re-solves.
+Only `l1`/`linf` are supported for now (LP-representable, HiGHS-compatible);
+`l2` would need a quadratic objective, Gurobi-only like everywhere else L2
+shows up in this package.
 """
 from __future__ import annotations
 
@@ -43,6 +55,8 @@ import pandas as pd
 from pypsa._options import options
 from pypsa.optimization.mga import _convert_to_dict, _worker_init
 
+from .runner import ClosestFeasiblePointFn
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
@@ -55,6 +69,7 @@ logger.setLevel(logging.INFO)
 
 __all__ = [
     "make_furthest_point_fn",
+    "make_closest_point_fn",
     "optimize_mga_in_direction",
     "optimize_mga_in_multiple_directions",
 ]
@@ -183,6 +198,116 @@ def make_furthest_point_fn(
         return np.array([points_by_id[pid] for pid in point_ids])
 
     return furthest_points
+
+
+_CLOSEST_POINT_SUPPORTED_NORMS = ("l1", "linf")
+
+
+def make_closest_point_fn(
+    n: Network,
+    dimensions: dict,
+    norm: str,
+    snapshots: Sequence | None = None,
+    multi_investment_periods: bool = False,
+    slack: float = 0.05,
+    model_kwargs: dict | None = None,
+    **kwargs: Any,
+) -> ClosestFeasiblePointFn:
+    """Build a `mga_surveyor.runner.ClosestFeasiblePointFn` against a real,
+    already-solved PyPSA network `n` -- the query `runner.run`'s main loop
+    needs: the closest point in `n`'s own near-optimal feasible region to a
+    given `target`, together with a valid separating-hyperplane normal there.
+
+    Structurally this mirrors `mga_surveyor.tests.lp_region.closest_point_in_region`
+    (same residual-variables-plus-norm-specific-objective construction, same
+    `r_j == target_j - dim_j(x)` sign convention for the residual and for
+    reading the normal off its dual, unmodified), but against `n`'s own real
+    constraints (`create_model` + `_add_near_opt_constraint`) instead of an
+    explicit `(A_ub, b_ub)`.
+
+    Only `norm in ('l1', 'linf')` is supported for now -- both are
+    LP-representable via the usual auxiliary-variable linearization, so this
+    works with any solver `n.optimize.solve_model` supports (HiGHS
+    included). `l2` would need a quadratic objective -- Gurobi-only, like
+    everywhere else L2 shows up in this package (`gurobi_projection`,
+    `BilevelMethod`) -- and isn't implemented here yet.
+
+    Unlike `make_furthest_point_fn` (rebuilt from scratch every call --
+    fine there, `bootstrap_box` only calls it `2k` times), the model here is
+    built ONCE, before the returned callable is ever invoked: `run`'s main
+    loop can call this hundreds of times, but the near-optimal region itself
+    (the budget constraint plus everything `create_model` built) never
+    changes across those calls, only `target` does -- so each call just
+    updates the residual constraints' RHS in place
+    (`linopy.Constraint.update(rhs=...)`) and re-solves, rather than paying
+    for a full model rebuild every time.
+
+    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
+    :raises RuntimeError: If a call's solve does not reach `status="ok"`.
+    """
+    if norm not in _CLOSEST_POINT_SUPPORTED_NORMS:
+        raise NotImplementedError(
+            f"make_closest_point_fn only supports norm in {_CLOSEST_POINT_SUPPORTED_NORMS} for now, "
+            f"got {norm!r} -- l2 needs a quadratic objective (Gurobi-only, like gurobi_projection."
+            f"closest_point_on_hull)."
+        )
+    keys = list(dimensions.keys())
+    if model_kwargs is None:
+        model_kwargs = options.params.optimize.model_kwargs.copy()
+    if snapshots is None:
+        snapshots = n.snapshots
+    if not n.is_solved:
+        msg = "Network needs to be solved with `n.optimize()` before running MGA."
+        raise ValueError(msg)
+
+    m = n.optimize.create_model(
+        snapshots=snapshots,
+        multi_investment_periods=multi_investment_periods,
+        **model_kwargs,
+    )
+    n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
+
+    # r_key == target_key - dim_key(x), i.e. r_key + dim_key(x) == target_key
+    # -- RHS starts at 0 (target=0) and is updated to the real target on
+    # every call to `closest_point` below.
+    resid_constrs = {}
+    for key in keys:
+        r = m.add_variables(lower=-np.inf, name=f"mga_surveyor_resid_{key}")
+        dim_expr = n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum()
+        resid_constrs[key] = m.add_constraints(r + dim_expr == 0.0, name=f"mga_surveyor_resid_constr_{key}")
+
+    if norm == "linf":
+        t = m.add_variables(lower=0.0, name="mga_surveyor_closest_point_t")
+        for key in keys:
+            r = m.variables[f"mga_surveyor_resid_{key}"]
+            m.add_constraints(t - r >= 0.0, name=f"mga_surveyor_tpos_{key}")
+            m.add_constraints(t + r >= 0.0, name=f"mga_surveyor_tneg_{key}")
+        m.objective = 1 * t  # bare Variable isn't a valid objective -- coerce to LinearExpression
+    else:  # l1
+        s_vars = []
+        for key in keys:
+            r = m.variables[f"mga_surveyor_resid_{key}"]
+            s = m.add_variables(lower=0.0, name=f"mga_surveyor_s_{key}")
+            m.add_constraints(s - r >= 0.0, name=f"mga_surveyor_spos_{key}")
+            m.add_constraints(s + r >= 0.0, name=f"mga_surveyor_sneg_{key}")
+            s_vars.append(s)
+        m.objective = sum(s_vars)
+
+    def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        target = np.asarray(target, dtype=float)
+        for key, target_value in zip(keys, target):
+            resid_constrs[key].update(rhs=float(target_value))
+
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = f"Closest-point solve for target {dict(zip(keys, target.tolist()))} failed: status={status}, condition={condition}"
+            raise RuntimeError(msg)
+
+        point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
+        normal = np.array([float(resid_constrs[key].dual) for key in keys])
+        return point, normal
+
+    return closest_point
 
 
 def optimize_mga_in_direction(

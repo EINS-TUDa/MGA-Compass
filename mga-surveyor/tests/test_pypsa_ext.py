@@ -5,9 +5,11 @@ import pytest
 
 from mga_surveyor import (
     VertexEnumMethod,
+    make_closest_point_fn,
     make_furthest_point_fn,
     optimize_mga_in_direction,
     optimize_mga_in_multiple_directions,
+    run as mga_surveyor_run,
 )
 
 DIMENSIONS = {
@@ -195,6 +197,75 @@ def test_make_furthest_point_fn_caches_alongside_new_directions(tmp_path):
     np.testing.assert_allclose(second[0], [999.0, 999.0])
     # point 2: a genuine new solve, nowhere near the tampered sentinel value.
     assert not np.allclose(second[1], [999.0, 999.0])
+
+
+def test_make_closest_point_fn_rejects_l2():
+    n = _build_network()
+    with pytest.raises(NotImplementedError, match="l1.*linf|linf.*l1"):
+        make_closest_point_fn(n, DIMENSIONS, norm="l2", slack=0.1, solver_name="highs")
+
+
+def test_make_closest_point_fn_feasible_target_returns_target():
+    n = _build_network()
+    optimal = np.array([n.generators.at["wind", "p_nom_opt"], n.generators.at["solar", "p_nom_opt"]])
+    closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
+
+    # The network's own optimum is itself a feasible point (trivially within
+    # the near-optimal budget) -- projecting it onto the region should
+    # return it unchanged, with a ~zero gap.
+    point, _normal = closest_point(optimal)
+    np.testing.assert_allclose(point, optimal, atol=1e-4)
+
+
+def test_make_closest_point_fn_returns_valid_separating_hyperplane():
+    """The whole point of `normal`: every feasible point must satisfy
+    `normal @ (x - point) <= 0` -- this is what makes it usable as a cut in
+    `Method.add_cut`. Checked against real extreme points of the network's
+    own near-optimal region (from make_furthest_point_fn), not just trusted
+    by construction."""
+    n = _build_network()
+    k = len(DIMENSIONS)
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
+    box_directions = np.vstack([np.eye(k), -np.eye(k)])
+    feasible_points = furthest_point(box_directions)
+
+    closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
+    target = np.array([-100.0, -100.0])  # far outside the near-optimal region
+    point, normal = closest_point(target)
+
+    # target itself was infeasible, so the projection must have moved
+    assert not np.allclose(point, target)
+    assert not np.allclose(normal, 0.0)
+
+    violations = normal @ (feasible_points - point).T
+    assert (violations <= 1e-6).all(), f"normal is not a valid separating hyperplane: {violations}"
+
+
+def test_make_closest_point_fn_end_to_end_with_runner_run():
+    """The strongest check: bootstrap a real VertexEnumMethod from a real
+    network (via make_furthest_point_fn) and drive it through
+    mga_surveyor.runner.run using make_closest_point_fn as the
+    ClosestFeasiblePointFn oracle -- confirms the two PyPSA-side oracles
+    actually work together to converge the whole algorithm, not just pass
+    checks in isolation."""
+    n = _build_network()
+    k = len(DIMENSIONS)
+
+    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
+    box_directions = np.vstack([np.eye(k), -np.eye(k)])
+    points = furthest_point(box_directions)
+
+    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method.bootstrap(list(points), list(zip(box_directions, points)))
+    initial_gap = method.max_gap()
+    assert initial_gap > 0
+
+    closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
+    history = mga_surveyor_run(method, closest_point, tol=1e-3, max_iter=30, verbose=False)
+
+    assert len(history) > 0
+    assert method.max_gap() < 1e-3
+    assert method.max_gap() < initial_gap
 
 
 def test_optimize_mga_in_multiple_directions_exports_nc_files(tmp_path):
