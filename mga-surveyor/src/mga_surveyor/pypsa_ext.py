@@ -78,6 +78,7 @@ from __future__ import annotations
 import logging
 import pickle
 import tempfile
+from functools import partial
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -622,29 +623,40 @@ def optimize_mga_in_direction(
 def _solve_single_direction(
     n: Network,
     direction: dict,
+    *,
     dimensions: dict,
     snapshots: Sequence | None,
     multi_investment_periods: bool,
     slack: float,
-    model_kwargs: dict,
+    model_kwargs: dict | None,
     resolve_main_objective: bool,
-    kwargs: dict,
-    output_fn: str,
-) -> tuple[dict, None, None, None] | tuple[dict, pd.Series, pd.Series, float]:
-    """Solve a single direction for parallel execution (helper for `optimize_mga_in_multiple_directions`).
+    **kwargs: Any,
+) -> tuple[dict, None, None, None] | tuple[dict, Network, pd.Series, pd.Series]:
+    """Thin worker wrapper around `optimize_mga_in_direction` for parallel
+    execution (helper for `optimize_mga_in_multiple_directions`) -- adds
+    exactly the two things a direct call to `optimize_mga_in_direction`
+    itself can't express:
 
-    `n` is passed directly (multiprocessing pickles a fresh, independent
-    copy per task, so mutating it here never affects the caller's `n` or
-    other workers') rather than reloaded from a file -- see this module's
-    docstring for why that's the right call on PyPSA >=1.3.0. The (this
-    worker's own, mutated) `n` is solved and exported to `output_fn` as a
-    NetCDF file so downstream code can extract per-point data from it later.
+    - `KeyboardInterrupt` handling: a worker being cancelled should return a
+      sentinel so the batch can finish gracefully, not propagate and crash
+      it -- the opposite of what a direct caller wants (real failures, see
+      `optimize_mga_in_direction`'s docstring, are deliberately NOT caught
+      here; they propagate through `pool.starmap` and abort the whole batch,
+      same as before).
+    - Returning the worker's own (solved, mutated) `n` back to the parent
+      process: multiprocessing gives each worker an independent pickled
+      copy of `n`, so the parent has no other way to see what a worker did
+      to it. `optimize_mga_in_multiple_directions` does the NetCDF export
+      and `obj` computation itself with this returned `n`, rather than
+      duplicating that here in every worker.
 
-    Real failures (a bug, or a genuine solver/numerical problem — see
-    `optimize_mga_in_direction`) are deliberately not caught here: they propagate
-    through `pool.starmap` and fail the whole batch loudly, rather than silently
-    dropping a point. The only case handled here is a worker being interrupted
-    (e.g. Ctrl+C), which is not a failure to report, just a graceful shutdown.
+    Bound via `functools.partial` before dispatch (see
+    `optimize_mga_in_multiple_directions`), not a packed `kwargs: dict`
+    parameter re-expanded with `**kwargs` inside the worker -- solver
+    options travel through `partial`'s own (picklable) bound state instead,
+    so this keeps `optimize_mga_in_direction`'s own `**kwargs` ergonomics
+    rather than needing a second, worker-specific calling convention for
+    them.
     """
     try:
         _, _, coordinates, duals = optimize_mga_in_direction(
@@ -658,14 +670,10 @@ def _solve_single_direction(
             resolve_main_objective=resolve_main_objective,
             **kwargs,
         )
-        n.export_to_netcdf(output_fn)
-        obj = n.statistics.capex().sum() + n.statistics.opex().sum()
     except KeyboardInterrupt:
         logger.info("Worker process interrupted")
         return (direction, None, None, None)
-    else:
-        logger.info("slack=%s: solved %s", slack, Path(output_fn).stem)
-        return (direction, coordinates, duals, obj)
+    return (direction, n, coordinates, duals)
 
 
 def optimize_mga_in_multiple_directions(
@@ -768,7 +776,20 @@ def optimize_mga_in_multiple_directions(
     # n is passed directly to each worker task below (multiprocessing pickles
     # a fresh, independent copy per task) rather than exported to a temp file
     # and reloaded in each worker -- see this module's docstring for why
-    # that's the right call on PyPSA >=1.3.0.
+    # that's the right call on PyPSA >=1.3.0. Everything except (n, direction)
+    # is bound once via functools.partial, so _solve_single_direction keeps
+    # optimize_mga_in_direction's own **kwargs calling convention instead of
+    # needing a separate packed-dict one just for pool.starmap's sake.
+    worker = partial(
+        _solve_single_direction,
+        dimensions=dimensions,
+        snapshots=snapshots,
+        multi_investment_periods=multi_investment_periods,
+        slack=slack,
+        model_kwargs=model_kwargs,
+        resolve_main_objective=resolve_main_objective,
+        **kwargs,
+    )
     with (
         get_context("spawn").Pool(
             processes=max_parallel,
@@ -783,36 +804,29 @@ def optimize_mga_in_multiple_directions(
     ):
         try:
             results = pool.starmap(
-                _solve_single_direction,
-                [
-                    (
-                        n,
-                        direction,
-                        dimensions,
-                        snapshots,
-                        multi_investment_periods,
-                        slack,
-                        model_kwargs,
-                        resolve_main_objective,
-                        kwargs,
-                        str(output_fns[pid]),
-                    )
-                    for pid, direction in zip(point_ids, directions)
-                ],
+                worker,
+                [(n, direction) for direction in directions],
             )
         except Exception:
             pool.terminate()
             pool.join()
             raise
 
-    # coords is only None here if that worker was interrupted (e.g. Ctrl+C):
-    # real solve failures raise inside the worker and abort the whole batch
-    # via the `except Exception: pool.terminate(); ...; raise` above.
-    successful = [
-        (pid, direction, pd.concat([coords, pd.Series({obj_label: obj})]), duals)
-        for pid, (direction, coords, duals, obj) in zip(point_ids, results)
-        if coords is not None
-    ]
+    # n_result is only None here if that worker was interrupted (e.g.
+    # Ctrl+C): real solve failures raise inside the worker and abort the
+    # whole batch via the `except Exception: pool.terminate(); ...; raise`
+    # above. Exporting the worker's own solved network and computing obj
+    # happens here, not inside the worker -- see _solve_single_direction's
+    # docstring for why that's the parent's job now.
+    successful = []
+    for pid, (direction, n_result, coords, duals) in zip(point_ids, results):
+        if n_result is None:
+            continue
+        n_result.export_to_netcdf(str(output_fns[pid]))
+        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+        successful.append((pid, direction, pd.concat([coords, pd.Series({obj_label: obj})]), duals))
+        logger.info("slack=%s: solved %s", slack, output_fns[pid].stem)
+
     interrupted_count = len(results) - len(successful)
     if interrupted_count > 0:
         logger.warning(
