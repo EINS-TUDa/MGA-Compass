@@ -1,106 +1,59 @@
-"""Run PyPSA's Modelling-to-Generate-Alternatives (MGA) and persist one solved
-network per direction as NetCDF.
+"""Run PyPSA's Modelling-to-Generate-Alternatives (MGA) against a real,
+already-solved network, optionally caching each solved point as NetCDF.
 
-optimize_mga_in_direction and optimize_mga_in_multiple_directions wrap PyPSA's own
-n.optimize methods of the same name (OptimizationAbstractMGAMixin), reusing
-n.optimize.build_linexpr_from_weights/_add_near_opt_constraint/project_solved
-as-is, with two behavioral differences:
+make_optimality_fn builds a callable that solves and caches n's own
+cost-minimizing optimum at output_dir/optimal.nc, returning its point in
+dimensions space -- the precondition every other function here assumes.
+Also pins that point's coordinates and re-solves for real per-dimension
+duals, cached in n.meta["duals"] -- same pinned-resolve idea as
+make_furthest_point_fn/make_closest_point_fn's own resolve_main_objective.
 
-- optimize_mga_in_direction re-solves the original objective with the projected MGA
-  coordinates pinned via equality constraints, so the network ends up at a feasible
-  solution that matches the returned coordinates exactly, and returns the shadow
-  prices of those pinned constraints.
-- optimize_mga_in_multiple_directions exports each direction's solved network to
-  ``output_dir/mga_result_{i}.nc`` and appends the objective value (capex + opex,
-  labeled ``obj_label``) to the returned coordinates, so downstream code can extract
-  per-point timeseries/capacity data from the saved networks.
+make_furthest_point_fn solves MGA in one or more directions: a batched
+support-function query against n's near-optimal feasible region. Always
+returns (points, normals) -- normal is just the query direction, free.
+resolve_main_objective=True (default) additionally does the
+pinned-coordinate re-solve for real duals/obj, cached in n.meta but not
+part of the return value (pass False to skip that extra solve). Has its
+own dedicated solver/worker/cache
+(_build_furthest_point_solver/_init_furthest_point_worker/
+_solve_furthest_point_direction), reused across a whole batch instead of
+rebuilt per direction.
 
-make_furthest_point_fn builds a batched support-function query against a
-real, already-solved PyPSA network -- the PyPSA-side half of plugging a real
-system model into `mga_surveyor`'s inner/outer approximation engine instead
-of only `mga_surveyor.tests.lp_region`'s explicit-LP test region. Unlike
-`mga_surveyor.runner.FurthestPointFn` (one direction in, one point out, e.g.
-`runner.bootstrap_box`'s per-direction loop), it takes several directions at
-once and solves them in parallel via `optimize_mga_in_multiple_directions`'s
-multiprocessing.Pool -- e.g. call it once with all `2k` box directions
-instead of looping a single-direction query `2k` times.
+make_closest_point_fn finds the closest point in n's near-optimal region to
+a target, plus a separating-hyperplane normal -- PyPSA has no built-in
+equivalent. resolve_main_objective=True (default) also pins that point's
+coordinates and re-solves the original objective for real per-dimension
+duals, cached in n.meta but not part of the return value (still just
+(point, normal), matching runner.ClosestPointFn); pass False to skip that
+re-solve. A single-target call reuses one persistent in-process model; a
+batch spreads targets across a multiprocessing.Pool, each worker building
+its own solver once. Only l1/linf supported (l2 needs a quadratic
+objective, Gurobi-only).
 
-make_closest_point_fn builds the other oracle half, a
-`mga_surveyor.runner.ClosestFeasiblePointFn` for `runner.run`'s main loop --
-PyPSA has no equivalent query built in (only direction-based ones), so it's
-written from scratch here, structurally mirroring
-`mga_surveyor.tests.lp_region.closest_point_in_region`'s residual-variables-
-plus-norm-specific-objective construction but against `n`'s own real
-constraints instead of an explicit `(A_ub, b_ub)`. `run`'s loop calls this
-one target at a time (each iteration's query depends on the previous
-iteration's result, so those calls can't be batched against each other) --
-for that path the model is built once, in-process, and each call just
-updates the residual constraints' RHS in place and re-solves, rather than
-paying for a full model rebuild every time. A separate, independent batch
-path exists for callers issuing several targets in one call (e.g. a
-`Method.find_trial_point` returning more than one worst point at once):
-that path follows the same design as `optimize_mga_in_multiple_directions`,
-at the same granularity -- one `pool.starmap` task per target, not a
-pre-split chunk, matching `_solve_single_direction`'s one-task-per-
-direction, letting the Pool's own queue decide which worker handles which
-target rather than fixing that assignment upfront. Unlike
-`_solve_single_direction` (which does pay a fresh model rebuild every
-task, since each direction needs a different objective anyway), the
-closest-point model is IDENTICAL across every target in one batch call --
-only the RHS differs -- so each worker process builds the solver exactly
-once, before it is dispatched any tasks at all, via
-`_init_closest_point_worker` (this batch `Pool`'s own `initializer`, per
-`multiprocessing.Pool`'s `initializer`/`initargs`), and
-`_solve_closest_point_target` then just reuses that cached solver (see
-`_worker_closest_point_solver`) for every task that worker happens to pick
-up, rather than rebuilding per task. Worth spreading across a real
-`multiprocessing.Pool` at all (instead of solving the whole batch serially
-in one process) since a closest-point solve is expensive regardless of the
-build cost (confirmed: linopy has no warm-start/persistent-solve path, so
-every solve re-solves the whole problem from scratch every time) -- the
-process-startup overhead pays for itself even before counting the
-model-build savings above. Only `l1`/`linf` are supported for now
-(LP-representable, HiGHS-compatible); `l2` would need a quadratic
-objective, Gurobi-only like everywhere else L2
-shows up in this package.
+Both batch paths pass the PyPSA Network directly to worker processes
+(picklable as of PyPSA 1.3.0, github.com/PyPSA/PyPSA/pull/1889) instead of
+exporting to NetCDF and reloading. make_closest_point_fn's batch path also
+snapshots n via pickle before any solve can mutate it, since
+Network.copy() refuses on a network with an attached solver model.
 
-Both multiprocessing.Pool paths above (this module's and
-optimize_mga_in_multiple_directions's) pass the PyPSA `Network` object
-directly to worker processes, rather than exporting it to a NetCDF file and
-reloading it inside each worker. PyPSA networks -- including solved ones
-with a linopy model attached -- are picklable as of PyPSA 1.3.0
-(github.com/PyPSA/PyPSA/pull/1889, fixing a `SubNetwork` weakref that used
-to break it); confirmed to work correctly, including re-solving inside the
-worker, over an actual spawn-context Pool, for both HiGHS and Gurobi. The
-old export-and-reload approach was a real, necessary workaround for
-essentially all of PyPSA's history before that fix -- not a design mistake
-at the time -- but on PyPSA >=1.3.0 it was measured to cost ~15x (direction
-solves) to ~7x (closest-point solves) more per task than passing `n`
-directly, dominated by `Network(fn)`'s own reconstruction cost (~5.7s on
-the package's test network, regardless of network size or process
-warm-up state) rather than anything about the actual model-building or
-solving. `make_closest_point_fn`'s batch path additionally needs an
-independent, unmutated snapshot of `n` (a single-target call already
-mutates `n` via `solve_model()`'s side effect of writing solution values
-back onto it) -- taken via a `pickle` round-trip rather than PyPSA's own
-`Network.copy()`, which refuses on a network with an attached solver model.
+make_oracle_fns builds all three of the above in one call, sharing
+n/dimensions/output_dir -- a convenience for feeding runner.run's three
+callback parameters directly.
 """
 from __future__ import annotations
 
 import logging
 import pickle
-import tempfile
-from functools import partial
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pandas as pd
+from linopy import LinearExpression, QuadraticExpression
 from pypsa._options import options
-from pypsa.optimization.mga import _convert_to_dict, _worker_init
+from pypsa.optimization.mga import _worker_init
 
-from .runner import ClosestFeasiblePointFn
+from .runner import ClosestPointFn
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -108,16 +61,253 @@ if TYPE_CHECKING:
     from pypsa import Network
 
 logger = logging.getLogger(__name__)
-# Explicit level so per-point progress logging (below) is visible even though
-# worker processes' `_worker_init` sets the root logger level to WARNING.
+# Explicit level so per-point progress logging (below) stays visible even
+# though worker processes' _worker_init sets the root logger to WARNING.
 logger.setLevel(logging.INFO)
 
 __all__ = [
+    "make_optimality_fn",
     "make_furthest_point_fn",
     "make_closest_point_fn",
-    "optimize_mga_in_direction",
-    "optimize_mga_in_multiple_directions",
+    "make_oracle_fns",
+    "encode_cache_key",
+    "decode_cache_key",
 ]
+
+
+def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **kwargs: Any) -> Callable[[], np.ndarray]:
+    """Build a callable that solves `n`'s own cost-minimizing optimum,
+    caches it at `output_dir/optimal.nc`, and returns its point in
+    `dimensions` space -- structurally mirrors `make_furthest_point_fn`/
+    `make_closest_point_fn`.
+
+    After solving, the optimal point's coordinates are pinned and the same
+    cost objective is re-solved to read real per-dimension duals off those
+    pinned constraints -- the marginal cost of each dimension at the
+    optimum -- cached alongside the point in `n.meta["duals"]`, same idea
+    as `make_furthest_point_fn`/`make_closest_point_fn`'s own
+    `resolve_main_objective`.
+
+    If `output_dir/optimal.nc` already exists, its point is read back from
+    `n.meta["coordinates"]` (stashed there on save, same as everywhere else
+    in this module) instead of re-solving.
+
+    :raises RuntimeError: If a solve does not reach `status="ok"`.
+    """
+    keys = list(dimensions.keys())
+    optimal_fn = Path(output_dir) / "optimal.nc"
+
+    def solve_optimal() -> np.ndarray:
+        if optimal_fn.exists():
+            from pypsa import Network as _Network  # noqa: PLC0415
+
+            cached_coordinates = _Network(optimal_fn).meta["coordinates"]
+            return np.array([cached_coordinates[k] for k in keys])
+
+        m = n.optimize.create_model()
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = f"Solve to optimality failed: status={status}, condition={condition}"
+            raise RuntimeError(msg)
+        point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
+
+        for key, value in zip(keys, point):
+            m.add_constraints(
+                n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == float(value),
+                name=f"coord_{key}",
+            )
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = f"Re-solve at pinned optimal coordinates failed: status={status}, condition={condition}"
+            raise RuntimeError(msg)
+        duals = np.array([float(m.constraints[f"coord_{key}"].dual) for key in keys])
+
+        n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, point)}
+        n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
+
+        optimal_fn.parent.mkdir(parents=True, exist_ok=True)
+        n.export_to_netcdf(str(optimal_fn))
+        return point
+
+    return solve_optimal
+
+
+def encode_cache_key(vec: np.ndarray, decimals: int) -> str:
+    """Reversible, filename-safe encoding of a numeric vector: round each
+    component to `decimals` places (default 8, so vectors differing only
+    beyond that collide onto the same key by design), then hex-encode the
+    rounded array's float64 bytes.
+    """
+    rounded = np.round(np.asarray(vec, dtype=np.float64), decimals) + 0.0  # +0.0 normalizes -0.0 to 0.0
+    return rounded.tobytes().hex()
+
+
+def decode_cache_key(key: str) -> np.ndarray:
+    """Inverse of `encode_cache_key`."""
+    return np.frombuffer(bytes.fromhex(key), dtype=np.float64)
+
+
+def _build_furthest_point_solver(
+    n: Network,
+    dimensions: dict,
+    slack: float,
+    snapshots: Sequence | None,
+    multi_investment_periods: bool,
+    model_kwargs: dict | None,
+    kwargs: dict,
+    resolve_main_objective: bool,
+) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, Network, str]]:
+    """Build the furthest-point model against `n` once, and return a
+    single-direction `(point, duals, n, condition)` solver reusing it.
+
+    Each call reassigns `m.objective` to that direction's support function
+    and re-solves against a fixed `budget` near-optimal-cost constraint.
+
+    If `resolve_main_objective`: also pins the solved coordinates, drops
+    `budget`, re-solves the original cost objective for duals, then undoes
+    the pin and re-adds `budget` -- using `optimal_cost`/`fixed_cost`
+    captured once up front, NOT by calling
+    `n.optimize._add_near_opt_constraint()` again, which would recompute
+    them from `n`'s by-then-mutated state.
+
+    :raises RuntimeError: If a solve does not reach `status="ok"`.
+    """
+    keys = list(dimensions.keys())
+    if model_kwargs is None:
+        model_kwargs = options.params.optimize.model_kwargs.copy()
+    if snapshots is None:
+        snapshots = n.snapshots
+    if not n.is_solved:
+        msg = "Network needs to be solved with `n.optimize()` before running MGA."
+        raise ValueError(msg)
+
+    m = n.optimize.create_model(
+        snapshots=snapshots,
+        multi_investment_periods=multi_investment_periods,
+        **model_kwargs,
+    )
+    main_obj = m.objective
+
+    # Captured once, before n is mutated by any solve -- see docstring.
+    if not multi_investment_periods:
+        optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
+        fixed_cost = n.statistics.installed_capex().sum()
+    else:
+        w = n.investment_period_weightings.objective
+        optimal_cost = (n.statistics.capex().sum() * w + n.statistics.opex().sum() * w).sum()
+        fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
+
+    def add_budget_constraint() -> None:
+        # Only ever called with m.objective == main_obj.
+        objective = m.objective
+        if not isinstance(objective, (LinearExpression, QuadraticExpression)):
+            objective = objective.expression
+        m.add_constraints(objective + fixed_cost <= (1 + slack) * optimal_cost, name="budget")
+
+    add_budget_constraint()
+
+    def solve_one(direction_row: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
+        m.objective = -sum(
+            direction_row[i] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
+            for i, key in enumerate(keys)
+        )
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = (
+                f"Furthest-point solve for direction {dict(zip(keys, direction_row.tolist()))} "
+                f"failed: status={status}, condition={condition}"
+            )
+            raise RuntimeError(msg)
+        coordinates = n.optimize.project_solved(dimensions)
+        point = coordinates.loc[keys].to_numpy(dtype=float)
+
+        if not resolve_main_objective:
+            return point, None, n, condition
+
+        pinned_keys = [key for i, key in enumerate(keys) if direction_row[i] != 0]
+        for key in pinned_keys:
+            m.add_constraints(
+                n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == coordinates[key].item(),
+                name=f"coord_{key}",
+            )
+        m.remove_constraints("budget")
+        m.objective = main_obj
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = (
+                f"Re-solve at pinned coordinates for direction {dict(zip(keys, direction_row.tolist()))} "
+                f"failed: status={status}, condition={condition}"
+            )
+            raise RuntimeError(msg)
+        duals_by_key = {key: float(m.constraints[f"coord_{key}"].dual) for key in pinned_keys}
+        duals = np.array([duals_by_key.get(key, 0.0) for key in keys])
+
+        # Undo this call's own additions so the model is ready for the next call.
+        if pinned_keys:
+            m.remove_constraints([f"coord_{key}" for key in pinned_keys])
+        add_budget_constraint()
+
+        return point, duals, n, condition
+
+    return solve_one
+
+
+#: This worker's own furthest-point solver, built once by
+#: _init_furthest_point_worker and reused by _solve_furthest_point_direction
+#: for every task this worker process handles.
+_worker_furthest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray | None, Network, str]] | None = None
+
+
+def _init_furthest_point_worker(
+    n: Network,
+    dimensions: dict,
+    slack: float,
+    snapshots: Sequence | None,
+    multi_investment_periods: bool,
+    model_kwargs: dict | None,
+    kwargs: dict,
+    resolve_main_objective: bool,
+) -> None:
+    """Pool initializer for `make_furthest_point_fn`'s batch path -- builds
+    this worker's solver once via `_build_furthest_point_solver`, before
+    any tasks are dispatched.
+    """
+    _worker_init()
+    global _worker_furthest_point_solver
+    _worker_furthest_point_solver = _build_furthest_point_solver(
+        n, dimensions, slack, snapshots, multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+    )
+
+
+def _solve_furthest_point_direction(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
+    """One `pool.starmap` task: solve a single direction against this
+    worker's already-built solver (see `_init_furthest_point_worker`).
+    """
+    return _worker_furthest_point_solver(direction)
+
+
+def _cache_furthest_point_result(
+    n: Network, output_dir: str | Path, key: str, keys: list,
+    point: np.ndarray, duals: np.ndarray | None, obj: float, direction: np.ndarray,
+) -> None:
+    """Stash `coordinates`/`obj`/`normal` into `n.meta` and export to
+    `output_dir/mga_furthest_result_{key}.nc`. `normal` is the query `direction`
+    itself -- already a valid separating-hyperplane normal at the point it
+    maximizes, same concept `_cache_closest_point_result`'s own `normal`
+    is, just sourced differently (the query itself here, a residual
+    constraint's dual there). `duals` is only stashed (as `n.meta["duals"]`)
+    when not `None` -- i.e. when `resolve_main_objective` actually computed
+    it; otherwise `n.meta` has no `"duals"` key at all, rather than a
+    placeholder.
+    """
+    n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, point)}
+    if duals is not None:
+        n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
+    n.meta["obj"] = float(obj)
+    n.meta["normal"] = {k: float(v) for k, v in zip(keys, direction)}
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n.export_to_netcdf(str(output_dir / f"mga_furthest_result_{key}.nc"))
 
 
 def make_furthest_point_fn(
@@ -125,122 +315,147 @@ def make_furthest_point_fn(
     dimensions: dict,
     slack: float,
     output_dir: str | Path | None = None,
+    decimals: int = 8,
+    resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
     model_kwargs: dict | None = None,
     max_parallel: int = 4,
     **kwargs: Any,
-) -> Callable[..., np.ndarray]:
-    """Build a batched support-function query against a real,
-    already-solved PyPSA network `n`, backed by
-    `optimize_mga_in_multiple_directions`'s `multiprocessing.Pool` so that
-    passing several directions at once solves them in parallel.
+) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """Build a batched MGA-direction query against a real, already-solved
+    PyPSA network `n`.
 
     The returned callable takes `directions` -- an `(n_directions, k)` array
-    (a single 1D `(k,)` direction is promoted to a length-1 batch) -- and
-    returns the corresponding `(n_directions, k)` array of points in `n`'s
-    own near-optimal feasible region, each maximizing its direction. E.g.
-    call it once with all `2k` box directions
-    (`np.vstack([np.eye(k), -np.eye(k)])`) to bootstrap a `Method`, instead
-    of looping a single-direction query `2k` times.
+    (a single `(k,)` direction is promoted to a length-1 batch) -- and
+    always returns `(points, normals)`: each direction's point in `n`'s
+    near-optimal feasible region (`(n_directions, k)`, not shape-preserving
+    -- a single direction still comes back as a length-1 array) and its
+    separating-hyperplane normal, which for a furthest-point query is just
+    the query direction itself, echoed back (free -- no extra solve).
 
-    `dimensions`' key order fixes the axis order of both `directions` and
-    the returned points -- the same fixed `k`-dimensional order
-    `mga_surveyor` assumes throughout (see `mga_surveyor.common`).
+    `resolve_main_objective=True` (default) additionally pins each found
+    point's coordinates and re-solves the original cost objective for real
+    per-dimension duals and that point's own capex+opex cost -- cached
+    alongside the point in `n.meta["duals"]`/`n.meta["obj"]`, but NOT part
+    of the return value (kept fixed at `(points, normals)` either way, so
+    callers -- e.g. `runner.run` -- don't need to know which was used).
+    Pass `False` to skip that extra solve.
 
-    Every call passes `resolve_main_objective=False` through to
-    `optimize_mga_in_multiple_directions`: only the projected points are
-    needed here, not the pinned re-solve/duals that flag skips (see
-    `optimize_mga_in_direction`'s docstring).
+    `dimensions`' key order fixes the axis order of `directions`/`points`/
+    `normals`.
 
-    Caching: pass a real, persistent `output_dir` (one that already exists,
-    or should be created and kept) to cache each direction's result there
-    across separate calls -- a later call whose `point_ids` line up with an
-    already-solved `output_dir/mga_result_{point_id}.nc` reads that
-    direction's point straight off disk (via `n.meta["coordinates"]`,
-    stashed there for exactly this by `optimize_mga_in_direction`) instead
-    of re-solving it, on top of `optimize_mga_in_multiple_directions`'s own
-    `skip_existing` already skipping the solve itself. This is an exact,
-    ID-keyed cache, the same tradeoff `optimize_mga_in_multiple_directions`'s
-    `skip_existing` already documents: it's the CALLER's job to use a fresh
-    `output_dir` (or `point_ids`) whenever `dimensions`/`slack`/`n`'s own
-    state changes in a way that would make an old cached result wrong --
-    nothing here detects that automatically. `point_ids` defaults to
-    `range(len(directions))`, i.e. each direction's row position -- already
-    a stable, natural key for the common case of repeatedly calling this
-    with the same `2k` box directions built the same way every time.
+    Caching: pass a persistent `output_dir` to cache each direction's
+    result at `output_dir/mga_furthest_result_{key}.nc`, content-addressed by the
+    direction itself (see `encode_cache_key`). `None` (default) disables
+    caching. A cache hit on the single-direction path skips solving
+    entirely, so `n` is NOT mutated by a call that only reads a cache hit.
 
-    Parameters
-    ----------
-    output_dir : str | Path | None
-        Where each direction's solved network gets exported, and (see
-        "Caching" above) where a later call reads already-solved directions
-        back from instead of re-solving. If None (the default), a fresh
-        temporary directory is used per call and deleted afterward -- no
-        caching is possible across separate calls in that case, only
-        (trivially) within a single call's own batch.
-
-    :raises RuntimeError: If any direction doesn't come back solved or
-        cached. `optimize_mga_in_multiple_directions` itself already raises
-        on a genuine solve failure (see its docstring for why a well-formed
-        direction should never actually fail); the only other way to come
-        back short is a worker being interrupted (e.g. Ctrl+C), treated the
-        same as a failure here since a partial batch isn't useful to the
-        caller.
+    :raises RuntimeError: If a solve does not reach `status="ok"` (see
+        `_build_furthest_point_solver`).
     """
     keys = list(dimensions.keys())
 
-    def furthest_points(directions: np.ndarray, point_ids: Sequence[Any] | None = None) -> np.ndarray:
+    # Snapshot n before any solve can mutate it -- the batch path's workers
+    # need n's true original state for the budget constraint.
+    pristine_n = pickle.loads(pickle.dumps(n))
+
+    solve_one = _build_furthest_point_solver(
+        n, dimensions, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
+        resolve_main_objective=resolve_main_objective,
+    )
+
+    def furthest_points(directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Always returns `(points, normals)` -- see `make_furthest_point_fn`'s
+        docstring. `duals`/`obj` are computed (if `resolve_main_objective`)
+        and cached to `output_dir`, but never part of the return value.
+
+        A length-1 batch is solved directly against the persistent
+        in-process model built above (or read from `output_dir`'s cache);
+        a longer batch has its already-cached rows read from disk and every
+        other row dispatched as its own `pool.starmap` task, spread across
+        `min(max_parallel, n_todo)` worker processes each building its own
+        solver once.
+        """
         directions = np.atleast_2d(np.asarray(directions, dtype=float))
-        directions_df = pd.DataFrame(directions, columns=keys)
-        if point_ids is None:
-            point_ids = list(range(len(directions)))
 
-        # Caching only makes sense against a persistent directory -- a fresh
-        # temp dir deleted at the end of this call could never produce a hit
-        # on a later call anyway, so skip_existing would just be dead weight.
-        caching = output_dir is not None
-        tmp_dir = None if caching else tempfile.TemporaryDirectory(prefix="mga_surveyor_furthest_points_")
-        resolved_output_dir = Path(output_dir) if caching else Path(tmp_dir.name)
-        try:
-            _dirs_df, coordinates_df, _duals_df = optimize_mga_in_multiple_directions(
-                n,
-                directions=directions_df,
-                dimensions=dimensions,
-                output_dir=resolved_output_dir,
-                point_ids=point_ids,
-                skip_existing=caching,
-                snapshots=snapshots,
-                multi_investment_periods=multi_investment_periods,
-                slack=slack,
-                model_kwargs=model_kwargs,
-                resolve_main_objective=False,
-                max_parallel=max_parallel,
-                **kwargs,
-            )
+        if len(directions) == 1:
+            d = directions[0]
+            cached = None
+            if output_dir is not None:
+                key = encode_cache_key(d, decimals)
+                cached_fn = Path(output_dir) / f"mga_furthest_result_{key}.nc"
+                if cached_fn.exists():
+                    from pypsa.networks import Network as _Network  # noqa: PLC0415
 
-            points_by_id = {
-                pid: coordinates_df.loc[pid, keys].to_numpy(dtype=float) for pid in coordinates_df.index
-            }
-            # Anything not just solved: either a cache hit skip_existing made
-            # (caching=True) or -- if it's still missing after that -- a
-            # genuinely failed/interrupted point, which is an error either way.
-            for pid in point_ids:
-                if pid in points_by_id:
-                    continue
-                cached_fn = resolved_output_dir / f"mga_result_{pid}.nc"
-                if not cached_fn.exists():
-                    msg = f"Direction {pid!r} was neither solved nor found cached at {cached_fn}."
-                    raise RuntimeError(msg)
-                from pypsa.networks import Network as _Network  # noqa: PLC0415
+                    cached_meta = _Network(cached_fn).meta
+                    cached = (
+                        np.array([cached_meta["coordinates"][k] for k in keys]),
+                        np.array([cached_meta["normal"][k] for k in keys]),
+                    )
+            if cached is not None:
+                results = [cached]
+            else:
+                point, duals, n_result, _condition = solve_one(d)
+                obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                if output_dir is not None:
+                    _cache_furthest_point_result(n_result, output_dir, key, keys, point, duals, obj, d)
+                results = [(point, d)]
+        else:
+            # Passes pristine_n, not n's current state -- n may already be
+            # mutated by an earlier single-direction call above.
+            results = [None] * len(directions)
+            todo_idx = list(range(len(directions)))
+            cache_keys = None
+            if output_dir is not None:
+                cache_keys = [encode_cache_key(row, decimals) for row in directions]
+                todo_idx = []
+                for i, key in enumerate(cache_keys):
+                    cached_fn = Path(output_dir) / f"mga_furthest_result_{key}.nc"
+                    if not cached_fn.exists():
+                        todo_idx.append(i)
+                        continue
+                    from pypsa.networks import Network as _Network  # noqa: PLC0415
 
-                cached_coordinates = pd.Series(_Network(cached_fn).meta["coordinates"])
-                points_by_id[pid] = cached_coordinates.loc[keys].to_numpy(dtype=float)
-        finally:
-            if tmp_dir is not None:
-                tmp_dir.cleanup()
+                    cached_meta = _Network(cached_fn).meta
+                    results[i] = (
+                        np.array([cached_meta["coordinates"][k] for k in keys]),
+                        np.array([cached_meta["normal"][k] for k in keys]),
+                    )
+                skipped = len(directions) - len(todo_idx)
+                if skipped:
+                    logger.info("Skipping %s already-cached direction(s)", skipped)
 
-        return np.array([points_by_id[pid] for pid in point_ids])
+            if todo_idx:
+                todo_directions = directions[todo_idx]
+                n_workers = min(max_parallel, len(todo_directions))
+                with get_context("spawn").Pool(
+                    processes=n_workers,
+                    initializer=_init_furthest_point_worker,
+                    initargs=(
+                        pristine_n, dimensions, slack, snapshots,
+                        multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+                    ),
+                ) as pool:
+                    try:
+                        todo_results = pool.starmap(
+                            _solve_furthest_point_direction, [(row,) for row in todo_directions],
+                        )
+                    except Exception:
+                        pool.terminate()
+                        pool.join()
+                        raise
+                for i, (point, duals, n_result, _condition) in zip(todo_idx, todo_results):
+                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                    if output_dir is not None:
+                        _cache_furthest_point_result(
+                            n_result, output_dir, cache_keys[i], keys, point, duals, obj, directions[i],
+                        )
+                    results[i] = (point, directions[i])
+
+        points = np.array([r[0] for r in results])
+        normals = np.array([r[1] for r in results])
+        return points, normals
 
     return furthest_points
 
@@ -257,26 +472,29 @@ def _build_closest_point_solver(
     multi_investment_periods: bool,
     model_kwargs: dict | None,
     kwargs: dict,
-) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
-    """Build the closest-point model against `n` exactly once, and return a
-    single-target `(point, normal)` solver reusing it -- the shared core
-    both `make_closest_point_fn` (in-process, for `runner.run`'s
-    single-target calls) and `_init_closest_point_worker` (once per worker
-    process, for the batch path) are built on.
+    resolve_main_objective: bool,
+) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]]:
+    """Build the closest-point model against `n` once, and return a
+    single-target `(point, normal, duals, n)` solver reusing it.
 
-    Model: one residual variable per dimension, `r_key == target_key -
-    dim_key(x)` i.e. `r_key + dim_key(x) == target_key` (RHS starts at 0,
-    updated to the real target on every solver call), plus a norm-specific
-    objective -- `t >= |r_key|` minimized for `linf`, `sum(s_key) with
-    s_key >= |r_key|` minimized for `l1`. Structurally mirrors
-    `mga_surveyor.tests.lp_region.closest_point_in_region` (same residual
-    sign convention, same dual-of-the-residual-constraint normal,
-    unmodified), but against `n`'s own real constraints (`create_model` +
-    `_add_near_opt_constraint`) instead of an explicit `(A_ub, b_ub)`.
+    One residual variable per dimension (`r_key + dim_key(x) == target_key`,
+    RHS updated per call) plus a norm-specific objective: `t >= |r_key|`
+    for `linf`, `sum(s_key)` with `s_key >= |r_key|` for `l1`. `normal` is
+    the dual of these residual constraints -- the query `target`'s own
+    separating-hyperplane normal, always computed.
 
-    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'` (`l2`
-        would need a quadratic objective -- Gurobi-only, like everywhere
-        else L2 shows up in this package).
+    If `resolve_main_objective`: also pins the found point's coordinates,
+    drops `budget`, re-solves the network's original cost objective for
+    `duals` (the shadow price of each pinned-coordinate constraint -- the
+    same pinned-resolve `_build_furthest_point_solver` does), then undoes
+    the pin, re-adds `budget`, and restores the residual-LP objective, all
+    so this same reused model is ready for the next call -- same
+    budget-restore care as `_build_furthest_point_solver` (`optimal_cost`/
+    `fixed_cost` captured once, not recomputed via
+    `n.optimize._add_near_opt_constraint()` again). `duals` is `None`
+    when `resolve_main_objective` is False.
+
+    :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
     :raises RuntimeError: If a solve does not reach `status="ok"`.
     """
     if norm not in _CLOSEST_POINT_SUPPORTED_NORMS:
@@ -299,7 +517,26 @@ def _build_closest_point_solver(
         multi_investment_periods=multi_investment_periods,
         **model_kwargs,
     )
-    n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
+    main_obj = m.objective
+
+    # Captured once, before n is mutated by any solve -- see
+    # _build_furthest_point_solver's docstring for why.
+    if not multi_investment_periods:
+        optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
+        fixed_cost = n.statistics.installed_capex().sum()
+    else:
+        w = n.investment_period_weightings.objective
+        optimal_cost = (n.statistics.capex().sum() * w + n.statistics.opex().sum() * w).sum()
+        fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
+
+    def add_budget_constraint() -> None:
+        # Only ever called with m.objective == main_obj.
+        objective = m.objective
+        if not isinstance(objective, (LinearExpression, QuadraticExpression)):
+            objective = objective.expression
+        m.add_constraints(objective + fixed_cost <= (1 + slack) * optimal_cost, name="budget")
+
+    add_budget_constraint()
 
     resid_constrs = {}
     for key in keys:
@@ -323,8 +560,9 @@ def _build_closest_point_solver(
             m.add_constraints(s + r >= 0.0, name=f"mga_surveyor_sneg_{key}")
             s_vars.append(s)
         m.objective = sum(s_vars)
+    residual_obj = m.objective
 
-    def solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
 
@@ -335,23 +573,38 @@ def _build_closest_point_solver(
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         normal = np.array([float(resid_constrs[key].dual) for key in keys])
-        return point, normal
+
+        if not resolve_main_objective:
+            return point, normal, None, n
+
+        for key, value in zip(keys, point):
+            m.add_constraints(
+                n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == float(value),
+                name=f"coord_{key}",
+            )
+        m.remove_constraints("budget")
+        m.objective = main_obj
+        status, condition = n.optimize.solve_model(**kwargs)
+        if status != "ok":
+            msg = f"Re-solve at pinned coordinates for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
+            raise RuntimeError(msg)
+        duals = np.array([float(m.constraints[f"coord_{key}"].dual) for key in keys])
+
+        # Undo this call's own additions so the model is ready for the next call.
+        m.remove_constraints([f"coord_{key}" for key in keys])
+        add_budget_constraint()
+        m.objective = residual_obj
+
+        return point, normal, duals, n
 
     return solve_one
 
 
-#: Each worker process's own closest-point solver, built once by
-#: `_init_closest_point_worker` (a `multiprocessing.Pool` `initializer` --
-#: runs once per worker process, before that worker is handed any tasks)
-#: and reused by `_solve_closest_point_target` for every task that worker
-#: goes on to handle. Module-level, not per-call, is fine here the same way
-#: it would be for any other `initializer`-populated worker state: each
-#: `make_closest_point_fn` batch call creates a brand-new `Pool` (so
-#: brand-new worker processes, each running the initializer exactly once
-#: before its first task) and every task within one such call is against
-#: the exact same `(n, dimensions, norm, slack, ...)` -- only `target`
-#: differs -- so there's no risk of a stale/wrong solver being reused.
-_worker_closest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None
+#: This worker's own closest-point solver, built once by
+#: _init_closest_point_worker and reused by _solve_closest_point_target for
+#: every task this worker process handles. Also how n gets back to the
+#: parent for caching -- solve_one returns (point, normal, duals, n).
+_worker_closest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]] | None = None
 
 
 def _init_closest_point_worker(
@@ -363,44 +616,46 @@ def _init_closest_point_worker(
     multi_investment_periods: bool,
     model_kwargs: dict | None,
     kwargs: dict,
+    resolve_main_objective: bool,
 ) -> None:
-    """`Pool(initializer=...)` for `make_closest_point_fn`'s batch path --
-    runs once per worker process, before that worker is dispatched any
-    tasks (see `multiprocessing.Pool`'s `initializer`/`initargs`), rather
-    than being built lazily on a task's first arrival. Does the same two
-    things `initializer=_worker_init` alone does elsewhere in this module
-    (ignore SIGINT in the worker, quiet its logging -- see `_worker_init`),
-    plus builds this worker's closest-point solver once via
-    `_build_closest_point_solver`, caching it in
-    `_worker_closest_point_solver` for `_solve_closest_point_target` to
-    reuse across every task this worker process ends up handling.
-
-    Also means `n` (and the rest of this closure's fixed arguments) is
-    pickled once per *worker* (via `initargs`) rather than once per
-    *target* (via every task's `pool.starmap` args) -- fewer, not more,
-    since `n_workers <= len(target_2d)` always.
+    """Pool initializer for `make_closest_point_fn`'s batch path -- builds
+    this worker's solver once via `_build_closest_point_solver`, before any
+    tasks are dispatched.
     """
     _worker_init()
     global _worker_closest_point_solver
     _worker_closest_point_solver = _build_closest_point_solver(
-        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
+        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
     )
 
 
-def _solve_closest_point_target(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Solve a single target for parallel execution (helper for
-    `make_closest_point_fn`'s batch path) -- one `pool.starmap` task per
-    target, not per pre-split chunk, same granularity as
-    `_solve_single_direction`'s one task per direction: the Pool's own work
-    queue decides which worker handles which target, rather than us fixing
-    that assignment upfront.
-
-    Solves directly against this worker's already-built solver -- see
-    `_init_closest_point_worker`, the `Pool` initializer that builds it
-    once per worker process before any tasks are dispatched, so no per-task
-    build (or lazy build-on-first-task check) happens here at all.
+def _solve_closest_point_target(target: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
+    """One `pool.starmap` task: solve a single target against this
+    worker's already-built solver (see `_init_closest_point_worker`).
     """
     return _worker_closest_point_solver(target)
+
+
+def _cache_closest_point_result(
+    n: Network, output_dir: str | Path, key: str, keys: list,
+    point: np.ndarray, normal: np.ndarray, duals: np.ndarray | None, obj: float,
+) -> None:
+    """Stash `point`/`normal`/`duals`/`obj` into `n.meta` and export to
+    `output_dir/mga_closest_result_{key}.nc` (a distinct prefix from
+    `_cache_furthest_point_result`'s `mga_furthest_result_`, so both caches can
+    safely share one `output_dir`). `duals` is only stashed (as
+    `n.meta["duals"]`) when not `None` -- i.e. when `resolve_main_objective`
+    actually computed it; otherwise `n.meta` has no `"duals"` key at all,
+    rather than a placeholder.
+    """
+    n.meta["point"] = {k: float(v) for k, v in zip(keys, point)}
+    n.meta["normal"] = {k: float(v) for k, v in zip(keys, normal)}
+    if duals is not None:
+        n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
+    n.meta["obj"] = float(obj)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n.export_to_netcdf(str(output_dir / f"mga_closest_result_{key}.nc"))
 
 
 def make_closest_point_fn(
@@ -408,111 +663,137 @@ def make_closest_point_fn(
     dimensions: dict,
     norm: str,
     slack: float,
+    output_dir: str | Path | None = None,
+    decimals: int = 8,
+    resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
     model_kwargs: dict | None = None,
     max_parallel: int = 4,
     **kwargs: Any,
-) -> ClosestFeasiblePointFn:
-    """Build a `mga_surveyor.runner.ClosestFeasiblePointFn` against a real,
-    already-solved PyPSA network `n` -- the query `runner.run`'s main loop
-    needs: the closest point in `n`'s own near-optimal feasible region to a
-    given `target`, together with a valid separating-hyperplane normal
-    there. Also batch-capable -- see the returned `closest_point`'s own
-    docstring for the two very different paths a single vs. a batched call
-    takes.
+) -> ClosestPointFn:
+    """Build a `mga_surveyor.runner.ClosestPointFn` against a real,
+    already-solved PyPSA network `n`: the closest point in `n`'s
+    near-optimal feasible region to a given `target`, plus a valid
+    separating-hyperplane normal there.
+
+    Caching: pass a persistent `output_dir` to cache each query's result at
+    `output_dir/mga_closest_result_{key}.nc`, content-addressed by the
+    target itself (see `encode_cache_key`). `None` (default) disables
+    caching. A cache hit on the single-target path skips solving entirely,
+    so `n` is NOT mutated by a call that only reads a cache hit. Each cached
+    `.nc` also stashes the found point's own capex+opex cost in
+    `n.meta["obj"]`, same as `make_furthest_point_fn`'s cache.
+
+    If `resolve_main_objective`: after finding the closest point, its
+    coordinates are pinned and the network's original cost objective is
+    re-solved to get real per-dimension duals, cached alongside
+    `point`/`normal` in `n.meta["duals"]` -- same idea as
+    `make_furthest_point_fn`'s own `resolve_main_objective`. This is extra
+    work cached as a side effect only: `closest_point`'s own return value
+    is unaffected, always `(point, normal)`, so it still matches
+    `runner.ClosestPointFn`.
 
     :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
     :raises RuntimeError: If a call's solve does not reach `status="ok"`.
     """
-    # Snapshot n right now, before any solve gets a chance to touch it:
-    # n.optimize.solve_model() writes solution values back onto n's own
-    # component tables regardless of which objective was solved (confirmed
-    # for optimize_mga_in_direction's resolve_main_objective=False path, and
-    # the closest-point model here reuses n's own variables the same way),
-    # so calling `closest_point` even once already leaves n in a different
-    # state than the network's true original optimum. The batch path's
-    # workers need that TRUE original state -- it's what
-    # _add_near_opt_constraint's budget is supposed to be relative to, and
-    # it's what the single-target path below already uses (its own budget
-    # constraint's RHS is computed once, at build time, right here, before
-    # any mutation can happen) -- so every batch call passes this one
-    # pristine, independent copy instead of n's current (by then possibly
-    # mutated) state. A pickle round-trip, not n.copy() -- PyPSA's own
-    # Network.copy() refuses on a network with an attached solver model,
-    # while pickling one works fine (confirmed; see this module's
-    # docstring) and is ~440x faster than the netcdf-export equivalent this
-    # used to be.
+    keys = list(dimensions.keys())
+    # Snapshot n before any solve can mutate it -- the batch path's workers
+    # need n's true original state for the budget constraint. A pickle
+    # round-trip, not n.copy(), since Network.copy() refuses on a network
+    # with an attached solver model.
     pristine_n = pickle.loads(pickle.dumps(n))
 
     solve_one = _build_closest_point_solver(
-        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs,
+        n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
     )
 
     def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Shape-preserving: a single `(k,)` target returns a single
-        `(point, normal)` pair -- matching `ClosestFeasiblePointFn`'s
-        contract exactly, so this still plugs straight into `runner.run`
-        unmodified. An `(n_targets, k)` batch instead returns the
-        corresponding `(n_targets, k)` arrays of points and normals.
+        """Shape-preserving: a `(k,)` target returns one `(point, normal)`
+        pair; an `(n_targets, k)` batch returns `(n_targets, k)` arrays.
 
-        The two cases are solved completely differently:
-
-        - Single target: solved directly against the one persistent
-          in-process model built when `make_closest_point_fn` was called --
-          just an RHS update + re-solve, no multiprocessing. There's only
-          one query; nothing to parallelize, and every extra process would
-          just be overhead.
-        - Batch (>1 targets): each row dispatched as its own
-          `pool.starmap` task (`_solve_closest_point_target`), exactly the
-          same granularity `optimize_mga_in_multiple_directions` uses (one
-          task per direction, not per chunk) -- the Pool's own work queue
-          spreads the targets across `min(max_parallel, n_targets)` worker
-          processes, each of which builds its own closest-point solver
-          exactly once, before it is handed any tasks at all (see
-          `_init_closest_point_worker`, this `Pool`'s `initializer`), and
-          reuses it across every task it happens to pick up. Worth spreading across
-          a `multiprocessing.Pool` at all because a closest-point solve is
-          genuinely expensive regardless of that build cost (linopy has no
-          warm-start/persistent-solve path; confirmed, it logs a fresh
-          "Writing time" on every `solve_model()` call even when only an
-          RHS changed, so every solve re-solves the whole problem
-          regardless), so true parallel solving is worth the
-          process-startup overhead, rather than solving the whole batch
-          serially in one process.
+        Single target: read from `output_dir`'s cache if a hit, else
+        solved in-process against the persistent model built above. Batch:
+        cached rows read from disk, the rest dispatched one
+        `pool.starmap` task per target across
+        `min(max_parallel, n_todo)` worker processes, each building its own
+        solver once.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
         target_2d = np.atleast_2d(target)
 
         if len(target_2d) == 1:
-            results = [solve_one(target_2d[0])]
+            t = target_2d[0]
+            cached = None
+            if output_dir is not None:
+                key = encode_cache_key(t, decimals)
+                cached_fn = Path(output_dir) / f"mga_closest_result_{key}.nc"
+                if cached_fn.exists():
+                    from pypsa.networks import Network as _Network  # noqa: PLC0415
+
+                    cached_meta = _Network(cached_fn).meta
+                    cached = (
+                        np.array([cached_meta["point"][k] for k in keys]),
+                        np.array([cached_meta["normal"][k] for k in keys]),
+                    )
+            if cached is not None:
+                results = [cached]
+            else:
+                point, normal, duals, n_result = solve_one(t)
+                if output_dir is not None:
+                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
+                results = [(point, normal)]
         else:
-            # Passes `pristine_n` (n's state as of when make_closest_point_fn
-            # was called) rather than n's CURRENT state here -- see the
-            # comment above `pristine_n`'s creation for why: n may already
-            # have been mutated by earlier single-target calls above.
-            #
-            # One pool.starmap task per target row, not per chunk -- same
-            # granularity as optimize_mga_in_multiple_directions's one task
-            # per direction, letting the Pool's own work queue distribute
-            # rows across processes=min(max_parallel, len(target_2d)) workers
-            # instead of pre-splitting into fixed chunks ourselves.
-            n_workers = min(max_parallel, len(target_2d))
-            with get_context("spawn").Pool(
-                processes=n_workers,
-                initializer=_init_closest_point_worker,
-                initargs=(
-                    pristine_n, dimensions, norm, slack, snapshots,
-                    multi_investment_periods, model_kwargs, kwargs,
-                ),
-            ) as pool:
-                try:
-                    results = pool.starmap(_solve_closest_point_target, [(row,) for row in target_2d])
-                except Exception:
-                    pool.terminate()
-                    pool.join()
-                    raise
+            # Passes pristine_n, not n's current state -- n may already be
+            # mutated by an earlier single-target call above.
+            results = [None] * len(target_2d)
+            todo_idx = list(range(len(target_2d)))
+            cache_keys = None
+            if output_dir is not None:
+                cache_keys = [encode_cache_key(row, decimals) for row in target_2d]
+                todo_idx = []
+                for i, key in enumerate(cache_keys):
+                    cached_fn = Path(output_dir) / f"mga_closest_result_{key}.nc"
+                    if not cached_fn.exists():
+                        todo_idx.append(i)
+                        continue
+                    from pypsa.networks import Network as _Network  # noqa: PLC0415
+
+                    cached_meta = _Network(cached_fn).meta
+                    results[i] = (
+                        np.array([cached_meta["point"][k] for k in keys]),
+                        np.array([cached_meta["normal"][k] for k in keys]),
+                    )
+                skipped = len(target_2d) - len(todo_idx)
+                if skipped:
+                    logger.info("Skipping %s already-cached target(s)", skipped)
+
+            if todo_idx:
+                todo_targets = target_2d[todo_idx]
+                n_workers = min(max_parallel, len(todo_targets))
+                with get_context("spawn").Pool(
+                    processes=n_workers,
+                    initializer=_init_closest_point_worker,
+                    initargs=(
+                        pristine_n, dimensions, norm, slack, snapshots,
+                        multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+                    ),
+                ) as pool:
+                    try:
+                        todo_results = pool.starmap(_solve_closest_point_target, [(row,) for row in todo_targets])
+                    except Exception:
+                        pool.terminate()
+                        pool.join()
+                        raise
+                for i, (point, normal, duals, n_result) in zip(todo_idx, todo_results):
+                    if output_dir is not None:
+                        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                        _cache_closest_point_result(
+                            n_result, output_dir, cache_keys[i], keys, point, normal, duals, obj,
+                        )
+                    results[i] = (point, normal)
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
@@ -524,362 +805,47 @@ def make_closest_point_fn(
     return closest_point
 
 
-def optimize_mga_in_direction(
+def make_oracle_fns(
     n: Network,
-    direction: dict | pd.Series,
     dimensions: dict,
     slack: float,
-    snapshots: Sequence | None = None,
-    multi_investment_periods: bool = False,
-    model_kwargs: dict | None = None,
-    resolve_main_objective: bool = True,
-    **kwargs: Any,
-) -> tuple[str, str, pd.Series, pd.Series]:
-    """Run MGA in a given direction, optionally re-solving pinned to the resulting coordinates.
-
-    Same as pypsa's `n.optimize.optimize_mga_in_direction`, except (when
-    `resolve_main_objective` is True, the default) after finding the MGA
-    point's projected coordinates, the network is re-solved with the original
-    objective under added equality constraints fixing those coordinates exactly.
-
-    Both solves are guaranteed feasible for well-formed inputs: the budget constraint
-    always admits the network's own (already-solved) optimum, and the final pinned
-    re-solve always admits the point found by the direction-objective solve. So a
-    non-"ok" status here means either a bug (e.g. `direction`/`dimensions` mismatch)
-    or a genuine solver/numerical problem — either way this raises rather than
-    returning a sentinel, so callers don't silently lose data points.
-
-    Parameters
-    ----------
-    resolve_main_objective : bool
-        If True (default), re-solve the original cost objective pinned to the
-        MGA point's coordinates, so the network ends up at a feasible solution
-        matching them exactly and `duals` holds the shadow price of each
-        pinned-coordinate constraint. If False, skip that second solve
-        entirely and return right after the direction-objective solve --
-        `duals` is then all-zero (no pinning constraints were ever added, so
-        there's nothing to price). Set this to False when only the projected
-        coordinates are needed and the extra solve isn't worth paying for,
-        e.g. a support-function query like `make_furthest_point_fn`'s.
-
-    Returns
-    -------
-    status, condition : str
-        As returned by the final solve. Always "ok"/"optimal" — raises otherwise.
-    coordinates : pd.Series
-        Projected coordinates of the solution.
-    duals : pd.Series
-        Shadow price of each dimension's pinned-coordinate constraint, indexed by
-        the same keys as `dimensions`. Dimensions with `direction[key] == 0` (no
-        constraint was added for them) get 0.0 -- as does every dimension when
-        `resolve_main_objective` is False (no constraints were added at all).
-
-    """
-    if model_kwargs is None:
-        model_kwargs = options.params.optimize.model_kwargs.copy()
-
-    if set(direction.keys()) != set(dimensions.keys()):
-        msg = (
-            "Keys of `direction` and `dimensions` arguments must match. "
-            f"Got {set(direction.keys())} and {set(dimensions.keys())}."
-        )
-        raise ValueError(msg)
-
-    if snapshots is None:
-        snapshots = n.snapshots
-
-    if not n.is_solved:
-        msg = "Network needs to be solved with `n.optimize()` before running MGA."
-        raise ValueError(msg)
-
-    m = n.optimize.create_model(
-        snapshots=snapshots,
-        multi_investment_periods=multi_investment_periods,
-        **model_kwargs,
-    )
-
-    if resolve_main_objective:
-        # m.objective is already populated by create_model (the network's normal cost
-        # objective) — no need to solve first just to capture it. n's component tables
-        # (read by _add_near_opt_constraint below) still hold the values from the
-        # network's prior n.optimize() call, since m hasn't been solved yet.
-        main_obj = m.objective
-
-    n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
-
-    m.objective = -sum(
-        direction[key] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
-        for key in direction.keys()
-    )
-
-    status, condition = n.optimize.solve_model(**kwargs)
-    if status != "ok":
-        msg = f"MGA solve in direction {direction} failed: status={status}, condition={condition}"
-        raise RuntimeError(msg)
-    coordinates = n.optimize.project_solved(dimensions)
-
-    n.meta["slack"] = slack
-    n.meta["dimensions"] = _convert_to_dict(dimensions)
-    n.meta["direction"] = direction
-    # Stashed so a network reloaded from a plain NetCDF export (no live
-    # linopy model attached -- project_solved would fail on it) can still
-    # recover its own coordinates, e.g. to read a cached result back without
-    # re-solving; see make_furthest_point_fn.
-    n.meta["coordinates"] = {key: float(value) for key, value in coordinates.items()}
-
-    if not resolve_main_objective:
-        duals = pd.Series(0.0, index=list(dimensions.keys()))
-        return status, condition, coordinates, duals
-
-    pinned_keys = [key for key in dimensions.keys() if direction[key] != 0]
-    for key in pinned_keys:
-        # .sum() is required here: build_linexpr_from_weights returns one term
-        # per component (e.g. per generator) rather than a pre-aggregated scalar,
-        # and add_constraints treats each coordinate slice as a separate
-        # constraint row. Without summing first, this would add one (mostly
-        # malformed, e.g. "0 == coordinates[key]") constraint per component
-        # instead of a single constraint pinning the weighted sum.
-        m.add_constraints(
-            n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == coordinates[key].item(),
-            name=f"coord_{key}",
-        )
-    # The budget constraint can't make this re-solve infeasible (the point found
-    # above already satisfies it), and minimizing cost at fixed coordinates can
-    # only match or undercut that bound, so it stays non-binding. Drop it so the
-    # duals below reflect only the pinned-coordinate constraints.
-    m.remove_constraints("budget")
-    m.objective = main_obj
-    status, condition = n.optimize.solve_model(**kwargs)
-    if status != "ok":
-        msg = f"Re-solve at pinned coordinates for direction {direction} failed: status={status}, condition={condition}"
-        raise RuntimeError(msg)
-    duals = pd.Series(
-        {key: float(m.constraints[f"coord_{key}"].dual) for key in pinned_keys}
-    ).reindex(dimensions.keys(), fill_value=0.0)
-
-    return status, condition, coordinates, duals
-
-
-def _solve_single_direction(
-    n: Network,
-    direction: dict,
-    *,
-    dimensions: dict,
-    snapshots: Sequence | None,
-    multi_investment_periods: bool,
-    slack: float,
-    model_kwargs: dict | None,
-    resolve_main_objective: bool,
-    **kwargs: Any,
-) -> tuple[dict, None, None, None] | tuple[dict, Network, pd.Series, pd.Series]:
-    """Thin worker wrapper around `optimize_mga_in_direction` for parallel
-    execution (helper for `optimize_mga_in_multiple_directions`) -- adds
-    exactly the two things a direct call to `optimize_mga_in_direction`
-    itself can't express:
-
-    - `KeyboardInterrupt` handling: a worker being cancelled should return a
-      sentinel so the batch can finish gracefully, not propagate and crash
-      it -- the opposite of what a direct caller wants (real failures, see
-      `optimize_mga_in_direction`'s docstring, are deliberately NOT caught
-      here; they propagate through `pool.starmap` and abort the whole batch,
-      same as before).
-    - Returning the worker's own (solved, mutated) `n` back to the parent
-      process: multiprocessing gives each worker an independent pickled
-      copy of `n`, so the parent has no other way to see what a worker did
-      to it. `optimize_mga_in_multiple_directions` does the NetCDF export
-      and `obj` computation itself with this returned `n`, rather than
-      duplicating that here in every worker.
-
-    Bound via `functools.partial` before dispatch (see
-    `optimize_mga_in_multiple_directions`), not a packed `kwargs: dict`
-    parameter re-expanded with `**kwargs` inside the worker -- solver
-    options travel through `partial`'s own (picklable) bound state instead,
-    so this keeps `optimize_mga_in_direction`'s own `**kwargs` ergonomics
-    rather than needing a second, worker-specific calling convention for
-    them.
-    """
-    try:
-        _, _, coordinates, duals = optimize_mga_in_direction(
-            n,
-            direction=direction,
-            dimensions=dimensions,
-            snapshots=snapshots,
-            multi_investment_periods=multi_investment_periods,
-            slack=slack,
-            model_kwargs=model_kwargs,
-            resolve_main_objective=resolve_main_objective,
-            **kwargs,
-        )
-    except KeyboardInterrupt:
-        logger.info("Worker process interrupted")
-        return (direction, None, None, None)
-    return (direction, n, coordinates, duals)
-
-
-def optimize_mga_in_multiple_directions(
-    n: Network,
-    directions: list[dict] | pd.DataFrame,
-    dimensions: dict,
+    norm: str,
     output_dir: str | Path,
-    slack: float,
-    obj_label: str = "TOTEX",
-    point_ids: Sequence[Any] | None = None,
-    skip_existing: bool = False,
+    decimals: int = 8,
+    resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
     model_kwargs: dict | None = None,
-    resolve_main_objective: bool = True,
     max_parallel: int = 4,
     **kwargs: Any,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Run MGA in multiple directions in parallel, saving each solved network as NetCDF.
+) -> tuple[Callable, ClosestPointFn, Callable[[], np.ndarray]]:
+    """Build all three oracle callables `runner.run` needs in one call
+    against a real, already-solved PyPSA network `n`, sharing
+    `n`/`dimensions`/`output_dir` -- just calls `make_furthest_point_fn`,
+    `make_closest_point_fn`, and `make_optimality_fn` with their common
+    arguments and returns the three results.
 
-    Same as pypsa's `n.optimize.optimize_mga_in_multiple_directions`, except each
-    direction's solved network is exported to `output_dir/mga_result_{point_id}.nc`
-    (kept permanently), the returned coordinates include the objective value
-    (capex + opex) as an extra column labeled `obj_label`, and a third DataFrame of
-    duals is returned (shadow price of each dimension's pinned-coordinate constraint,
-    one row per point).
+    Each gets its own independent `pickle` copy of `n`, not `n` itself:
+    `create_model()` stores its model at `n.model`, a single slot, so three
+    factories built directly against one shared `n` would silently
+    overwrite each other's model there, leaving at most one of the three
+    actually usable.
 
-    Unlike pypsa's version, a direction that fails to solve does NOT get silently
-    dropped — it raises and aborts the whole batch (see `optimize_mga_in_direction`
-    for why a well-formed direction should never actually fail). The only thing
-    that can shrink the result below `len(directions)` rows is a worker being
-    interrupted (e.g. Ctrl+C) or `skip_existing` skipping already-solved points.
-
-    Parameters
-    ----------
-    output_dir : str | Path
-        Directory where `mga_result_{point_id}.nc` files are written, one per
-        solved direction.
-    obj_label : str
-        Column name used for the objective value (capex + opex) in the returned
-        coordinates DataFrame. Defaults to "TOTEX".
-    point_ids : Sequence | None
-        Labels identifying each row of `directions`, used both for naming the
-        NetCDF files (`mga_result_{point_id}.nc`) and as the index of the returned
-        DataFrames. Must match `directions` in length and order. Defaults to
-        `range(len(directions))`, matching pypsa's own (purely positional) behavior.
-        Pass your own stable IDs (e.g. ones that survive across separate runs) to
-        make `skip_existing` meaningful.
-    skip_existing : bool
-        If True, directions whose `output_dir/mga_result_{point_id}.nc` already
-        exists are not re-solved; only the still-missing directions are run. Useful
-        for resuming an interrupted or incrementally-extended dataset generation
-        run. Requires `point_ids` to be stable across runs.
-    resolve_main_objective : bool
-        Forwarded to `optimize_mga_in_direction` in every worker (see its
-        docstring). Defaults to True for this function's usual dataset-
-        generation use case, which needs `duals_df`; pass False for a
-        cheaper, duals-free batch (e.g. `make_furthest_point_fn`, which
-        only needs `coordinates_df`).
-
-    Returns
-    -------
-    directions_df, coordinates_df, duals_df : pd.DataFrame
-        One row per solved direction each (directions skipped via `skip_existing`,
-        or whose worker was interrupted, are not included), indexed by `point_id`.
-        `duals_df` has the same columns as `dimensions` (see
-        `optimize_mga_in_direction`'s `duals` return value).
-
-    See Also
-    --------
-    pypsa.optimization.mga.OptimizationAbstractMGAMixin.optimize_mga_in_multiple_directions
-
+    Returns `(furthest_point, closest_point, solve_optimal)`, in that
+    order -- `runner.run`'s own parameter order.
     """
-    if model_kwargs is None:
-        model_kwargs = options.params.optimize.model_kwargs.copy()
-
-    if isinstance(directions, pd.DataFrame):
-        directions = list(directions.T.to_dict().values())
-
-    if point_ids is None:
-        point_ids = list(range(len(directions)))
-    elif len(point_ids) != len(directions):
-        msg = f"point_ids must have the same length as directions ({len(point_ids)} != {len(directions)})"
-        raise ValueError(msg)
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    output_fns = {pid: output_dir / f"mga_result_{pid}.nc" for pid in point_ids}
-
-    if skip_existing:
-        todo = [(pid, d) for pid, d in zip(point_ids, directions) if not output_fns[pid].exists()]
-        skipped = len(directions) - len(todo)
-        if skipped:
-            logger.info("Skipping %s already-solved direction(s)", skipped)
-        if not todo:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        point_ids, directions = (list(x) for x in zip(*todo, strict=True))
-
-    # n is passed directly to each worker task below (multiprocessing pickles
-    # a fresh, independent copy per task) rather than exported to a temp file
-    # and reloaded in each worker -- see this module's docstring for why
-    # that's the right call on PyPSA >=1.3.0. Everything except (n, direction)
-    # is bound once via functools.partial, so _solve_single_direction keeps
-    # optimize_mga_in_direction's own **kwargs calling convention instead of
-    # needing a separate packed-dict one just for pool.starmap's sake.
-    worker = partial(
-        _solve_single_direction,
-        dimensions=dimensions,
-        snapshots=snapshots,
-        multi_investment_periods=multi_investment_periods,
-        slack=slack,
-        model_kwargs=model_kwargs,
-        resolve_main_objective=resolve_main_objective,
-        **kwargs,
+    furthest_point = make_furthest_point_fn(
+        pickle.loads(pickle.dumps(n)), dimensions, slack,
+        output_dir=output_dir, decimals=decimals, resolve_main_objective=resolve_main_objective,
+        snapshots=snapshots, multi_investment_periods=multi_investment_periods,
+        model_kwargs=model_kwargs, max_parallel=max_parallel, **kwargs,
     )
-    with (
-        get_context("spawn").Pool(
-            processes=max_parallel,
-            initializer=_worker_init,
-            # No maxtasksperchild: each worker re-imports the whole scientific
-            # stack (pypsa, linopy, pandas, xarray) on every cold start, which
-            # dwarfs the actual solve time. Reusing workers across directions
-            # pays that import cost ~max_parallel times instead of once per
-            # direction. Revisit if per-worker memory growth becomes an issue
-            # over very large direction counts.
-        ) as pool
-    ):
-        try:
-            results = pool.starmap(
-                worker,
-                [(n, direction) for direction in directions],
-            )
-        except Exception:
-            pool.terminate()
-            pool.join()
-            raise
-
-    # n_result is only None here if that worker was interrupted (e.g.
-    # Ctrl+C): real solve failures raise inside the worker and abort the
-    # whole batch via the `except Exception: pool.terminate(); ...; raise`
-    # above. Exporting the worker's own solved network and computing obj
-    # happens here, not inside the worker -- see _solve_single_direction's
-    # docstring for why that's the parent's job now.
-    successful = []
-    for pid, (direction, n_result, coords, duals) in zip(point_ids, results):
-        if n_result is None:
-            continue
-        n_result.export_to_netcdf(str(output_fns[pid]))
-        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-        successful.append((pid, direction, pd.concat([coords, pd.Series({obj_label: obj})]), duals))
-        logger.info("slack=%s: solved %s", slack, output_fns[pid].stem)
-
-    interrupted_count = len(results) - len(successful)
-    if interrupted_count > 0:
-        logger.warning(
-            "%s out of %s directions were interrupted before solving", interrupted_count, len(results)
-        )
-
-    if not successful:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    successful_ids, successful_directions, successful_coordinates, successful_duals = zip(*successful, strict=True)
-    index = pd.Index(successful_ids)
-    return (
-        pd.DataFrame(successful_directions, index=index),
-        pd.DataFrame(successful_coordinates, index=index),
-        pd.DataFrame(successful_duals, index=index),
+    closest_point = make_closest_point_fn(
+        pickle.loads(pickle.dumps(n)), dimensions, norm, slack,
+        output_dir=output_dir, decimals=decimals, resolve_main_objective=resolve_main_objective,
+        snapshots=snapshots, multi_investment_periods=multi_investment_periods,
+        model_kwargs=model_kwargs, max_parallel=max_parallel, **kwargs,
     )
+    solve_optimal = make_optimality_fn(n, dimensions, output_dir, **kwargs)
+
+    return furthest_point, closest_point, solve_optimal

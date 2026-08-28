@@ -1,14 +1,14 @@
 import numpy as np
-import pandas as pd
 import pypsa
 import pytest
 
 from mga_surveyor import (
     VertexEnumMethod,
+    encode_cache_key,
     make_closest_point_fn,
     make_furthest_point_fn,
-    optimize_mga_in_direction,
-    optimize_mga_in_multiple_directions,
+    make_optimality_fn,
+    make_oracle_fns,
     run as mga_surveyor_run,
 )
 
@@ -41,36 +41,63 @@ def _build_network() -> pypsa.Network:
     return n
 
 
-def test_optimize_mga_in_direction_matches_projected_coordinates():
+def test_make_optimality_fn_returns_point_and_caches(tmp_path):
     n = _build_network()
-    status, condition, coordinates, duals = optimize_mga_in_direction(
-        n, direction={"wind": -1, "solar": 0}, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
+    solve_optimal = make_optimality_fn(n, DIMENSIONS, tmp_path, solver_name="highs")
+
+    point = solve_optimal()
+    expected = np.array([n.generators.at["wind", "p_nom_opt"], n.generators.at["solar", "p_nom_opt"]])
+    np.testing.assert_allclose(point, expected, atol=1e-6)
+    assert (tmp_path / "optimal.nc").exists()
+
+    # second call, fresh network + a solver name that would raise if it
+    # actually tried to solve: proves the cache was read, not re-solved.
+    n2 = _build_network()
+    solve_optimal2 = make_optimality_fn(n2, DIMENSIONS, tmp_path, solver_name="not_a_real_solver")
+    point2 = solve_optimal2()
+    np.testing.assert_allclose(point2, point)
+
+
+def test_make_furthest_point_fn_resolve_main_objective_true_returns_duals(tmp_path):
+    """resolve_main_objective=True is what optimize_mga_in_direction used to
+    be for -- a single direction, pinned re-solve, duals cached to n.meta
+    (not part of the return value, which is always (points, normals))."""
+    n = _build_network()
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, slack=0.1, output_dir=tmp_path, solver_name="highs", resolve_main_objective=True,
     )
-    assert status == "ok"
-    assert condition == "optimal"
-    assert coordinates is not None
-    # network ends up re-solved exactly at the returned coordinates
-    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(coordinates["wind"], abs=1e-4)
-    assert n.generators.at["solar", "p_nom_opt"] == pytest.approx(coordinates["solar"], abs=1e-4)
 
-    # duals: wind was pinned (direction != 0) so it has a shadow price; solar wasn't
+    direction = np.array([-1.0, 0.0])  # wind pinned (!=0), solar not (==0)
+    points, normals = furthest_point(direction)
+    assert points.shape == (1, 2)
+    assert normals.shape == (1, 2)
+    np.testing.assert_allclose(normals[0], direction)  # normal is just the query direction
+
+    # network ends up re-solved exactly at the returned coordinates (single-
+    # direction path mutates n directly, same as the old optimize_mga_in_direction).
+    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(points[0, 0], abs=1e-4)
+    assert n.generators.at["solar", "p_nom_opt"] == pytest.approx(points[0, 1], abs=1e-4)
+
+    # duals: cached in the exported .nc file's meta, not the return value.
+    key = encode_cache_key(direction, decimals=8)
+    cached_meta = pypsa.Network(tmp_path / f"mga_furthest_result_{key}.nc").meta
+    keys = list(DIMENSIONS.keys())
+    duals = np.array([cached_meta["duals"][k] for k in keys])
+    # wind was pinned (direction != 0) so it has a shadow price; solar wasn't
     # pinned (direction == 0), so no constraint was added for it and its dual is 0.
-    assert set(duals.index) == {"wind", "solar"}
-    assert duals["solar"] == 0.0
+    assert duals[keys.index("solar")] == 0.0
 
 
-def test_optimize_mga_in_direction_resolve_main_objective_false_skips_pin_resolve():
+def test_make_furthest_point_fn_resolve_main_objective_false_skips_pin_resolve():
     n = _build_network()
     optimal_wind = n.generators.at["wind", "p_nom_opt"]
 
-    status, condition, coordinates, duals = optimize_mga_in_direction(
-        n, direction={"wind": -1, "solar": 0}, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
-        resolve_main_objective=False,
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, slack=0.1, solver_name="highs", resolve_main_objective=False,
     )
-    assert status == "ok"
-    assert condition == "optimal"
-    # no pinning constraints were ever added, so every dual is 0 -- not just solar's
-    assert (duals == 0.0).all()
+    points, normals = furthest_point(np.array([-1.0, 0.0]))
+    np.testing.assert_allclose(normals[0], [-1.0, 0.0])  # normal is always the query direction
+
     # No pin-resolve happened, so n is left wherever the one (direction-
     # objective) solve put it -- solve_model writes solution values back onto
     # n's component tables regardless of which objective was solved. That's
@@ -78,35 +105,8 @@ def test_optimize_mga_in_direction_resolve_main_objective_false_skips_pin_resolv
     # what the skipped pin-resolve would otherwise restore/preserve): the
     # MGA direction pushes wind down within the slack budget, so it ends up
     # at or below the original optimum, not equal to it.
-    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(coordinates["wind"], abs=1e-4)
-    assert coordinates["wind"] <= optimal_wind + 1e-6
-
-
-def test_make_furthest_point_fn_matches_optimize_mga_in_direction():
-    n = _build_network()
-    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=2)
-
-    # keys order fixes the array axes: DIMENSIONS = {"wind": ..., "solar": ...}.
-    # Two directions in one batched call -- solved in parallel underneath via
-    # optimize_mga_in_multiple_directions, not two serial single-direction calls.
-    directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
-    points = furthest_point(directions)
-    assert points.shape == (2, 2)
-
-    # Cross-check each row against optimize_mga_in_direction's own
-    # direction-objective solve (before its pinned re-solve, which shouldn't
-    # move the coordinates at all -- that's the whole point of pinning).
-    # Fresh, independently solved networks, so these reference calls don't
-    # interfere with each other's (or the batch's) linopy model / n.model state.
-    for row, direction in enumerate(directions):
-        n2 = _build_network()
-        direction_dict = dict(zip(DIMENSIONS.keys(), direction.tolist()))
-        _, _, coordinates, _ = optimize_mga_in_direction(
-            n2, direction=direction_dict, dimensions=DIMENSIONS, slack=0.1, solver_name="highs",
-        )
-        np.testing.assert_allclose(
-            points[row], coordinates.loc[list(DIMENSIONS.keys())].to_numpy(), atol=1e-4,
-        )
+    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(points[0, 0], abs=1e-4)
+    assert points[0, 0] <= optimal_wind + 1e-6
 
 
 def test_make_furthest_point_fn_direction_pushes_to_bound():
@@ -116,7 +116,7 @@ def test_make_furthest_point_fn_direction_pushes_to_bound():
 
     # direction=[-1, 0] maximizes -wind (minimizes wind); direction=[1, 0]
     # maximizes wind -- both solved together in one batched call.
-    points = furthest_point(np.array([[-1.0, 0.0], [1.0, 0.0]]))
+    points, _normals = furthest_point(np.array([[-1.0, 0.0], [1.0, 0.0]]))
     assert points[0, 0] <= optimal_wind + 1e-6
     assert points[1, 0] >= optimal_wind - 1e-6
 
@@ -124,19 +124,20 @@ def test_make_furthest_point_fn_direction_pushes_to_bound():
 def test_make_furthest_point_fn_bootstraps_method_directly():
     """End-to-end: pass all 2k box directions to make_furthest_point_fn in
     one batched call (solved in parallel), then bootstrap a real Method
-    directly from the resulting points/halfspaces -- the same state
-    runner.bootstrap_box would seed for the single-direction FurthestPointFn
-    case, but built from one parallel batch instead of a 2k-call loop."""
+    directly from the resulting points/normals -- the same state
+    runner.run's own bootstrap step would seed via its own call, but built
+    here directly instead."""
     n = _build_network()
     furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
 
     k = len(DIMENSIONS)
     box_directions = np.vstack([np.eye(k), -np.eye(k)])
-    points = furthest_point(box_directions)
+    points, normals = furthest_point(box_directions)
     assert points.shape == (2 * k, k)
+    np.testing.assert_allclose(normals, box_directions)
 
     method = VertexEnumMethod(k=k, norm="linf", backend="highs")
-    method.bootstrap(list(points), list(zip(box_directions, points)))
+    method.bootstrap(list(points), list(zip(normals, points)))
 
     assert method.outer_vertices is not None
     assert len(method.outer_vertices) > 0
@@ -151,8 +152,9 @@ def test_make_furthest_point_fn_reads_cache_instead_of_resolving(tmp_path):
     )
 
     direction = np.array([[-1.0, 0.0]])
-    first = furthest_point(direction, point_ids=[0])
-    cached_fn = cache_dir / "mga_result_0.nc"
+    key = encode_cache_key(direction[0], decimals=8)
+    first, _first_normals = furthest_point(direction)
+    cached_fn = cache_dir / f"mga_furthest_result_{key}.nc"
     assert cached_fn.exists()
 
     # Tamper with the cached result's stashed coordinates -- a value no
@@ -163,7 +165,7 @@ def test_make_furthest_point_fn_reads_cache_instead_of_resolving(tmp_path):
     cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
     cached_n.export_to_netcdf(cached_fn)
 
-    second = furthest_point(direction, point_ids=[0])
+    second, _second_normals = furthest_point(direction)
     np.testing.assert_allclose(second, [[999.0, 999.0]])
     assert not np.allclose(second, first)
 
@@ -176,26 +178,27 @@ def test_make_furthest_point_fn_caches_alongside_new_directions(tmp_path):
     )
 
     directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
-    furthest_point(directions, point_ids=[0, 1])
-    assert {p.name for p in cache_dir.glob("mga_result_*.nc")} == {"mga_result_0.nc", "mga_result_1.nc"}
+    keys = [encode_cache_key(d, decimals=8) for d in directions]
+    furthest_point(directions)
+    assert {p.name for p in cache_dir.glob("mga_furthest_result_*.nc")} == {f"mga_furthest_result_{k}.nc" for k in keys}
 
-    # Corrupt point 0's cache so a real re-solve vs. a cache read are
+    # Corrupt direction 0's cache so a real re-solve vs. a cache read are
     # unambiguously distinguishable, same trick as the test above.
-    cached_n = pypsa.Network(cache_dir / "mga_result_0.nc")
+    cached_fn0 = cache_dir / f"mga_furthest_result_{keys[0]}.nc"
+    cached_n = pypsa.Network(cached_fn0)
     cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
-    cached_n.export_to_netcdf(cache_dir / "mga_result_0.nc")
+    cached_n.export_to_netcdf(cached_fn0)
 
-    # point 0 repeats (should read the tampered cache); point 2 is new
+    # direction 0 repeats (should read the tampered cache); [1.0, 0.0] is new
     # (should actually solve) -- one batched call mixing a cache hit and a
     # cache miss.
     directions2 = np.array([[-1.0, 0.0], [1.0, 0.0]])
-    second = furthest_point(directions2, point_ids=[0, 2])
-    assert {p.name for p in cache_dir.glob("mga_result_*.nc")} == {
-        "mga_result_0.nc", "mga_result_1.nc", "mga_result_2.nc",
-    }
-    # point 0: served from the tampered cache, not re-solved.
+    keys2 = [encode_cache_key(d, decimals=8) for d in directions2]
+    second, _second_normals = furthest_point(directions2)
+    assert {p.name for p in cache_dir.glob("mga_furthest_result_*.nc")} == {f"mga_furthest_result_{k}.nc" for k in {*keys, *keys2}}
+    # direction 0: served from the tampered cache, not re-solved.
     np.testing.assert_allclose(second[0], [999.0, 999.0])
-    # point 2: a genuine new solve, nowhere near the tampered sentinel value.
+    # [1.0, 0.0]: a genuine new solve, nowhere near the tampered sentinel value.
     assert not np.allclose(second[1], [999.0, 999.0])
 
 
@@ -227,7 +230,7 @@ def test_make_closest_point_fn_returns_valid_separating_hyperplane():
     k = len(DIMENSIONS)
     furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
     box_directions = np.vstack([np.eye(k), -np.eye(k)])
-    feasible_points = furthest_point(box_directions)
+    feasible_points, _feasible_normals = furthest_point(box_directions)
 
     closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
     target = np.array([-100.0, -100.0])  # far outside the near-optimal region
@@ -245,7 +248,7 @@ def test_make_closest_point_fn_is_batch_capable():
     n = _build_network()
     closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
 
-    # single target: shape-preserving, matches ClosestFeasiblePointFn's
+    # single target: shape-preserving, matches ClosestPointFn's
     # contract exactly -- (k,) in, one (point, normal) pair out.
     target = np.array([-100.0, -100.0])
     point, normal = closest_point(target)
@@ -272,97 +275,191 @@ def test_make_closest_point_fn_is_batch_capable():
     assert not np.allclose(points[0], points[2])
 
 
-def test_make_closest_point_fn_end_to_end_with_runner_run():
+def test_make_closest_point_fn_reads_cache_instead_of_resolving(tmp_path):
+    n = _build_network()
+    cache_dir = tmp_path / "closest_point_cache"
+    closest_point = make_closest_point_fn(
+        n, DIMENSIONS, norm="linf", slack=0.1, output_dir=cache_dir, solver_name="highs",
+    )
+
+    target = np.array([-100.0, -100.0])
+    key = encode_cache_key(target, decimals=8)
+    first_point, first_normal = closest_point(target)
+    cached_fn = cache_dir / f"mga_closest_result_{key}.nc"
+    assert cached_fn.exists()
+
+    # Tamper with the cached result's stashed point/normal -- values no
+    # genuine solve of this target could ever produce -- so getting them
+    # back on the next call proves the cache was actually read, not
+    # silently re-solved underneath.
+    cached_n = pypsa.Network(cached_fn)
+    cached_n.meta["point"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.meta["normal"] = {"wind": 888.0, "solar": 888.0}
+    cached_n.export_to_netcdf(cached_fn)
+
+    second_point, second_normal = closest_point(target)
+    np.testing.assert_allclose(second_point, [999.0, 999.0])
+    np.testing.assert_allclose(second_normal, [888.0, 888.0])
+    assert not np.allclose(second_point, first_point)
+
+
+def test_make_closest_point_fn_caches_alongside_new_targets(tmp_path):
+    n = _build_network()
+    cache_dir = tmp_path / "closest_point_cache"
+    closest_point = make_closest_point_fn(
+        n, DIMENSIONS, norm="linf", slack=0.1, output_dir=cache_dir, solver_name="highs",
+    )
+
+    target = np.array([-100.0, -100.0])
+    key = encode_cache_key(target, decimals=8)
+    closest_point(target)
+    assert {p.name for p in cache_dir.glob("mga_closest_result_*.nc")} == {f"mga_closest_result_{key}.nc"}
+
+    # Corrupt the single-target cache so a real re-solve vs. a cache read
+    # are unambiguously distinguishable, same trick as the test above.
+    cached_fn = cache_dir / f"mga_closest_result_{key}.nc"
+    cached_n = pypsa.Network(cached_fn)
+    cached_n.meta["point"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.meta["normal"] = {"wind": 888.0, "solar": 888.0}
+    cached_n.export_to_netcdf(cached_fn)
+
+    # target repeats (should read the tampered cache); [100, 100] is new
+    # (should actually solve) -- one batched call mixing a cache hit and a
+    # cache miss.
+    targets2 = np.array([[-100.0, -100.0], [100.0, 100.0]])
+    key2 = encode_cache_key(targets2[1], decimals=8)
+    points, normals = closest_point(targets2)
+    assert {p.name for p in cache_dir.glob("mga_closest_result_*.nc")} == {
+        f"mga_closest_result_{key}.nc", f"mga_closest_result_{key2}.nc",
+    }
+    # target: served from the tampered cache, not re-solved.
+    np.testing.assert_allclose(points[0], [999.0, 999.0])
+    np.testing.assert_allclose(normals[0], [888.0, 888.0])
+    # [100, 100]: a genuine new solve, nowhere near the tampered sentinel value.
+    assert not np.allclose(points[1], [999.0, 999.0])
+
+
+def test_make_closest_point_fn_end_to_end_with_runner_run(tmp_path):
     """The strongest check: bootstrap a real VertexEnumMethod from a real
-    network (via make_furthest_point_fn) and drive it through
-    mga_surveyor.runner.run using make_closest_point_fn as the
-    ClosestFeasiblePointFn oracle -- confirms the two PyPSA-side oracles
-    actually work together to converge the whole algorithm, not just pass
-    checks in isolation."""
+    network via make_oracle_fns (furthest_point, closest_point, and
+    solve_optimal, wired straight into runner.run's own parameter order)
+    and drive it to convergence -- confirms all three PyPSA-side oracles
+    actually work together, not just pass checks in isolation."""
     n = _build_network()
     k = len(DIMENSIONS)
 
-    furthest_point = make_furthest_point_fn(n, DIMENSIONS, slack=0.1, solver_name="highs", max_parallel=4)
-    box_directions = np.vstack([np.eye(k), -np.eye(k)])
-    points = furthest_point(box_directions)
+    furthest_point, closest_point, solve_optimal = make_oracle_fns(
+        n, DIMENSIONS, slack=0.1, norm="linf", output_dir=tmp_path, solver_name="highs", max_parallel=4,
+    )
 
     method = VertexEnumMethod(k=k, norm="linf", backend="highs")
-    method.bootstrap(list(points), list(zip(box_directions, points)))
-    initial_gap = method.max_gap()
-    assert initial_gap > 0
-
-    closest_point = make_closest_point_fn(n, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs")
-    history = mga_surveyor_run(method, closest_point, tol=1e-3, max_iter=30, verbose=False)
+    history = mga_surveyor_run(
+        method, furthest_point, closest_point, solve_optimal, tol=1e-3, max_iter=30, verbose=False,
+    )
 
     assert len(history) > 0
+    initial_gap = history[0]["gap"]
+    assert initial_gap > 0
     assert method.max_gap() < 1e-3
     assert method.max_gap() < initial_gap
 
 
-def test_optimize_mga_in_multiple_directions_exports_nc_files(tmp_path):
+def test_make_furthest_point_fn_resolve_main_objective_true_exports_nc_files(tmp_path):
+    """resolve_main_objective=True's batch path is what
+    optimize_mga_in_multiple_directions used to be for -- duals/obj land in
+    each cached .nc file's meta, not in the return value."""
     n = _build_network()
-    directions = pd.DataFrame({"wind": [-1, 0], "solar": [0, -1]})
+    directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
     output_dir = tmp_path / "mga_results"
-    dirs_df, coords_df, duals_df = optimize_mga_in_multiple_directions(
-        n, directions=directions, dimensions=DIMENSIONS, output_dir=output_dir,
-        slack=0.1, solver_name="highs", max_parallel=2,
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, slack=0.1, output_dir=output_dir, resolve_main_objective=True,
+        solver_name="highs", max_parallel=2,
     )
-    assert len(dirs_df) == 2
-    assert "TOTEX" in coords_df.columns
-    assert set(duals_df.columns) == {"wind", "solar"}
-    assert len(duals_df) == 2
+    points, normals = furthest_point(directions)
+    assert points.shape == (2, 2)
+    assert normals.shape == (2, 2)
+    np.testing.assert_allclose(normals, directions)
 
-    nc_files = sorted(output_dir.glob("mga_result_*.nc"))
+    nc_files = sorted(output_dir.glob("mga_furthest_result_*.nc"))
     assert len(nc_files) == 2
-    # the temporary input network file should be cleaned up; only result files remain
-    assert sorted(p.name for p in output_dir.iterdir()) == [f.name for f in nc_files]
+    keys = list(DIMENSIONS.keys())
+    for nc_file in nc_files:
+        meta = pypsa.Network(nc_file).meta
+        assert set(meta["duals"]) == set(keys)
+        assert isinstance(meta["obj"], float)
 
 
-def test_optimize_mga_in_multiple_directions_raises_on_failed_direction(tmp_path):
+def test_make_furthest_point_fn_caches_by_direction_content_with_resolve_main_objective(tmp_path):
+    """No point_ids or skip_existing: passing output_dir alone makes caching
+    automatic, and each direction's own (rounded) values -- not an arbitrary
+    label -- determine its cache file, so identical directions always land
+    on the same file across calls. Unlike the old
+    optimize_mga_in_multiple_directions (which excluded already-cached rows
+    from its return), a cache hit here is fully reconstructed into the
+    returned arrays -- every call returns the FULL batch."""
     n = _build_network()
-    directions = [
-        {"wind": -1, "solar": 0},
-        {"wind": -1},  # missing "solar" key: mismatches DIMENSIONS, forces a failure
-    ]
+    directions = np.array([[-1.0, 0.0], [0.0, -1.0]])
     output_dir = tmp_path / "mga_results"
-    # A failed direction is a bug (or a genuine solver problem), not something to
-    # silently drop and continue past — the whole batch should fail loudly.
-    with pytest.raises(ValueError, match="must match"):
-        optimize_mga_in_multiple_directions(
-            n, directions=directions, dimensions=DIMENSIONS, output_dir=output_dir,
-            slack=0.1, solver_name="highs", max_parallel=2,
-        )
-
-
-def test_optimize_mga_in_multiple_directions_skip_existing(tmp_path):
-    n = _build_network()
-    directions = pd.DataFrame({"wind": [-1, 0], "solar": [0, -1]})
-    output_dir = tmp_path / "mga_results"
-
-    dirs_df, coords_df, duals_df = optimize_mga_in_multiple_directions(
-        n, directions=directions, dimensions=DIMENSIONS, output_dir=output_dir,
-        point_ids=[10, 20], slack=0.1, solver_name="highs", max_parallel=2,
+    keys = [encode_cache_key(row, decimals=8) for row in directions]
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, slack=0.1, output_dir=output_dir, resolve_main_objective=True,
+        solver_name="highs", max_parallel=2,
     )
-    assert sorted(coords_df.index) == [10, 20]
-    assert {p.name for p in output_dir.glob("mga_result_*.nc")} == {"mga_result_10.nc", "mga_result_20.nc"}
 
-    # Re-running with the same point_ids and skip_existing=True should find both
-    # already solved and return empty results without solving anything again.
-    dirs_df2, coords_df2, duals_df2 = optimize_mga_in_multiple_directions(
-        n, directions=directions, dimensions=DIMENSIONS, output_dir=output_dir,
-        point_ids=[10, 20], skip_existing=True, slack=0.1, solver_name="highs", max_parallel=2,
-    )
-    assert dirs_df2.empty
-    assert coords_df2.empty
-    assert duals_df2.empty
+    points, normals = furthest_point(directions)
+    assert {p.name for p in output_dir.glob("mga_furthest_result_*.nc")} == {f"mga_furthest_result_{k}.nc" for k in keys}
 
-    # A mix of one already-solved point and one new one only solves the new one.
-    directions3 = pd.DataFrame({"wind": [-1, -1], "solar": [0, 0]})
-    dirs_df3, coords_df3, duals_df3 = optimize_mga_in_multiple_directions(
-        n, directions=directions3, dimensions=DIMENSIONS, output_dir=output_dir,
-        point_ids=[10, 30], skip_existing=True, slack=0.1, solver_name="highs", max_parallel=2,
-    )
-    assert list(coords_df3.index) == [30]
-    assert {p.name for p in output_dir.glob("mga_result_*.nc")} == {
-        "mga_result_10.nc", "mga_result_20.nc", "mga_result_30.nc",
+    # Re-running with the exact same directions should find both already
+    # cached and return the SAME full results, reconstructed from disk,
+    # without solving anything again.
+    points2, normals2 = furthest_point(directions)
+    np.testing.assert_allclose(points2, points)
+    np.testing.assert_allclose(normals2, normals)
+
+    # A mix of one already-cached direction ([-1, 0]) and one new one ([-1, -1])
+    # only solves the new one, but still returns the full (now 2-row) batch.
+    directions3 = np.array([[-1.0, 0.0], [-1.0, -1.0]])
+    keys3 = [encode_cache_key(row, decimals=8) for row in directions3]
+    points3, normals3 = furthest_point(directions3)
+    np.testing.assert_allclose(points3[0], points[0])  # cached row: unchanged
+    assert {p.name for p in output_dir.glob("mga_furthest_result_*.nc")} == {
+        f"mga_furthest_result_{k}.nc" for k in {*keys, keys3[1]}
     }
+
+
+def test_make_oracle_fns_returns_three_independently_usable_callables(tmp_path):
+    """Regression test for a real bug: n.optimize.create_model() stores its
+    model at n.model, a single slot -- building furthest/closest/optimal
+    directly against one shared n would silently overwrite each other's
+    model there, so only whichever was built LAST would actually be live.
+    Caught by interleaving all three after construction and checking each
+    one's result is still correct, not just that calling it doesn't crash."""
+    n = _build_network()
+    k = len(DIMENSIONS)
+    furthest_point, closest_point, solve_optimal = make_oracle_fns(
+        n, DIMENSIONS, slack=0.1, norm="linf", output_dir=tmp_path, solver_name="highs", max_parallel=2,
+    )
+
+    optimal_point = solve_optimal()
+    expected_optimal = np.array([n.generators.at["wind", "p_nom_opt"], n.generators.at["solar", "p_nom_opt"]])
+    np.testing.assert_allclose(optimal_point, expected_optimal, atol=1e-6)
+
+    box_directions = np.vstack([np.eye(k), -np.eye(k)])
+    box_points, box_normals = furthest_point(box_directions)
+    assert box_points.shape == (2 * k, k)
+    np.testing.assert_allclose(box_normals, box_directions)
+
+    target = np.array([-100.0, -100.0])
+    point, normal = closest_point(target)
+    assert not np.allclose(point, target)  # target was infeasible, so it must have moved
+
+    # Call furthest_point again after closest_point ran -- if the two were
+    # secretly sharing (and overwriting) one model, this would now solve
+    # the wrong problem and disagree with the first call.
+    box_points2, box_normals2 = furthest_point(box_directions)
+    np.testing.assert_allclose(box_points2, box_points)
+    np.testing.assert_allclose(box_normals2, box_normals)
+
+    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method.bootstrap([*box_points, optimal_point], list(zip(box_normals, box_points)))
+    assert method.max_gap() > 0

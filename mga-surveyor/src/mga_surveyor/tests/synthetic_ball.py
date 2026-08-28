@@ -4,7 +4,7 @@ project's validation), via mga_surveyor's generic runner.
 
 This is the only place in this example that knows anything about the test
 region -- the library itself (mga_surveyor/) never does. Swap the
-`closest_feasible_point` closure in `main()` for a callback into a real
+`closest_point` closure in `main()` for a callback into a real
 system model to use the same methods/runner on a real problem.
 
 Run with: python mga_surveyor/tests/synthetic_ball.py [method] [norm] [n_iters]
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 
 from mga_surveyor import (
     VertexEnumMethod, BilevelMethod, CddMethod,
-    bootstrap_box, run,
+    run,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
 
@@ -58,13 +58,6 @@ def build_method(name, k, norm, executor=None):
     raise ValueError(f"unknown method {name!r}")
 
 
-def bootstrap_state(method, A_ub_true, b_ub_true, k):
-    """Bootstrap: seed I and O from the 2k axis directions (the
-    bounding-box approach), using `furthest_point` (a stand-in for
-    querying a real system model here) to find each initial point."""
-    bootstrap_box(method, lambda d: furthest_point(d, A_ub_true, b_ub_true), k)
-
-
 def main():
     method_name = sys.argv[1] if len(sys.argv) > 1 else "vertex_enum"
     norm = sys.argv[2] if len(sys.argv) > 2 else "l2"
@@ -77,13 +70,25 @@ def main():
     method = build_method(method_name, k, norm)
     print(f"method={method_name} norm={method.norm}")
 
-    bootstrap_state(method, A_ub_true, b_ub_true, k)
+    def furthest_point_fn(directions):
+        # furthest_point is single-direction only -- loop it into the
+        # batched FurthestPointFn contract run() expects. normal is just
+        # the query direction itself, echoed back.
+        points = np.array([furthest_point(d, A_ub_true, b_ub_true) for d in directions])
+        return points, np.asarray(directions, dtype=float)
 
-    def closest_feasible_point(target):
+    def closest_point(target):
         return closest_point_in_region(target, A_ub_true, b_ub_true, norm=method.norm)
 
+    def optimal_fn():
+        # No real "cost-optimal" point for this synthetic region -- the
+        # origin, projected onto the region, stands in as a known feasible
+        # point to seed the inner approximation with.
+        point, _normal = closest_point_in_region(np.zeros(k), A_ub_true, b_ub_true, norm=method.norm)
+        return point
+
     t0 = time.time()
-    history = run(method, closest_feasible_point, tol=1e-3, max_iter=n_iters, verbose=True)
+    history = run(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-3, max_iter=n_iters, verbose=True)
     elapsed = time.time() - t0
 
     print(f"\nfinished {len(history)} iterations in {elapsed:.2f}s, "

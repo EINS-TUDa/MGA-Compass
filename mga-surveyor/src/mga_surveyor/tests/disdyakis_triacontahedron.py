@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 
 from mga_surveyor import (
     VertexEnumMethod, BilevelMethod, CddMethod,
-    bootstrap_box, run,
+    run,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
 
@@ -148,13 +148,24 @@ def main():
     method = build_method(method_name, k, norm)
     print(f"method={method_name} norm={method.norm}")
 
-    bootstrap_box(method, lambda d: furthest_point(d, A_ub_true, b_ub_true), k)
+    def furthest_point_fn(directions):
+        # furthest_point is single-direction only -- loop it into the
+        # batched FurthestPointFn contract run() expects. normal is just
+        # the query direction itself, echoed back.
+        points = np.array([furthest_point(d, A_ub_true, b_ub_true) for d in directions])
+        return points, np.asarray(directions, dtype=float)
 
-    def closest_feasible_point(target):
+    def closest_point(target):
         return closest_point_in_region(target, A_ub_true, b_ub_true, norm=method.norm)
 
+    def optimal_fn():
+        # No real "cost-optimal" point for this shape -- the origin,
+        # projected onto the region, stands in as a known feasible point.
+        point, _normal = closest_point_in_region(np.zeros(k), A_ub_true, b_ub_true, norm=method.norm)
+        return point
+
     t0 = time.time()
-    history = run(method, closest_feasible_point, tol=GAP_TOL, max_iter=n_iters, verbose=True)
+    history = run(method, furthest_point_fn, closest_point, optimal_fn, tol=GAP_TOL, max_iter=n_iters, verbose=True)
     elapsed = time.time() - t0
 
     final_gap = method.max_gap()

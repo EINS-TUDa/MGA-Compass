@@ -1,13 +1,14 @@
 """Generate the MGA dataset consumed by the MGA Compass server.
 
-Solves a PyPSA example network, runs Modelling-to-Generate-Alternatives (MGA) across
-several sub-optimality (slack) levels via mga_surveyor, and writes the production-ready
-files consumed by the server (points.pkl, duals.pkl, installed_capacity.pkl,
-generation_over_snapshots.pkl).
+Solves a PyPSA example network, then for each sub-optimality (slack) level
+drives a VertexEnumMethod (mga_surveyor's adaptive inner/outer polytope
+approximation) to discover near-optimal points, and writes the
+production-ready files consumed by the server (points.pkl, duals.pkl,
+installed_capacity.pkl, generation_over_snapshots.pkl).
 
 Requires the "scripts" extra (`uv sync --extra scripts`) for mga-surveyor/pypsa/netCDF4/gurobipy.
 
-Run with: uv run python scripts/generate_dataset.py --slack-levels 0.02 0.05 0.08
+Run with: uv run python scripts/generate_dataset.py
 """
 import argparse
 import logging
@@ -20,9 +21,15 @@ import pandas as pd
 import pypsa
 import xarray as xr
 from netCDF4 import Dataset
-from pypsa.optimization.mga import generate_directions_halton
 
-from mga_surveyor import optimize_mga_in_multiple_directions
+from mga_surveyor import (
+    VertexEnumMethod,
+    encode_cache_key,
+    make_closest_point_fn,
+    make_furthest_point_fn,
+    make_optimality_fn,
+    run as mga_surveyor_run,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -54,15 +61,16 @@ class RunConfig:
 
     solver_name: str
     solver_options: dict
-    n_directions: int  # sampled directions per slack level
+    norm: str
     obj_label: str
     slack_levels: list[float]
+    tol: float = 1e-3
+    max_iter: int = 120
     output_dir: Path = Path(__file__).parent / "output"
-    seed: int = 0
     max_parallel: int = 4
 
 
-RUN_CONFIG = RunConfig(*_detect_solver(), n_directions=200, obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08])
+RUN_CONFIG = RunConfig(*_detect_solver(), norm="linf", obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08])
 
 
 @dataclass
@@ -104,83 +112,104 @@ MODEL_ENERGY = NetworkConfig(
 
 def run_mga(
     n: pypsa.Network,
-    optimal_cost: float,
     network: NetworkConfig,
     config: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[Path]]:
-    """Run MGA across all slack levels and consolidate into one 0..N-1 index.
+    """Run a VertexEnumMethod per slack level (mga_surveyor's adaptive
+    inner/outer polytope approximation, via runner.run, up to
+    `config.max_iter` iterations each) and consolidate into one 0..N-1
+    index.
 
-    Resumable: each slack level's already-solved directions (tracked by their
-    mga_result_{point_id}.nc file and a cached results.pkl) are skipped on rerun,
-    so an interrupted run can simply be restarted with the same configuration.
+    The network's own optimum is slack-independent, so it's solved/cached
+    once (output_dir/optimal.nc), not once per slack level, even though
+    each slack level's own run() still calls it (as its required
+    optimal_fn) to seed that slack level's inner approximation.
+
+    Resumable: every .nc file this function's own oracle calls produce is
+    cached under output_dir/slack_{slack}/ (or output_dir/optimal.nc), so
+    an interrupted run can simply be restarted with the same configuration
+    -- already-cached queries are read back, not re-solved (see
+    make_furthest_point_fn/make_closest_point_fn/make_optimality_fn).
 
     Returns points_df, duals_df, and the list of NetCDF paths (matching the
     DataFrames' row order) for the corresponding solved networks.
     """
     output_dir = config.output_dir
     output_dir.mkdir(exist_ok=True)
-    directions = generate_directions_halton(network.dimensions.keys(), config.n_directions, seed=config.seed)
-    point_ids = list(range(config.n_directions))
+    keys = list(network.dimensions.keys())
+    k = len(keys)
 
-    all_coords = []
-    all_duals = []
-    all_nc_paths = []
+    solve_optimal = make_optimality_fn(
+        n, network.dimensions, output_dir, solver_name=config.solver_name, solver_options=config.solver_options,
+    )
 
-    # Point 0: the network's own optimum, no slack. Cheap (no MGA solve needed).
-    optimum_nc = output_dir / "optimum.nc"
-    n.export_to_netcdf(optimum_nc)
-    optimum_coords = n.optimize.project_solved(network.dimensions)
-    optimum_coords[config.obj_label] = optimal_cost
-    all_coords.append(optimum_coords)
-    all_duals.append(pd.Series(0.0, index=list(network.dimensions.keys())))
-    all_nc_paths.append(optimum_nc)
+    # Every .nc file any oracle call below actually touches, deduped by
+    # path -- e.g. optimal.nc gets added once per slack level's own run()
+    # call (each needs it for its own bootstrap) but is the same file every
+    # time, so it naturally ends up counted once here.
+    nc_paths: set[Path] = set()
+
+    def logged_optimal_fn() -> np.ndarray:
+        nc_paths.add(output_dir / "optimal.nc")
+        return solve_optimal()
 
     for slack in config.slack_levels:
         slack_dir = output_dir / f"slack_{slack}"
-        cache_path = slack_dir / "results.pkl"
-        if cache_path.exists():
-            cached_coords, cached_duals = pd.read_pickle(cache_path)
-        else:
-            cached_coords, cached_duals = pd.DataFrame(), pd.DataFrame()
-
-        logging.info("slack=%s: starting (%d/%d already solved)", slack, len(cached_coords), config.n_directions)
-
-        new_dirs_df, new_coords_df, new_duals_df = optimize_mga_in_multiple_directions(
-            n,
-            directions=directions,
-            dimensions=network.dimensions,
-            output_dir=slack_dir,
-            obj_label=config.obj_label,
-            point_ids=point_ids,
-            skip_existing=True,
-            slack=slack,
-            solver_name=config.solver_name,
-            solver_options=config.solver_options,
-            max_parallel=config.max_parallel,
+        furthest_point = make_furthest_point_fn(
+            n, network.dimensions, slack=slack, output_dir=slack_dir, resolve_main_objective=True,
+            solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
         )
-        coords_df = pd.concat([cached_coords, new_coords_df])
-        duals_df = pd.concat([cached_duals, new_duals_df])
-        pd.to_pickle((coords_df, duals_df), cache_path)
+        closest_point = make_closest_point_fn(
+            n, network.dimensions, norm=config.norm, slack=slack, output_dir=slack_dir,
+            solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
+        )
 
+        def logged_furthest_point(directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            for row in directions:
+                nc_paths.add(slack_dir / f"mga_furthest_result_{encode_cache_key(row, decimals=8)}.nc")
+            return furthest_point(directions)
+
+        def logged_closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            nc_paths.add(slack_dir / f"mga_closest_result_{encode_cache_key(target, decimals=8)}.nc")
+            return closest_point(target)
+
+        method = VertexEnumMethod(k=k, norm=config.norm, backend=config.solver_name)
+        logging.info("slack=%s: running VertexEnumMethod (max_iter=%d)", slack, config.max_iter)
+        mga_surveyor_run(
+            method, logged_furthest_point, logged_closest_point, logged_optimal_fn,
+            tol=config.tol, max_iter=config.max_iter, verbose=True,
+        )
         logging.info(
-            "slack=%s: %d/%d total solved (%d new this run)",
-            slack,
-            len(coords_df),
-            config.n_directions,
-            len(new_coords_df),
+            "slack=%s: %d inner point(s), final max_gap=%.3e",
+            slack, len(method.inner_vertices), method.max_gap(),
         )
 
-        for pid in coords_df.index:
-            all_coords.append(coords_df.loc[pid])
-            all_duals.append(duals_df.loc[pid])
-            all_nc_paths.append(slack_dir / f"mga_result_{pid}.nc")
+    all_coords = []
+    all_duals = []
+    all_nc_paths = sorted(nc_paths, key=str)
+    for nc_path in all_nc_paths:
+        n_result = pypsa.Network(nc_path)
+        meta = n_result.meta
+        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+        if "coordinates" in meta:
+            # make_furthest_point_fn's / make_optimality_fn's own cache.
+            coords = pd.Series(meta["coordinates"])[keys]
+        else:
+            # make_closest_point_fn's own cache.
+            coords = pd.Series(meta["point"])[keys]
+        # Absent when that call's own resolve_main_objective was False.
+        duals = pd.Series(meta["duals"])[keys] if "duals" in meta else pd.Series(0.0, index=keys)
+        coords = coords.copy()
+        coords[config.obj_label] = obj
+        all_coords.append(coords)
+        all_duals.append(duals)
 
     points_df = pd.DataFrame(all_coords).reset_index(drop=True)
-    duals_df_final = pd.DataFrame(all_duals).reset_index(drop=True)
+    duals_df = pd.DataFrame(all_duals).reset_index(drop=True)
     points_df.index.name = "index"
-    duals_df_final.index.name = "index"
+    duals_df.index.name = "index"
 
-    return points_df, duals_df_final, all_nc_paths
+    return points_df, duals_df, all_nc_paths
 
 
 def extract_generation_and_capacity(
@@ -228,7 +257,7 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
     optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
     print(f"Optimal {config.obj_label}: {optimal_cost:,.0f}")
 
-    points_df, duals_df, nc_files = run_mga(n, optimal_cost, network, config)
+    points_df, duals_df, nc_files = run_mga(n, network, config)
     print(f"Total points: {len(points_df)}")
 
     points_df.to_pickle(config.output_dir / "points.pkl")
