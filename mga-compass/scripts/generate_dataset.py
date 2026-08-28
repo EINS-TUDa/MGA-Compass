@@ -12,6 +12,7 @@ Run with: uv run python scripts/generate_dataset.py
 """
 import argparse
 import logging
+import pickle
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -139,8 +140,13 @@ def run_mga(
     keys = list(network.dimensions.keys())
     k = len(keys)
 
+    # Each factory below gets its own independent pickled copy of n, not n
+    # itself: n.optimize.create_model() stores its model at n.model, a
+    # single slot, so factories sharing one n would silently overwrite
+    # each other's model there -- the same bug make_oracle_fns avoids.
     solve_optimal = make_optimality_fn(
-        n, network.dimensions, output_dir, solver_name=config.solver_name, solver_options=config.solver_options,
+        pickle.loads(pickle.dumps(n)), network.dimensions, output_dir,
+        solver_name=config.solver_name, solver_options=config.solver_options,
     )
 
     # Every .nc file any oracle call below actually touches, deduped by
@@ -156,11 +162,12 @@ def run_mga(
     for slack in config.slack_levels:
         slack_dir = output_dir / f"slack_{slack}"
         furthest_point = make_furthest_point_fn(
-            n, network.dimensions, slack=slack, output_dir=slack_dir, resolve_main_objective=True,
+            pickle.loads(pickle.dumps(n)), network.dimensions, slack=slack, output_dir=slack_dir,
+            resolve_main_objective=True,
             solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
         )
         closest_point = make_closest_point_fn(
-            n, network.dimensions, norm=config.norm, slack=slack, output_dir=slack_dir,
+            pickle.loads(pickle.dumps(n)), network.dimensions, norm=config.norm, slack=slack, output_dir=slack_dir,
             solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
         )
 
