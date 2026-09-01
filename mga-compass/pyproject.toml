@@ -37,4 +37,4 @@ scripts = [
 ]
 
 [tool.uv.sources]
-mga-surveyor = { path = "../mga-surveyor" }
+mga-surveyor = { workspace = true }

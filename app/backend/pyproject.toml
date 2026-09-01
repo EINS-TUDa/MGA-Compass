@@ -18,4 +18,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-mga-compass = { path = "../../mga-compass" }
+mga-compass = { workspace = true }
