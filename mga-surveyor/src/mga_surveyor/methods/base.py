@@ -1,6 +1,6 @@
 """The :class:`Method` interface shared by all three worst-point implementations
 (vertex enumeration, bilevel MILP, cdd), so a driving loop (see
-:mod:`mga_surveyor.runner`) can be written once against this interface and
+:mod:`mga_surveyor.explore`) can be written once against this interface and
 parameterized by which method to use.
 
 Every method owns exactly the state needed to maintain an inner
@@ -11,7 +11,7 @@ whatever produced a point or a cut: :meth:`Method.add_point` /
 :meth:`Method.add_cut` are pure state updates, so the whole package is
 independent of any specific test example or system model. Finding new
 points/cuts to feed in is the caller's job (see the generic loop in
-:mod:`mga_surveyor.runner`, or drive a method directly with your own).
+:mod:`mga_surveyor.explore`, or drive a method directly with your own).
 """
 from abc import ABC, abstractmethod
 

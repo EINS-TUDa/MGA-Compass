@@ -12,7 +12,7 @@ solve): deselect with `pytest -m "not slow"`, or select just these with
 import numpy as np
 import pytest
 
-from mga_surveyor import run
+from mga_surveyor import drive
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
 from mga_surveyor.tests.truncated_icosahedron import (
     build_truncated_icosahedron, build_method, n_unique_facets,
@@ -57,7 +57,7 @@ def test_converges_to_truncated_icosahedron(true_region, method_name, norm):
 
     def furthest_point_fn(directions):
         # furthest_point is single-direction only -- loop it into the
-        # batched FurthestPointFn contract run() expects. normal is just
+        # batched FurthestPointFn contract drive() expects. normal is just
         # the query direction itself, echoed back.
         points = np.array([furthest_point(d, A_ub_true, b_ub_true) for d in directions])
         return points, np.asarray(directions, dtype=float)
@@ -71,6 +71,6 @@ def test_converges_to_truncated_icosahedron(true_region, method_name, norm):
         point, _normal = closest_point_in_region(np.zeros(K), A_ub_true, b_ub_true, norm=method.norm)
         return point
 
-    run(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-6, max_iter=MAX_ITER, verbose=False)
+    drive(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-6, max_iter=MAX_ITER, verbose=False)
 
     assert method.max_gap() < GAP_TOL

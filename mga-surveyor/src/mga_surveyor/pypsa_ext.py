@@ -21,14 +21,15 @@ rebuilt per direction.
 
 make_closest_point_fn finds the closest point in n's near-optimal region to
 a target, plus a separating-hyperplane normal -- PyPSA has no built-in
-equivalent. resolve_main_objective=True (default) also pins that point's
-coordinates and re-solves the original objective for real per-dimension
-duals, cached in n.meta but not part of the return value (still just
-(point, normal), matching runner.ClosestPointFn); pass False to skip that
-re-solve. A single-target call reuses one persistent in-process model; a
-batch spreads targets across a multiprocessing.Pool, each worker building
-its own solver once. Only l1/linf supported (l2 needs a quadratic
-objective, Gurobi-only).
+equivalent. Always solves fresh -- output_dir, if given, is export-only,
+never read back to skip a solve. resolve_main_objective=True (default)
+also pins that point's coordinates and re-solves the original objective
+for real per-dimension duals, exported in n.meta but not part of the
+return value (still just (point, normal), matching explore.ClosestPointFn);
+pass False to skip that re-solve. A single-target call reuses one
+persistent in-process model; a batch spreads targets across a
+multiprocessing.Pool, each worker building its own solver once. Only
+l1/linf supported (l2 needs a quadratic objective, Gurobi-only).
 
 Both batch paths pass the PyPSA Network directly to worker processes
 (picklable as of PyPSA 1.3.0, github.com/PyPSA/PyPSA/pull/1889) instead of
@@ -37,11 +38,24 @@ snapshots n via pickle before any solve can mutate it, since
 Network.copy() refuses on a network with an attached solver model.
 
 make_oracle_fns builds all three of the above in one call, sharing
-n/dimensions/output_dir -- a convenience for feeding runner.run's three
+n/dimensions/output_dir -- a convenience for feeding explore.drive's three
 callback parameters directly.
+
+generate_mga_files runs a VertexEnumMethod per slack level (via
+explore.drive) against a real network, writing every result to .nc files
+under output_dir -- resuming from whatever's already there (cached
+optimal/furthest-point solves are read back, and existing closest-point
+results are folded into each slack level's own explore.drive call as its
+extra_points/extra_halfspaces). consolidate_mga_results is the standalone
+other half: given just an output_dir, it scans for every result .nc file
+there and builds the consolidated points/duals DataFrames, independent of
+a live run. Call both in sequence for the common case of running and then
+reading the result back.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import pickle
 from multiprocessing import get_context
@@ -49,11 +63,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandas as pd
 from linopy import LinearExpression, QuadraticExpression
 from pypsa._options import options
 from pypsa.optimization.mga import _worker_init
 
-from .runner import ClosestPointFn
+from .explore import ClosestPointFn, drive
+from .methods import VertexEnumMethod
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -70,8 +86,9 @@ __all__ = [
     "make_furthest_point_fn",
     "make_closest_point_fn",
     "make_oracle_fns",
+    "generate_mga_files",
+    "consolidate_mga_results",
     "encode_cache_key",
-    "decode_cache_key",
 ]
 
 
@@ -86,7 +103,13 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
     pinned constraints -- the marginal cost of each dimension at the
     optimum -- cached alongside the point in `n.meta["duals"]`, same idea
     as `make_furthest_point_fn`/`make_closest_point_fn`'s own
-    `resolve_main_objective`.
+    `resolve_main_objective`. The optimum's own cost is cached too, in
+    `n.meta["obj"]`, same as every other result file this module writes --
+    so `consolidate_mga_results` never needs to recompute it. `dimensions`
+    itself is cached in `n.meta["dimensions"]` too -- the one piece of
+    per-run metadata every other `.nc` file in `output_dir` needs to be
+    interpreted, so `consolidate_mga_results` can read it back from here
+    instead of needing it passed in again.
 
     If `output_dir/optimal.nc` already exists, its point is read back from
     `n.meta["coordinates"]` (stashed there on save, same as everywhere else
@@ -99,17 +122,16 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
 
     def solve_optimal() -> np.ndarray:
         if optimal_fn.exists():
-            from pypsa import Network as _Network  # noqa: PLC0415
-
-            cached_coordinates = _Network(optimal_fn).meta["coordinates"]
+            cached_coordinates = _read_meta(optimal_fn)["coordinates"]
             return np.array([cached_coordinates[k] for k in keys])
 
-        m = n.optimize.create_model()
+        m = n.optimize.create_model(include_objective_constant=True)
         status, condition = n.optimize.solve_model(**kwargs)
         if status != "ok":
             msg = f"Solve to optimality failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
+        obj = n.statistics.capex().sum() + n.statistics.opex().sum()
 
         for key, value in zip(keys, point):
             m.add_constraints(
@@ -124,6 +146,8 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
 
         n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, point)}
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
+        n.meta["obj"] = float(obj)
+        n.meta["dimensions"] = dimensions
 
         optimal_fn.parent.mkdir(parents=True, exist_ok=True)
         n.export_to_netcdf(str(optimal_fn))
@@ -132,19 +156,36 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
     return solve_optimal
 
 
-def encode_cache_key(vec: np.ndarray, decimals: int) -> str:
-    """Reversible, filename-safe encoding of a numeric vector: round each
-    component to `decimals` places (default 8, so vectors differing only
-    beyond that collide onto the same key by design), then hex-encode the
-    rounded array's float64 bytes.
+def encode_cache_key(vec: np.ndarray) -> str:
+    """Filename-safe cache key for a numeric vector: SHA-256 of its raw
+    float64 bytes, truncated to 10 hex characters (40 bits -- collision
+    risk is negligible at the scale of a project's cached files). Not
+    reversible -- unlike a rounding-based encoding, this hashes the exact
+    bytes, so it's only meant for vectors that are exactly reproducible
+    bit-for-bit across calls (e.g. `np.eye`-derived directions), not ones
+    that might differ by float noise.
+
+    `-0.0` is normalized to `0.0` first, since IEEE 754 gives it a
+    different bit pattern despite being numerically equal to `0.0` (e.g.
+    `-np.eye(k)`'s off-diagonal entries).
     """
-    rounded = np.round(np.asarray(vec, dtype=np.float64), decimals) + 0.0  # +0.0 normalizes -0.0 to 0.0
-    return rounded.tobytes().hex()
+    normalized = np.asarray(vec, dtype=np.float64) + 0.0
+    return hashlib.sha256(normalized.tobytes()).hexdigest()[:10]
 
 
-def decode_cache_key(key: str) -> np.ndarray:
-    """Inverse of `encode_cache_key`."""
-    return np.frombuffer(bytes.fromhex(key), dtype=np.float64)
+def _read_meta(nc_path: str | Path) -> dict:
+    """Read just a result `.nc` file's `meta` dict, via `netCDF4` directly
+    on the file's own JSON-encoded global attribute -- not by instantiating
+    a full `pypsa.Network`, which parses every component/snapshot into
+    pandas DataFrames just to reach a handful of scalars PyPSA itself only
+    ever stashed as a JSON string in the first place (~1000x slower in
+    practice: full-network loads dominate the runtime of anything reading
+    back many cached files, e.g. `consolidate_mga_results` or a
+    `generate_mga_files` restart's `_read_existing_closest_points`)."""
+    from netCDF4 import Dataset  # noqa: PLC0415
+
+    with Dataset(nc_path) as ds:
+        return json.loads(ds.meta)
 
 
 def _build_furthest_point_solver(
@@ -175,6 +216,13 @@ def _build_furthest_point_solver(
     keys = list(dimensions.keys())
     if model_kwargs is None:
         model_kwargs = options.params.optimize.model_kwargs.copy()
+    # Explicit, not left to PyPSA's own default -- silences its own
+    # FutureWarning about that default changing in 2.0, and keeps this
+    # model's objective value meaning stable regardless of the PyPSA
+    # version installed (add_budget_constraint below compares m.objective
+    # directly against optimal_cost, so a silent default flip would change
+    # what "slack" means without anything here noticing).
+    model_kwargs.setdefault("include_objective_constant", True)
     if snapshots is None:
         snapshots = n.snapshots
     if not n.is_solved:
@@ -315,7 +363,6 @@ def make_furthest_point_fn(
     dimensions: dict,
     slack: float,
     output_dir: str | Path | None = None,
-    decimals: int = 8,
     resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
@@ -339,17 +386,18 @@ def make_furthest_point_fn(
     per-dimension duals and that point's own capex+opex cost -- cached
     alongside the point in `n.meta["duals"]`/`n.meta["obj"]`, but NOT part
     of the return value (kept fixed at `(points, normals)` either way, so
-    callers -- e.g. `runner.run` -- don't need to know which was used).
+    callers -- e.g. `explore.drive` -- don't need to know which was used).
     Pass `False` to skip that extra solve.
 
     `dimensions`' key order fixes the axis order of `directions`/`points`/
     `normals`.
 
     Caching: pass a persistent `output_dir` to cache each direction's
-    result at `output_dir/mga_furthest_result_{key}.nc`, content-addressed by the
-    direction itself (see `encode_cache_key`). `None` (default) disables
-    caching. A cache hit on the single-direction path skips solving
-    entirely, so `n` is NOT mutated by a call that only reads a cache hit.
+    result at `output_dir/mga_furthest_result_{key}.nc`, content-addressed
+    by the direction itself (see `encode_cache_key`). `None` (default)
+    disables caching. A cache hit on the single-direction path skips
+    solving entirely, so `n` is NOT mutated by a call that only reads a
+    cache hit.
 
     :raises RuntimeError: If a solve does not reach `status="ok"` (see
         `_build_furthest_point_solver`).
@@ -383,12 +431,10 @@ def make_furthest_point_fn(
             d = directions[0]
             cached = None
             if output_dir is not None:
-                key = encode_cache_key(d, decimals)
+                key = encode_cache_key(d)
                 cached_fn = Path(output_dir) / f"mga_furthest_result_{key}.nc"
                 if cached_fn.exists():
-                    from pypsa.networks import Network as _Network  # noqa: PLC0415
-
-                    cached_meta = _Network(cached_fn).meta
+                    cached_meta = _read_meta(cached_fn)
                     cached = (
                         np.array([cached_meta["coordinates"][k] for k in keys]),
                         np.array([cached_meta["normal"][k] for k in keys]),
@@ -408,16 +454,14 @@ def make_furthest_point_fn(
             todo_idx = list(range(len(directions)))
             cache_keys = None
             if output_dir is not None:
-                cache_keys = [encode_cache_key(row, decimals) for row in directions]
+                cache_keys = [encode_cache_key(row) for row in directions]
                 todo_idx = []
                 for i, key in enumerate(cache_keys):
                     cached_fn = Path(output_dir) / f"mga_furthest_result_{key}.nc"
                     if not cached_fn.exists():
                         todo_idx.append(i)
                         continue
-                    from pypsa.networks import Network as _Network  # noqa: PLC0415
-
-                    cached_meta = _Network(cached_fn).meta
+                    cached_meta = _read_meta(cached_fn)
                     results[i] = (
                         np.array([cached_meta["coordinates"][k] for k in keys]),
                         np.array([cached_meta["normal"][k] for k in keys]),
@@ -506,6 +550,13 @@ def _build_closest_point_solver(
     keys = list(dimensions.keys())
     if model_kwargs is None:
         model_kwargs = options.params.optimize.model_kwargs.copy()
+    # Explicit, not left to PyPSA's own default -- silences its own
+    # FutureWarning about that default changing in 2.0, and keeps this
+    # model's objective value meaning stable regardless of the PyPSA
+    # version installed (add_budget_constraint below compares m.objective
+    # directly against optimal_cost, so a silent default flip would change
+    # what "slack" means without anything here noticing).
+    model_kwargs.setdefault("include_objective_constant", True)
     if snapshots is None:
         snapshots = n.snapshots
     if not n.is_solved:
@@ -664,7 +715,6 @@ def make_closest_point_fn(
     norm: str,
     slack: float,
     output_dir: str | Path | None = None,
-    decimals: int = 8,
     resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
@@ -672,18 +722,20 @@ def make_closest_point_fn(
     max_parallel: int = 4,
     **kwargs: Any,
 ) -> ClosestPointFn:
-    """Build a `mga_surveyor.runner.ClosestPointFn` against a real,
+    """Build a `mga_surveyor.explore.ClosestPointFn` against a real,
     already-solved PyPSA network `n`: the closest point in `n`'s
     near-optimal feasible region to a given `target`, plus a valid
     separating-hyperplane normal there.
 
-    Caching: pass a persistent `output_dir` to cache each query's result at
+    Export only, not a cache: pass a persistent `output_dir` and every call
+    solves fresh and then writes its result to
     `output_dir/mga_closest_result_{key}.nc`, content-addressed by the
-    target itself (see `encode_cache_key`). `None` (default) disables
-    caching. A cache hit on the single-target path skips solving entirely,
-    so `n` is NOT mutated by a call that only reads a cache hit. Each cached
-    `.nc` also stashes the found point's own capex+opex cost in
-    `n.meta["obj"]`, same as `make_furthest_point_fn`'s cache.
+    target itself (see `encode_cache_key`) -- but an existing file there is
+    never read back or used to skip solving; re-running with the same
+    target just re-solves and overwrites it. `None` (default) disables
+    exporting entirely. Each exported `.nc` also stashes the found point's
+    own capex+opex cost in `n.meta["obj"]`, same as `make_furthest_point_fn`'s
+    own export.
 
     If `resolve_main_objective`: after finding the closest point, its
     coordinates are pinned and the network's original cost objective is
@@ -692,7 +744,7 @@ def make_closest_point_fn(
     `make_furthest_point_fn`'s own `resolve_main_objective`. This is extra
     work cached as a side effect only: `closest_point`'s own return value
     is unaffected, always `(point, normal)`, so it still matches
-    `runner.ClosestPointFn`.
+    `explore.ClosestPointFn`.
 
     :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
     :raises RuntimeError: If a call's solve does not reach `status="ok"`.
@@ -711,13 +763,12 @@ def make_closest_point_fn(
     def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Shape-preserving: a `(k,)` target returns one `(point, normal)`
         pair; an `(n_targets, k)` batch returns `(n_targets, k)` arrays.
+        Always solves -- no existing `output_dir` file is ever read back.
 
-        Single target: read from `output_dir`'s cache if a hit, else
-        solved in-process against the persistent model built above. Batch:
-        cached rows read from disk, the rest dispatched one
-        `pool.starmap` task per target across
-        `min(max_parallel, n_todo)` worker processes, each building its own
-        solver once.
+        Single target: solved in-process against the persistent model
+        built above. Batch: one `pool.starmap` task per target, spread
+        across `min(max_parallel, n_targets)` worker processes, each
+        building its own solver once.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
@@ -725,75 +776,37 @@ def make_closest_point_fn(
 
         if len(target_2d) == 1:
             t = target_2d[0]
-            cached = None
+            point, normal, duals, n_result = solve_one(t)
             if output_dir is not None:
-                key = encode_cache_key(t, decimals)
-                cached_fn = Path(output_dir) / f"mga_closest_result_{key}.nc"
-                if cached_fn.exists():
-                    from pypsa.networks import Network as _Network  # noqa: PLC0415
-
-                    cached_meta = _Network(cached_fn).meta
-                    cached = (
-                        np.array([cached_meta["point"][k] for k in keys]),
-                        np.array([cached_meta["normal"][k] for k in keys]),
-                    )
-            if cached is not None:
-                results = [cached]
-            else:
-                point, normal, duals, n_result = solve_one(t)
-                if output_dir is not None:
-                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
-                results = [(point, normal)]
+                key = encode_cache_key(t)
+                obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
+            results = [(point, normal)]
         else:
             # Passes pristine_n, not n's current state -- n may already be
             # mutated by an earlier single-target call above.
-            results = [None] * len(target_2d)
-            todo_idx = list(range(len(target_2d)))
-            cache_keys = None
-            if output_dir is not None:
-                cache_keys = [encode_cache_key(row, decimals) for row in target_2d]
-                todo_idx = []
-                for i, key in enumerate(cache_keys):
-                    cached_fn = Path(output_dir) / f"mga_closest_result_{key}.nc"
-                    if not cached_fn.exists():
-                        todo_idx.append(i)
-                        continue
-                    from pypsa.networks import Network as _Network  # noqa: PLC0415
-
-                    cached_meta = _Network(cached_fn).meta
-                    results[i] = (
-                        np.array([cached_meta["point"][k] for k in keys]),
-                        np.array([cached_meta["normal"][k] for k in keys]),
-                    )
-                skipped = len(target_2d) - len(todo_idx)
-                if skipped:
-                    logger.info("Skipping %s already-cached target(s)", skipped)
-
-            if todo_idx:
-                todo_targets = target_2d[todo_idx]
-                n_workers = min(max_parallel, len(todo_targets))
-                with get_context("spawn").Pool(
-                    processes=n_workers,
-                    initializer=_init_closest_point_worker,
-                    initargs=(
-                        pristine_n, dimensions, norm, slack, snapshots,
-                        multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
-                    ),
-                ) as pool:
-                    try:
-                        todo_results = pool.starmap(_solve_closest_point_target, [(row,) for row in todo_targets])
-                    except Exception:
-                        pool.terminate()
-                        pool.join()
-                        raise
-                for i, (point, normal, duals, n_result) in zip(todo_idx, todo_results):
-                    if output_dir is not None:
-                        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                        _cache_closest_point_result(
-                            n_result, output_dir, cache_keys[i], keys, point, normal, duals, obj,
-                        )
-                    results[i] = (point, normal)
+            n_workers = min(max_parallel, len(target_2d))
+            with get_context("spawn").Pool(
+                processes=n_workers,
+                initializer=_init_closest_point_worker,
+                initargs=(
+                    pristine_n, dimensions, norm, slack, snapshots,
+                    multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+                ),
+            ) as pool:
+                try:
+                    batch_results = pool.starmap(_solve_closest_point_target, [(row,) for row in target_2d])
+                except Exception:
+                    pool.terminate()
+                    pool.join()
+                    raise
+            results = []
+            for row, (point, normal, duals, n_result) in zip(target_2d, batch_results):
+                if output_dir is not None:
+                    key = encode_cache_key(row)
+                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
+                results.append((point, normal))
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
@@ -811,7 +824,6 @@ def make_oracle_fns(
     slack: float,
     norm: str,
     output_dir: str | Path,
-    decimals: int = 8,
     resolve_main_objective: bool = True,
     snapshots: Sequence | None = None,
     multi_investment_periods: bool = False,
@@ -819,7 +831,7 @@ def make_oracle_fns(
     max_parallel: int = 4,
     **kwargs: Any,
 ) -> tuple[Callable, ClosestPointFn, Callable[[], np.ndarray]]:
-    """Build all three oracle callables `runner.run` needs in one call
+    """Build all three oracle callables `explore.drive` needs in one call
     against a real, already-solved PyPSA network `n`, sharing
     `n`/`dimensions`/`output_dir` -- just calls `make_furthest_point_fn`,
     `make_closest_point_fn`, and `make_optimality_fn` with their common
@@ -832,20 +844,222 @@ def make_oracle_fns(
     actually usable.
 
     Returns `(furthest_point, closest_point, solve_optimal)`, in that
-    order -- `runner.run`'s own parameter order.
+    order -- `explore.drive`'s own parameter order.
     """
     furthest_point = make_furthest_point_fn(
         pickle.loads(pickle.dumps(n)), dimensions, slack,
-        output_dir=output_dir, decimals=decimals, resolve_main_objective=resolve_main_objective,
+        output_dir=output_dir, resolve_main_objective=resolve_main_objective,
         snapshots=snapshots, multi_investment_periods=multi_investment_periods,
         model_kwargs=model_kwargs, max_parallel=max_parallel, **kwargs,
     )
     closest_point = make_closest_point_fn(
         pickle.loads(pickle.dumps(n)), dimensions, norm, slack,
-        output_dir=output_dir, decimals=decimals, resolve_main_objective=resolve_main_objective,
+        output_dir=output_dir, resolve_main_objective=resolve_main_objective,
         snapshots=snapshots, multi_investment_periods=multi_investment_periods,
         model_kwargs=model_kwargs, max_parallel=max_parallel, **kwargs,
     )
     solve_optimal = make_optimality_fn(n, dimensions, output_dir, **kwargs)
 
     return furthest_point, closest_point, solve_optimal
+
+
+def _broadcast_per_slack(value: Any, n_levels: int, name: str) -> list:
+    """`value` as a per-slack-level list: a scalar (anything but a
+    `list`/`tuple`) is repeated `n_levels` times; a `list`/`tuple` is used
+    as-is, and must already have exactly `n_levels` entries.
+
+    :raises ValueError: If `value` is a `list`/`tuple` of the wrong length.
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) != n_levels:
+            msg = f"{name} has {len(value)} entries but there are {n_levels} slack_levels"
+            raise ValueError(msg)
+        return list(value)
+    return [value] * n_levels
+
+
+def _read_existing_closest_points(
+    slack_dir: Path, keys: list,
+) -> tuple[list[np.ndarray], list[tuple[np.ndarray, np.ndarray]]]:
+    """Read every already-exported `mga_closest_result_*.nc` file under
+    `slack_dir` (e.g. from an earlier, interrupted run) back into
+    `(point, (normal, point))` pairs, ready to pass as `explore.drive`'s
+    `extra_points`/`extra_halfspaces` -- so a restart doesn't have to
+    rediscover them via `closest_point`. Empty (not an error) if
+    `slack_dir` doesn't exist yet.
+    """
+    points = []
+    halfspaces = []
+    for nc_path in sorted(slack_dir.glob("mga_closest_result_*.nc")):
+        meta = _read_meta(nc_path)
+        point = np.array([meta["point"][k] for k in keys])
+        normal = np.array([meta["normal"][k] for k in keys])
+        points.append(point)
+        halfspaces.append((normal, point))
+    return points, halfspaces
+
+
+def generate_mga_files(
+    n: Network,
+    dimensions: dict,
+    output_dir: str | Path,
+    norm: str,
+    slack_levels: Sequence[float],
+    solver_name: str,
+    tol: float | Sequence[float] = 1e-3,
+    max_iter: int | None | Sequence[int | None] = None,
+    max_parallel: int = 4,
+    verbose: bool = True,
+    **kwargs: Any,
+) -> None:
+    """Run a `VertexEnumMethod` per slack level (`explore.drive`, up to
+    `max_iter` iterations each) against a real, already-solved PyPSA
+    network `n`, writing every result to `.nc` files under `output_dir`.
+    Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
+    afterward for that.
+
+    `tol`/`max_iter` are each either a single value (used for every slack
+    level) or a sequence with one entry per `slack_levels` (raises if the
+    length doesn't match).
+
+    `n`'s own optimum is slack-independent, so it's solved/cached once
+    (`output_dir/optimal.nc`), not once per slack level, even though each
+    slack level's own `drive()` call still calls it (as its required
+    `optimal_fn`) to seed that slack level's inner approximation.
+
+    Resumable: `optimal_fn`'s and `furthest_point`'s `.nc` files (under
+    `output_dir/optimal.nc` and `output_dir/slack_{slack}/`) are read back
+    on a restart instead of re-solved (see `make_optimality_fn`/
+    `make_furthest_point_fn`). `closest_point` itself has no such cache --
+    it always solves fresh (see `make_closest_point_fn`) -- but every
+    `mga_closest_result_*.nc` already under a slack level's own directory
+    (from an earlier, interrupted run) is read back and passed as that
+    slack level's own `drive()` call's `extra_points`/`extra_halfspaces`,
+    folded into its one `Method.bootstrap` call, so those points/cuts
+    don't need to be rediscovered. Assumes those earlier results are
+    genuine near-optimal points for `n`/`dimensions`/this slack level --
+    `VertexEnumMethod.bootstrap` needs a single point (the mean of all of
+    them, box points included) that's a valid Qhull interior point for
+    every halfspace at once, which a wildly incompatible stray file (e.g.
+    from a different network or corrupted by hand) could break.
+
+    `solver_name` also becomes each slack level's `VertexEnumMethod`
+    backend. `**kwargs` (e.g. `solver_options`) is forwarded to every
+    oracle factory.
+
+    :raises ValueError: If `tol` or `max_iter` is a sequence whose length
+        doesn't match `slack_levels`.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    keys = list(dimensions.keys())
+    k = len(keys)
+    tols = _broadcast_per_slack(tol, len(slack_levels), "tol")
+    max_iters = _broadcast_per_slack(max_iter, len(slack_levels), "max_iter")
+
+    # Each factory below gets its own independent pickled copy of n, not n
+    # itself: n.optimize.create_model() stores its model at n.model, a
+    # single slot, so factories sharing one n would silently overwrite
+    # each other's model there -- the same bug make_oracle_fns avoids.
+    solve_optimal = make_optimality_fn(
+        pickle.loads(pickle.dumps(n)), dimensions, output_dir, solver_name=solver_name, **kwargs,
+    )
+
+    for slack, slack_tol, slack_max_iter in zip(slack_levels, tols, max_iters):
+        slack_dir = output_dir / f"slack_{slack}"
+        furthest_point = make_furthest_point_fn(
+            pickle.loads(pickle.dumps(n)), dimensions, slack=slack, output_dir=slack_dir,
+            resolve_main_objective=True, max_parallel=max_parallel, solver_name=solver_name, **kwargs,
+        )
+        closest_point = make_closest_point_fn(
+            pickle.loads(pickle.dumps(n)), dimensions, norm=norm, slack=slack, output_dir=slack_dir,
+            max_parallel=max_parallel, solver_name=solver_name, **kwargs,
+        )
+
+        # Points/cuts already known from an earlier, interrupted run --
+        # folded into drive()'s own bootstrap call below (Method.bootstrap
+        # must be called exactly once, before any add_point/add_cut/
+        # find_trial_point), so the main loop doesn't rediscover them.
+        extra_points, extra_halfspaces = _read_existing_closest_points(slack_dir, keys)
+        if verbose and extra_points:
+            logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
+
+        method = VertexEnumMethod(k=k, norm=norm, backend=solver_name)
+        if verbose:
+            logger.info(
+                "slack=%s: running VertexEnumMethod (tol=%s, max_iter=%s)", slack, slack_tol, slack_max_iter,
+            )
+        drive(
+            method, furthest_point, closest_point, solve_optimal,
+            tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
+            extra_points=extra_points, extra_halfspaces=extra_halfspaces,
+        )
+        if verbose:
+            logger.info(
+                "slack=%s: %d inner point(s), final max_gap=%.3e",
+                slack, len(method.inner_vertices), method.max_gap(),
+            )
+
+
+def consolidate_mga_results(
+    output_dir: str | Path, obj_label: str = "obj",
+) -> tuple[pd.DataFrame, pd.DataFrame, list[Path]]:
+    """Scan `output_dir` for every MGA result `.nc` file this module's
+    factories can produce there (`optimal.nc`, and each slack level's own
+    `mga_furthest_result_*.nc`/`mga_closest_result_*.nc` under
+    `output_dir/slack_*/`) and consolidate their `meta` into
+    `points_df`/`duals_df`, one row per file, 0..N-1 indexed. Standalone --
+    can be called independently of `generate_mga_files`, e.g. to rebuild
+    the dataset from an `output_dir` an earlier (possibly interrupted) run
+    already populated, without re-running anything -- `output_dir` is the
+    only thing this needs: dimension names/order come from `optimal.nc`'s
+    own `meta["dimensions"]` (stashed there by `make_optimality_fn`), not a
+    parameter here, so there's no way to pass mismatched ones by accident.
+
+    Each file is either `make_furthest_point_fn`'s/`make_optimality_fn`'s
+    own export (`meta["coordinates"]`) or `make_closest_point_fn`'s own
+    (`meta["point"]`) -- `duals` absent (all-zero) when that call's own
+    `resolve_main_objective` was `False`. `obj` is read straight out of
+    `meta` too (every writer in this module stashes it there already) --
+    never recomputed via `n.statistics`, which would mean a full
+    `pypsa.Network` load per file for no reason (see `_read_meta`).
+
+    Returns `points_df`, `duals_df`, and the sorted list of NetCDF paths
+    (matching the DataFrames' row order).
+
+    :raises FileNotFoundError: If `output_dir/optimal.nc` doesn't exist --
+        it's the precondition every other function in this module assumes,
+        so there's nothing meaningful to consolidate without it.
+    """
+    output_dir = Path(output_dir)
+    optimal_nc = output_dir / "optimal.nc"
+    if not optimal_nc.exists():
+        msg = f"{optimal_nc} not found -- run generate_mga_files (or at least make_optimality_fn) first."
+        raise FileNotFoundError(msg)
+    keys = list(_read_meta(optimal_nc)["dimensions"].keys())
+
+    nc_paths: set[Path] = {optimal_nc}
+    nc_paths.update(output_dir.glob("slack_*/mga_furthest_result_*.nc"))
+    nc_paths.update(output_dir.glob("slack_*/mga_closest_result_*.nc"))
+
+    all_coords = []
+    all_duals = []
+    all_nc_paths = sorted(nc_paths, key=str)
+    for nc_path in all_nc_paths:
+        meta = _read_meta(nc_path)
+        if "coordinates" in meta:
+            coords = pd.Series(meta["coordinates"])[keys]
+        else:
+            coords = pd.Series(meta["point"])[keys]
+        duals = pd.Series(meta["duals"])[keys] if "duals" in meta else pd.Series(0.0, index=keys)
+        coords = coords.copy()
+        coords[obj_label] = meta["obj"]
+        all_coords.append(coords)
+        all_duals.append(duals)
+
+    points_df = pd.DataFrame(all_coords).reset_index(drop=True)
+    duals_df = pd.DataFrame(all_duals).reset_index(drop=True)
+    points_df.index.name = "index"
+    duals_df.index.name = "index"
+
+    return points_df, duals_df, all_nc_paths

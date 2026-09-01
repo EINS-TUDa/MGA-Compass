@@ -33,7 +33,7 @@ being wrong, and `CddMethod`'s float-mode Double Description solver
 occasionally hits cddlib's own documented float-precision limit ("Numerical
 inconsistency... use the GMP exact arithmetic") on the accumulated
 halfspaces for L2 specifically. Both are avoided by using a looser
-`tol=1e-4` in `run()` -- still far tighter than anything visually
+`tol=1e-4` in `drive()` -- still far tighter than anything visually
 meaningful -- rather than by further tuning the geometry; see
 `test_disdyakis_triacontahedron.py` for exactly which (method, norm)
 combinations are exercised as real, passing tests versus documented as
@@ -45,8 +45,9 @@ same convention as `truncated_icosahedron.py`.
 Run with: python mga_surveyor/tests/disdyakis_triacontahedron.py [method] [norm] [n_iters]
   method in {vertex_enum, bilevel, cdd}, default vertex_enum
   norm in {l1, l2, linf}, default l2 (bilevel forces linf regardless)
-  n_iters default None (run to convergence, see `runner.run`)
+  n_iters default None (run to convergence, see `explore.drive`)
 """
+import logging
 import sys
 import time
 from pathlib import Path
@@ -56,9 +57,11 @@ from scipy.spatial import ConvexHull
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `import mga_surveyor`
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")  # explore.drive's per-iteration logging
+
 from mga_surveyor import (
     VertexEnumMethod, BilevelMethod, CddMethod,
-    run,
+    drive,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
 
@@ -150,7 +153,7 @@ def main():
 
     def furthest_point_fn(directions):
         # furthest_point is single-direction only -- loop it into the
-        # batched FurthestPointFn contract run() expects. normal is just
+        # batched FurthestPointFn contract drive() expects. normal is just
         # the query direction itself, echoed back.
         points = np.array([furthest_point(d, A_ub_true, b_ub_true) for d in directions])
         return points, np.asarray(directions, dtype=float)
@@ -165,7 +168,7 @@ def main():
         return point
 
     t0 = time.time()
-    history = run(method, furthest_point_fn, closest_point, optimal_fn, tol=GAP_TOL, max_iter=n_iters, verbose=True)
+    history = drive(method, furthest_point_fn, closest_point, optimal_fn, tol=GAP_TOL, max_iter=n_iters, verbose=True)
     elapsed = time.time() - t0
 
     final_gap = method.max_gap()

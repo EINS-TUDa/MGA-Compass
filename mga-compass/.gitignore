@@ -12,3 +12,4 @@ wheels/
 # Generated dataset artifacts (see scripts/generate_dataset.py)
 *.pkl
 *.nc
+*.log

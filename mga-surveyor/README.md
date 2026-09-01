@@ -18,7 +18,7 @@ fixed set of hyperplane directions.
 - An **inner approximation** `I`: the convex hull of feasible points found so far.
 - An **outer approximation** `O`: the intersection of a growing set of supporting halfspaces
   ("cuts"), starting from a bounding box and shrinking as cuts are added.
-- The main loop (`run`, in [`runner.py`](src/mga_surveyor/runner.py)): find the vertex of `O`
+- The main loop (`drive`, in [`explore.py`](src/mga_surveyor/explore.py)): find the vertex of `O`
   farthest from `I` (the convergence gap) → ask the true region for the closest feasible point to
   it → grow `I` with that point, and if the trial point itself was infeasible, shrink `O` with a
   new cut → repeat until the gap closes below tolerance.
@@ -38,15 +38,15 @@ fixed set of hyperplane directions.
   [`highs_projection.py`](src/mga_surveyor/highs_projection.py) (open-source, `l1`/`linf` only —
   HiGHS has no quadratic-objective support).
 
-None of this — `common.py`, `methods/`, `runner.py`, the two projection backends — depends on
+None of this — `common.py`, `methods/`, `explore.py`, the two projection backends — depends on
 PyPSA or any specific system model. `add_point`/`add_cut` are pure state updates, and the "ask
-the true region" oracle (`FurthestPointFn`/`ClosestPointFn`/`OptimalPointFn` in `runner.py`) is a
+the true region" oracle (`FurthestPointFn`/`ClosestPointFn`/`OptimalPointFn` in `explore.py`) is a
 callback the caller supplies. [`pypsa_ext.py`](src/mga_surveyor/pypsa_ext.py) is that oracle
 backed by a real PyPSA network's own solve: `make_furthest_point_fn` and `make_closest_point_fn`
 build batched, cacheable versions of the two queries against `n`'s own near-optimal feasible
 region (replacing PyPSA's own built-in MGA, not just wrapping it), plus `make_optimality_fn` for
 solving and caching a network's own optimum as the precondition both assume. `make_oracle_fns`
-builds all three at once, wired straight into `runner.run`'s parameter order.
+builds all three at once, wired straight into `explore.drive`'s parameter order.
 
 The [`tests/`](src/mga_surveyor/tests/) subpackage (shipped as part of the installed package, not
 just pytest-only) provides `lp_region.py` — a reference oracle implementation against an explicit

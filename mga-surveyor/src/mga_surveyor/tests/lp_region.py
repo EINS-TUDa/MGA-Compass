@@ -1,9 +1,9 @@
 """Reference implementations of the two "true region" queries that
-`mga_surveyor`'s runner needs from something outside the package --
+`mga_surveyor`'s explore.drive needs from something outside the package --
 against an EXPLICIT H-represented polytope (`A_ub x <= b_ub`), via LP/QP.
 
 These live in `mga_surveyor/tests/`, not in the core package modules
-(`common.py`, `methods/`, `runner.py`), because having an explicit
+(`common.py`, `methods/`, `explore.py`), because having an explicit
 `(A_ub, b_ub)` at all is itself a test-example detail. A real system model
 (e.g. a PyPSA network) never hands you that -- it answers the same two
 queries by solving its own optimization problem (a linopy/Gurobi/HiGHS
@@ -12,7 +12,7 @@ someone already enumerated. None of the core package modules import this
 one; everything in `mga_surveyor/common.py` operates only on point clouds
 and halfspace lists already handed to it, independent of where they came
 from. Swap these two functions for calls into a real model to run the same
-methods/runner on a real problem.
+methods/explore.drive on a real problem.
 """
 import numpy as np
 import gurobipy as gp
@@ -31,7 +31,7 @@ def furthest_point(direction, A_ub, b_ub, A_eq=None, b_eq=None, bounds=None):
     -- seeding the initial O / I along the axis directions (see
     `synthetic_ball.bootstrap_state`). A direction-based variant of the
     true-region query that used to call this too has been removed (see
-    `mga_surveyor.runner.run`'s docstring); that query now always uses
+    `mga_surveyor.explore.drive`'s docstring); that query now always uses
     `closest_point_in_region` below instead.
     """
     from scipy.optimize import linprog

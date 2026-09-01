@@ -1,16 +1,21 @@
-"""A generic driving loop (`run`): bootstraps a `Method` from the 2k axis
-directions plus a known optimum, then runs the main loop until
-convergence. Parameterized by which `Method` to use and by external
-callbacks that query the true region -- the only place in the package
-tying a method to where points/cuts come from; drive/bootstrap a method
-directly with your own code if this doesn't fit your use case.
+"""A generic driving loop (`drive`): bootstraps a `Method` from the 2k axis
+directions, a known optimum, and any other already-known points/cuts, all
+in one `method.bootstrap` call, then drives the main loop until convergence.
+Parameterized by which `Method` to use and by external callbacks that
+query the true region -- the only place in the package tying a method to
+where points/cuts come from; drive/bootstrap a method directly with your
+own code if this doesn't fit your use case.
 """
 import itertools
+import logging
 from typing import Protocol
 
 import numpy as np
 
+from .common import Halfspace
 from .methods.base import Method
+
+logger = logging.getLogger(__name__)
 
 
 class FurthestPointFn(Protocol):
@@ -33,19 +38,26 @@ class OptimalPointFn(Protocol):
     def __call__(self) -> np.ndarray: ...
 
 
-def run(
+def drive(
     method: Method, furthest_point: FurthestPointFn, closest_point: ClosestPointFn, optimal_fn: OptimalPointFn,
     tol: float = 1e-6, max_iter: int | None = None, verbose: bool = True,
+    extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
 ) -> list[dict]:
-    """Bootstrap `method` from the 2k axis directions +-e_i plus
-    `optimal_fn`'s point, then drive it through the main loop until the gap
-    closes or `max_iter` is hit. `max_iter=None` (the default) means no cap.
+    """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
+    point, and `extra_points`/`extra_halfspaces` if given -- all together
+    in one `method.bootstrap` call, since `Method.bootstrap` must be called
+    exactly once, before any `add_point`/`add_cut`/`find_trial_point` call
+    -- then drive it through the main loop until the gap closes or
+    `max_iter` is hit. `max_iter=None` (the default) means no cap.
 
     - `furthest_point(directions) -> (points, normals)`: called once, with
       all `2k` box directions, for bootstrapping only.
     - `closest_point(target) -> (point, normal)`: called each iteration
       with the worst-point search's trial point.
     - `optimal_fn() -> point`: called once, before bootstrapping.
+    - `extra_points`/`extra_halfspaces`: points/cuts already known from
+      elsewhere (e.g. an earlier, interrupted run), folded into the same
+      bootstrap call as the box directions and `optimal_fn`'s point.
 
     See `mga_surveyor.tests.lp_region`/`mga_surveyor.tests.synthetic_ball`
     for example implementations, or `pypsa_ext` for PyPSA-backed ones.
@@ -60,8 +72,8 @@ def run(
     box_directions = np.vstack([np.eye(method.k), -np.eye(method.k)])
     box_points, box_normals = furthest_point(box_directions)
     box_points = np.asarray(box_points, dtype=float)
-    initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float)]
-    initial_halfspaces = list(zip(box_normals, box_points))
+    initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float), *(extra_points or [])]
+    initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
     method.bootstrap(initial_points, initial_halfspaces)
 
     history = []
@@ -70,7 +82,7 @@ def run(
         trial_point, gap = method.find_trial_point()
         if trial_point is None or gap < tol:
             if verbose:
-                print(f"[run] converged at iter {it}: gap={gap:.3e}")
+                logger.info("[drive] converged at iter %d: gap=%.3e", it, gap)
             break
 
         new_point, normal = closest_point(trial_point)
@@ -88,6 +100,6 @@ def run(
             "new_point": new_point, "cut_added": cut_added,
         })
         if verbose:
-            print(f"[run] iter {it+1:4d}: gap={gap:.6f} cut_added={cut_added}")
+            logger.info("[drive] iter %4d: gap=%.6f cut_added=%s", it + 1, gap, cut_added)
 
     return history

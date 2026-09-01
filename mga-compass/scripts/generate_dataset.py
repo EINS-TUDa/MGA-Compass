@@ -1,10 +1,12 @@
 """Generate the MGA dataset consumed by the MGA Compass server.
 
-Solves a PyPSA example network, then for each sub-optimality (slack) level
-drives a VertexEnumMethod (mga_surveyor's adaptive inner/outer polytope
-approximation) to discover near-optimal points, and writes the
-production-ready files consumed by the server (points.pkl, duals.pkl,
-installed_capacity.pkl, generation_over_snapshots.pkl).
+Solves a PyPSA example network, then hands it to
+mga_surveyor.generate_mga_files (which drives a VertexEnumMethod per
+sub-optimality (slack) level to discover near-optimal points, writing
+result .nc files), reads the result back via
+mga_surveyor.consolidate_mga_results, and writes the production-ready
+files consumed by the server (points.pkl, duals.pkl,
+installed_capacity.pkl, generation_over_snapshots.pkl) from that.
 
 Requires the "scripts" extra (`uv sync --extra scripts`) for mga-surveyor/pypsa/netCDF4/gurobipy.
 
@@ -12,7 +14,6 @@ Run with: uv run python scripts/generate_dataset.py
 """
 import argparse
 import logging
-import pickle
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -23,16 +24,26 @@ import pypsa
 import xarray as xr
 from netCDF4 import Dataset
 
-from mga_surveyor import (
-    VertexEnumMethod,
-    encode_cache_key,
-    make_closest_point_fn,
-    make_furthest_point_fn,
-    make_optimality_fn,
-    run as mga_surveyor_run,
-)
+from mga_surveyor import consolidate_mga_results, generate_mga_files
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+# Silence PyPSA's own per-variable INFO log when assigning the solution back
+# to the network: it fires for every mga_surveyor_* auxiliary variable we add
+# to the model (residuals, the L-inf slack), since those don't follow
+# PyPSA's "Component-attr" naming convention -- expected and harmless (we
+# read them directly via linopy, not through the network), just noisy.
+logging.getLogger("pypsa.optimization.optimize").setLevel(logging.WARNING)
+
+
+def _add_file_logging(output_dir: Path) -> None:
+    """Mirror everything logging.basicConfig above sends to the console into
+    output_dir/run.log too -- same handler setup (level, format), just a
+    second destination next to optimal.nc, so a run's full log survives
+    after the terminal scrolls away."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(output_dir / "run.log", mode="w")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(file_handler)
 
 
 def _detect_solver() -> tuple[str, dict]:
@@ -90,7 +101,11 @@ def _build_model_energy(solver_name: str, solver_options: dict) -> pypsa.Network
     n = pypsa.examples.model_energy()
     n.snapshots = n.snapshots[::3]  # crude reduction of time resolution for speed
     n.generators.at["load shedding", "marginal_cost"] = 20000
-    n.optimize(solver_name=solver_name, solver_options=solver_options)
+    # include_objective_constant=True explicit, not left to PyPSA's own
+    # default -- silences its own FutureWarning about that default changing
+    # in 2.0, matching the same explicit choice mga_surveyor.pypsa_ext makes
+    # for every model it builds against this network.
+    n.optimize(solver_name=solver_name, solver_options=solver_options, include_objective_constant=True)
     return n
 
 
@@ -109,114 +124,6 @@ MODEL_ENERGY = NetworkConfig(
         ("stores", "stores_e_nom_opt"),
     ],
 )
-
-
-def run_mga(
-    n: pypsa.Network,
-    network: NetworkConfig,
-    config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[Path]]:
-    """Run a VertexEnumMethod per slack level (mga_surveyor's adaptive
-    inner/outer polytope approximation, via runner.run, up to
-    `config.max_iter` iterations each) and consolidate into one 0..N-1
-    index.
-
-    The network's own optimum is slack-independent, so it's solved/cached
-    once (output_dir/optimal.nc), not once per slack level, even though
-    each slack level's own run() still calls it (as its required
-    optimal_fn) to seed that slack level's inner approximation.
-
-    Resumable: every .nc file this function's own oracle calls produce is
-    cached under output_dir/slack_{slack}/ (or output_dir/optimal.nc), so
-    an interrupted run can simply be restarted with the same configuration
-    -- already-cached queries are read back, not re-solved (see
-    make_furthest_point_fn/make_closest_point_fn/make_optimality_fn).
-
-    Returns points_df, duals_df, and the list of NetCDF paths (matching the
-    DataFrames' row order) for the corresponding solved networks.
-    """
-    output_dir = config.output_dir
-    output_dir.mkdir(exist_ok=True)
-    keys = list(network.dimensions.keys())
-    k = len(keys)
-
-    # Each factory below gets its own independent pickled copy of n, not n
-    # itself: n.optimize.create_model() stores its model at n.model, a
-    # single slot, so factories sharing one n would silently overwrite
-    # each other's model there -- the same bug make_oracle_fns avoids.
-    solve_optimal = make_optimality_fn(
-        pickle.loads(pickle.dumps(n)), network.dimensions, output_dir,
-        solver_name=config.solver_name, solver_options=config.solver_options,
-    )
-
-    # Every .nc file any oracle call below actually touches, deduped by
-    # path -- e.g. optimal.nc gets added once per slack level's own run()
-    # call (each needs it for its own bootstrap) but is the same file every
-    # time, so it naturally ends up counted once here.
-    nc_paths: set[Path] = set()
-
-    def logged_optimal_fn() -> np.ndarray:
-        nc_paths.add(output_dir / "optimal.nc")
-        return solve_optimal()
-
-    for slack in config.slack_levels:
-        slack_dir = output_dir / f"slack_{slack}"
-        furthest_point = make_furthest_point_fn(
-            pickle.loads(pickle.dumps(n)), network.dimensions, slack=slack, output_dir=slack_dir,
-            resolve_main_objective=True,
-            solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
-        )
-        closest_point = make_closest_point_fn(
-            pickle.loads(pickle.dumps(n)), network.dimensions, norm=config.norm, slack=slack, output_dir=slack_dir,
-            solver_name=config.solver_name, solver_options=config.solver_options, max_parallel=config.max_parallel,
-        )
-
-        def logged_furthest_point(directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            for row in directions:
-                nc_paths.add(slack_dir / f"mga_furthest_result_{encode_cache_key(row, decimals=8)}.nc")
-            return furthest_point(directions)
-
-        def logged_closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            nc_paths.add(slack_dir / f"mga_closest_result_{encode_cache_key(target, decimals=8)}.nc")
-            return closest_point(target)
-
-        method = VertexEnumMethod(k=k, norm=config.norm, backend=config.solver_name)
-        logging.info("slack=%s: running VertexEnumMethod (max_iter=%d)", slack, config.max_iter)
-        mga_surveyor_run(
-            method, logged_furthest_point, logged_closest_point, logged_optimal_fn,
-            tol=config.tol, max_iter=config.max_iter, verbose=True,
-        )
-        logging.info(
-            "slack=%s: %d inner point(s), final max_gap=%.3e",
-            slack, len(method.inner_vertices), method.max_gap(),
-        )
-
-    all_coords = []
-    all_duals = []
-    all_nc_paths = sorted(nc_paths, key=str)
-    for nc_path in all_nc_paths:
-        n_result = pypsa.Network(nc_path)
-        meta = n_result.meta
-        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-        if "coordinates" in meta:
-            # make_furthest_point_fn's / make_optimality_fn's own cache.
-            coords = pd.Series(meta["coordinates"])[keys]
-        else:
-            # make_closest_point_fn's own cache.
-            coords = pd.Series(meta["point"])[keys]
-        # Absent when that call's own resolve_main_objective was False.
-        duals = pd.Series(meta["duals"])[keys] if "duals" in meta else pd.Series(0.0, index=keys)
-        coords = coords.copy()
-        coords[config.obj_label] = obj
-        all_coords.append(coords)
-        all_duals.append(duals)
-
-    points_df = pd.DataFrame(all_coords).reset_index(drop=True)
-    duals_df = pd.DataFrame(all_duals).reset_index(drop=True)
-    points_df.index.name = "index"
-    duals_df.index.name = "index"
-
-    return points_df, duals_df, all_nc_paths
 
 
 def extract_generation_and_capacity(
@@ -260,12 +167,19 @@ def extract_generation_and_capacity(
 
 
 def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) -> None:
+    _add_file_logging(config.output_dir)
+
     n = network.build(config.solver_name, config.solver_options)
     optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
-    print(f"Optimal {config.obj_label}: {optimal_cost:,.0f}")
+    logging.info(f"Optimal {config.obj_label}: {optimal_cost:,.0f}")
 
-    points_df, duals_df, nc_files = run_mga(n, network, config)
-    print(f"Total points: {len(points_df)}")
+    generate_mga_files(
+        n, network.dimensions, config.output_dir, norm=config.norm, slack_levels=config.slack_levels,
+        solver_name=config.solver_name, tol=config.tol, max_iter=config.max_iter,
+        max_parallel=config.max_parallel, solver_options=config.solver_options,
+    )
+    points_df, duals_df, nc_files = consolidate_mga_results(config.output_dir, config.obj_label)
+    logging.info(f"Total points: {len(points_df)}")
 
     points_df.to_pickle(config.output_dir / "points.pkl")
     duals_df.to_pickle(config.output_dir / "duals.pkl")
@@ -276,10 +190,10 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
     pd.to_pickle(generation, config.output_dir / "generation_over_snapshots.pkl")
     pd.to_pickle(installed_capacity, config.output_dir / "installed_capacity.pkl")
 
-    print(f"Saved generation {generation.shape} (index x snapshot x technology)")
-    print(f"Saved installed_capacity {installed_capacity.shape} (index x technology)")
-    print(points_df)
-    print(duals_df)
+    logging.info(f"Saved generation {generation.shape} (index x snapshot x technology)")
+    logging.info(f"Saved installed_capacity {installed_capacity.shape} (index x technology)")
+    logging.info(points_df)
+    logging.info(duals_df)
 
 
 def parse_args() -> argparse.Namespace:
