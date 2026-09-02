@@ -68,8 +68,10 @@ from linopy import LinearExpression, QuadraticExpression
 from pypsa._options import options
 from pypsa.optimization.mga import _worker_init
 
+from .common import Halfspace, Norm, gaps, linearized_objective_cut
 from .explore import ClosestPointFn, drive
 from .methods import VertexEnumMethod
+from .normalize import AffineMap, normalize_oracle_fns
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -368,6 +370,7 @@ def make_furthest_point_fn(
     multi_investment_periods: bool = False,
     model_kwargs: dict | None = None,
     max_parallel: int = 4,
+    on_solve: Callable[[np.ndarray, np.ndarray, float, np.ndarray | None], None] | None = None,
     **kwargs: Any,
 ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """Build a batched MGA-direction query against a real, already-solved
@@ -398,6 +401,16 @@ def make_furthest_point_fn(
     disables caching. A cache hit on the single-direction path skips
     solving entirely, so `n` is NOT mutated by a call that only reads a
     cache hit.
+
+    `on_solve(point, normal, obj, duals)` (default `None`): called once per
+    direction actually reported here -- fresh solve or cache hit alike --
+    with data that's otherwise discarded from the return value (`obj`,
+    `duals`; `duals` is `None` when that direction's own
+    `resolve_main_objective` was `False`, cached or not). Lets a caller
+    (e.g. `generate_mga_files`'s `use_objective_cuts`) tap into the same
+    solve without changing `furthest_points`' own `(points, normals)`
+    contract. Always called back in this process, never inside a worker --
+    the batch path's Pool results are collected here first.
 
     :raises RuntimeError: If a solve does not reach `status="ok"` (see
         `_build_furthest_point_solver`).
@@ -439,6 +452,9 @@ def make_furthest_point_fn(
                         np.array([cached_meta["coordinates"][k] for k in keys]),
                         np.array([cached_meta["normal"][k] for k in keys]),
                     )
+                    if on_solve is not None:
+                        cached_duals = np.array([cached_meta["duals"][k] for k in keys]) if "duals" in cached_meta else None
+                        on_solve(cached[0], cached[1], cached_meta["obj"], cached_duals)
             if cached is not None:
                 results = [cached]
             else:
@@ -446,6 +462,8 @@ def make_furthest_point_fn(
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
                 if output_dir is not None:
                     _cache_furthest_point_result(n_result, output_dir, key, keys, point, duals, obj, d)
+                if on_solve is not None:
+                    on_solve(point, d, obj, duals)
                 results = [(point, d)]
         else:
             # Passes pristine_n, not n's current state -- n may already be
@@ -466,6 +484,9 @@ def make_furthest_point_fn(
                         np.array([cached_meta["coordinates"][k] for k in keys]),
                         np.array([cached_meta["normal"][k] for k in keys]),
                     )
+                    if on_solve is not None:
+                        cached_duals = np.array([cached_meta["duals"][k] for k in keys]) if "duals" in cached_meta else None
+                        on_solve(results[i][0], results[i][1], cached_meta["obj"], cached_duals)
                 skipped = len(directions) - len(todo_idx)
                 if skipped:
                     logger.info("Skipping %s already-cached direction(s)", skipped)
@@ -495,6 +516,8 @@ def make_furthest_point_fn(
                         _cache_furthest_point_result(
                             n_result, output_dir, cache_keys[i], keys, point, duals, obj, directions[i],
                         )
+                    if on_solve is not None:
+                        on_solve(point, directions[i], obj, duals)
                     results[i] = (point, directions[i])
 
         points = np.array([r[0] for r in results])
@@ -517,15 +540,23 @@ def _build_closest_point_solver(
     model_kwargs: dict | None,
     kwargs: dict,
     resolve_main_objective: bool,
+    weights: dict[str, float] | None = None,
 ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]]:
     """Build the closest-point model against `n` once, and return a
     single-target `(point, normal, duals, n)` solver reusing it.
 
     One residual variable per dimension (`r_key + dim_key(x) == target_key`,
-    RHS updated per call) plus a norm-specific objective: `t >= |r_key|`
-    for `linf`, `sum(s_key)` with `s_key >= |r_key|` for `l1`. `normal` is
-    the dual of these residual constraints -- the query `target`'s own
-    separating-hyperplane normal, always computed.
+    RHS updated per call) plus a norm-specific objective: `t >= |w_key *
+    r_key|` for `linf`, `sum(s_key)` with `s_key >= |w_key * r_key|` for
+    `l1` -- `weights` (default all-ones, i.e. the plain unweighted norm)
+    lets a caller make "closest" mean closest under a per-dimension-scaled
+    metric instead of raw real units (see `mga_surveyor.normalize` for
+    why: solving with `weights = 1 / half_range` makes this equivalent to
+    solving directly in a `[-1, 1]^k`-normalized space). `normal` is the
+    dual of the residual constraints themselves -- still a valid
+    real-unit separating-hyperplane normal whatever `weights` is (its
+    value reflects whichever objective -- weighted or not -- the model
+    actually has when it's read).
 
     If `resolve_main_objective`: also pins the found point's coordinates,
     drops `budget`, re-solves the network's original cost objective for
@@ -548,6 +579,37 @@ def _build_closest_point_solver(
             f"closest_point_on_hull)."
         )
     keys = list(dimensions.keys())
+    if weights is None:
+        weights = dict.fromkeys(keys, 1.0)
+    # Solve with weights uniformly rescaled by a positive constant --
+    # mathematically a no-op (minimizing C*t(x) has the same argmin as
+    # minimizing t(x) for any C>0, so `point` is unchanged), but it moves
+    # resid_constrs[key].dual's absolute magnitude by that same factor C
+    # -- which matters because that dual is otherwise proportional to
+    # weights[key] itself (see solve_one's own normal derivation), and
+    # normalize's weights (1/half_range) can be tiny (e.g. ~1e-7) for a
+    # wide-range dimension. At a degenerate optimum (multiple dimensions
+    # simultaneously tied at the L-inf/L1 max -- confirmed common in
+    # practice, not rare), the solver's reported dual there satisfies
+    # complementary slackness only to within its own optimality
+    # tolerance, not exactly; when that dual's own magnitude is only
+    # ~1-2 orders of magnitude above the solver's tolerance, this
+    # otherwise-negligible imprecision is enough to make the resulting
+    # geometric cut genuinely invalid (confirmed against the real
+    # network: a cut derived this way excluded a provably feasible
+    # point). Choosing the scale so the *smallest* weight lands at
+    # exactly 1 -- i.e. C = 1 / min(weights) -- self-adapts to whatever
+    # real-world units this network happens to use, giving every
+    # dimension's weight comfortable headroom above the solver's
+    # tolerance floor regardless of scale, without touching solver
+    # tolerance settings (confirmed empirically: fixes the real failing
+    # case, stable across C from 1/min(weights) up through 10000x
+    # larger, so this isn't a narrow tuned value). `normal` is divided
+    # back down by this same C in solve_one before being returned, so
+    # this is purely an internal precision improvement -- the point/
+    # normal contract callers see is completely unchanged.
+    _dual_scale = 1.0 / min(weights.values())
+    solve_weights = {key: value * _dual_scale for key, value in weights.items()}
     if model_kwargs is None:
         model_kwargs = options.params.optimize.model_kwargs.copy()
     # Explicit, not left to PyPSA's own default -- silences its own
@@ -598,14 +660,14 @@ def _build_closest_point_solver(
     if norm == "linf":
         t = m.add_variables(lower=0.0, name="mga_surveyor_closest_point_t")
         for key in keys:
-            r = m.variables[f"mga_surveyor_resid_{key}"]
+            r = solve_weights[key] * m.variables[f"mga_surveyor_resid_{key}"]
             m.add_constraints(t - r >= 0.0, name=f"mga_surveyor_tpos_{key}")
             m.add_constraints(t + r >= 0.0, name=f"mga_surveyor_tneg_{key}")
         m.objective = 1 * t  # bare Variable isn't a valid objective -- coerce to LinearExpression
     else:  # l1
         s_vars = []
         for key in keys:
-            r = m.variables[f"mga_surveyor_resid_{key}"]
+            r = solve_weights[key] * m.variables[f"mga_surveyor_resid_{key}"]
             s = m.add_variables(lower=0.0, name=f"mga_surveyor_s_{key}")
             m.add_constraints(s - r >= 0.0, name=f"mga_surveyor_spos_{key}")
             m.add_constraints(s + r >= 0.0, name=f"mga_surveyor_sneg_{key}")
@@ -623,7 +685,15 @@ def _build_closest_point_solver(
             raise RuntimeError(msg)
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
-        normal = np.array([float(resid_constrs[key].dual) for key in keys])
+        # Divide back out the internal solve-time rescaling (see
+        # _dual_scale's own comment above) -- resid_constrs[key].dual was
+        # computed against solve_weights (C times the real weights), and
+        # a dual scales exactly linearly with its objective's own overall
+        # scale, so dividing by that same C recovers the real-weights
+        # dual exactly (mathematically), just computed with better
+        # numerical conditioning than solving at the tiny raw scale
+        # would have given.
+        normal = np.array([float(resid_constrs[key].dual) for key in keys]) / _dual_scale
 
         if not resolve_main_objective:
             return point, normal, None, n
@@ -668,6 +738,7 @@ def _init_closest_point_worker(
     model_kwargs: dict | None,
     kwargs: dict,
     resolve_main_objective: bool,
+    weights: dict[str, float] | None = None,
 ) -> None:
     """Pool initializer for `make_closest_point_fn`'s batch path -- builds
     this worker's solver once via `_build_closest_point_solver`, before any
@@ -677,6 +748,7 @@ def _init_closest_point_worker(
     global _worker_closest_point_solver
     _worker_closest_point_solver = _build_closest_point_solver(
         n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+        weights,
     )
 
 
@@ -689,21 +761,34 @@ def _solve_closest_point_target(target: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 def _cache_closest_point_result(
     n: Network, output_dir: str | Path, key: str, keys: list,
-    point: np.ndarray, normal: np.ndarray, duals: np.ndarray | None, obj: float,
+    point: np.ndarray, normal: np.ndarray, duals: np.ndarray | None, obj: float, target: np.ndarray,
 ) -> None:
-    """Stash `point`/`normal`/`duals`/`obj` into `n.meta` and export to
-    `output_dir/mga_closest_result_{key}.nc` (a distinct prefix from
+    """Stash `point`/`normal`/`duals`/`obj`/`target` into `n.meta` and export
+    to `output_dir/mga_closest_result_{key}.nc` (a distinct prefix from
     `_cache_furthest_point_result`'s `mga_furthest_result_`, so both caches can
     safely share one `output_dir`). `duals` is only stashed (as
     `n.meta["duals"]`) when not `None` -- i.e. when `resolve_main_objective`
     actually computed it; otherwise `n.meta` has no `"duals"` key at all,
     rather than a placeholder.
+
+    `target` (the point this solve was actually asked to get closest to,
+    i.e. `explore.drive`'s own trial point) is stashed alongside `point`
+    so `_read_existing_closest_points` can, on a later restart, replicate
+    `explore.drive`'s own `cut_added = norm(new_point - trial_point) >
+    tol` check before trusting this solve's `normal` as a halfspace --
+    without it, a solve whose closest point came back (near-)equal to its
+    own target (nothing separated -- typically a highly degenerate LP,
+    every dimension tied near a zero residual at once) would otherwise be
+    replayed as a supporting halfspace it never actually was, silently
+    corrupting the outer approximation on restart. See that function's
+    own docstring for the real-network case this was found from.
     """
     n.meta["point"] = {k: float(v) for k, v in zip(keys, point)}
     n.meta["normal"] = {k: float(v) for k, v in zip(keys, normal)}
     if duals is not None:
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
     n.meta["obj"] = float(obj)
+    n.meta["target"] = {k: float(v) for k, v in zip(keys, target)}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     n.export_to_netcdf(str(output_dir / f"mga_closest_result_{key}.nc"))
@@ -720,6 +805,8 @@ def make_closest_point_fn(
     multi_investment_periods: bool = False,
     model_kwargs: dict | None = None,
     max_parallel: int = 4,
+    weights: dict[str, float] | None = None,
+    on_solve: Callable[[np.ndarray, np.ndarray, float, np.ndarray | None, np.ndarray], None] | None = None,
     **kwargs: Any,
 ) -> ClosestPointFn:
     """Build a `mga_surveyor.explore.ClosestPointFn` against a real,
@@ -737,6 +824,17 @@ def make_closest_point_fn(
     own capex+opex cost in `n.meta["obj"]`, same as `make_furthest_point_fn`'s
     own export.
 
+    `weights` (default `None`, i.e. every dimension weighted `1.0` --
+    the plain unweighted norm): scales each dimension's residual in the
+    closest-point objective before it enters the L1/Linf norm, so
+    "closest" means closest under a per-dimension-scaled metric instead of
+    raw real units -- see `mga_surveyor.normalize.normalize_oracle_fns`,
+    which is what actually needs this (pass its `AffineMap.weights` here
+    to make the point found consistent with the cube-normalized geometry
+    `explore.drive` is exploring). Points/normals returned are still
+    always in real units regardless of `weights` -- only the objective
+    used to find them changes.
+
     If `resolve_main_objective`: after finding the closest point, its
     coordinates are pinned and the network's original cost objective is
     re-solved to get real per-dimension duals, cached alongside
@@ -745,6 +843,15 @@ def make_closest_point_fn(
     work cached as a side effect only: `closest_point`'s own return value
     is unaffected, always `(point, normal)`, so it still matches
     `explore.ClosestPointFn`.
+
+    `on_solve(point, normal, obj, duals, target)` (default `None`): called
+    once per target actually solved -- single or each one of a batch --
+    with data that's otherwise discarded from the return value (`obj`,
+    `duals`; `duals` is `None` when `resolve_main_objective` is `False`),
+    plus the `target` that was queried (unlike `make_furthest_point_fn`'s
+    own `on_solve`, which has no equivalent -- a support-function query
+    has no "target" a found point could be compared against). Always
+    called back in this process, never inside a worker.
 
     :raises NotImplementedError: If `norm` is not `'l1'` or `'linf'`.
     :raises RuntimeError: If a call's solve does not reach `status="ok"`.
@@ -758,6 +865,7 @@ def make_closest_point_fn(
 
     solve_one = _build_closest_point_solver(
         n, dimensions, norm, slack, snapshots, multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+        weights,
     )
 
     def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -777,10 +885,13 @@ def make_closest_point_fn(
         if len(target_2d) == 1:
             t = target_2d[0]
             point, normal, duals, n_result = solve_one(t)
+            if output_dir is not None or on_solve is not None:
+                obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
             if output_dir is not None:
                 key = encode_cache_key(t)
-                obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
+                _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, t)
+            if on_solve is not None:
+                on_solve(point, normal, obj, duals, t)
             results = [(point, normal)]
         else:
             # Passes pristine_n, not n's current state -- n may already be
@@ -791,7 +902,7 @@ def make_closest_point_fn(
                 initializer=_init_closest_point_worker,
                 initargs=(
                     pristine_n, dimensions, norm, slack, snapshots,
-                    multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
+                    multi_investment_periods, model_kwargs, kwargs, resolve_main_objective, weights,
                 ),
             ) as pool:
                 try:
@@ -802,10 +913,13 @@ def make_closest_point_fn(
                     raise
             results = []
             for row, (point, normal, duals, n_result) in zip(target_2d, batch_results):
+                if output_dir is not None or on_solve is not None:
+                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
                 if output_dir is not None:
                     key = encode_cache_key(row)
-                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj)
+                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, row)
+                if on_solve is not None:
+                    on_solve(point, normal, obj, duals, row)
                 results.append((point, normal))
 
         points = np.array([r[0] for r in results])
@@ -879,14 +993,53 @@ def _broadcast_per_slack(value: Any, n_levels: int, name: str) -> list:
 
 
 def _read_existing_closest_points(
-    slack_dir: Path, keys: list,
-) -> tuple[list[np.ndarray], list[tuple[np.ndarray, np.ndarray]]]:
+    slack_dir: Path, keys: list, tol: float, norm: Norm, affine_map: AffineMap | None = None,
+    obj_optimal: float | None = None, slack: float | None = None,
+) -> tuple[list[np.ndarray], list[Halfspace]]:
     """Read every already-exported `mga_closest_result_*.nc` file under
     `slack_dir` (e.g. from an earlier, interrupted run) back into
     `(point, (normal, point))` pairs, ready to pass as `explore.drive`'s
     `extra_points`/`extra_halfspaces` -- so a restart doesn't have to
     rediscover them via `closest_point`. Empty (not an error) if
     `slack_dir` doesn't exist yet.
+
+    `tol`/`norm`/`affine_map`: replicates `explore.drive`'s own
+    `cut_added = gaps(...) > tol` check (measured under `norm` -- the
+    same metric `Method`'s own convergence gap is measured under, not a
+    hardcoded L2 distance, which would otherwise compare a
+    different-norm quantity against `tol` than the one the convergence
+    check itself uses; in whichever space `tol` is itself expressed --
+    normalized cube if `affine_map` is given, real units if not) before
+    trusting a file's `normal` as a halfspace at all. A solve whose
+    closest point came back (near-)equal to its own
+    `target` (cached alongside `point`/`normal` -- see
+    `_cache_closest_point_result`) separated nothing, and at that kind of
+    near-zero residual the L1/Linf closest-point LP is maximally
+    degenerate (every dimension ties near the max at once); the dual it
+    reports can be an arbitrary split across dimensions rather than a
+    genuine supporting-hyperplane normal. Confirmed in practice against
+    the real network: one such halfspace, read back and folded into a
+    single `Method.bootstrap` call alongside everything else, excluded
+    the network's own true optimum -- corrupting the entire outer
+    approximation (and, downstream, either crashing outright or silently
+    shrinking the explored region below what's actually near-optimal).
+    `point` itself is still kept in the returned `points` list either way
+    (it's a genuinely feasible point regardless of whether it separated
+    anything) -- only the two derived halfspaces below are skipped for a
+    non-separating solve. A file cached before this check existed (no
+    `"target"` in its meta) is always treated as separating, matching the
+    old unconditional behavior, since there's nothing on disk to check it
+    against.
+
+    `obj_optimal`/`slack` (both `None` by default): if given (and this
+    solve was separating), also derive the file's own
+    `linearized_objective_cut` from its cached `duals`/`obj` (present
+    whenever that solve's `resolve_main_objective` was `True`) and fold
+    it into `halfspaces` too -- these were already paid for by an earlier
+    run, same as the geometric point/normal above, never used until now.
+    Added unconditionally otherwise (no parallel-to-own-normal check) --
+    see `generate_mga_files`'s own docstring on why that check was
+    dropped for closest-point-derived cuts specifically.
     """
     points = []
     halfspaces = []
@@ -895,7 +1048,22 @@ def _read_existing_closest_points(
         point = np.array([meta["point"][k] for k in keys])
         normal = np.array([meta["normal"][k] for k in keys])
         points.append(point)
+
+        separating = True
+        if "target" in meta:
+            target = np.array([meta["target"][k] for k in keys])
+            check_point = affine_map.to_normalized(point) if affine_map is not None else point
+            check_target = affine_map.to_normalized(target) if affine_map is not None else target
+            separating = float(gaps(check_point[None, :], check_target[None, :], norm=norm)[0]) > tol
+        if not separating:
+            continue
+
         halfspaces.append((normal, point))
+        if obj_optimal is not None and "duals" in meta:
+            duals = np.array([meta["duals"][k] for k in keys])
+            cut = linearized_objective_cut(point, meta["obj"], duals, obj_optimal, slack)
+            if cut is not None:
+                halfspaces.append(cut)
     return points, halfspaces
 
 
@@ -910,6 +1078,8 @@ def generate_mga_files(
     max_iter: int | None | Sequence[int | None] = None,
     max_parallel: int = 4,
     verbose: bool = True,
+    normalize: bool = False,
+    use_objective_cuts: bool = False,
     **kwargs: Any,
 ) -> None:
     """Run a `VertexEnumMethod` per slack level (`explore.drive`, up to
@@ -921,6 +1091,99 @@ def generate_mga_files(
     `tol`/`max_iter` are each either a single value (used for every slack
     level) or a sequence with one entry per `slack_levels` (raises if the
     length doesn't match).
+
+    `normalize` (default `False`, opt-in): if `True`, each slack level's
+    `VertexEnumMethod` explores a `[-1, 1]^k`-normalized cube instead of
+    raw dimension units, via `mga_surveyor.normalize.normalize_oracle_fns`
+    -- see that module for why (mixing e.g. MW and MWh dimensions in one
+    unweighted polytope means the ones with the larger natural range
+    dominate). Computed fresh per slack level (each one's own achievable
+    box can differ), from that level's own `furthest_point`'s box-point
+    solves -- raises if any dimension turns out fixed (no achievable
+    range) under that slack budget, see `normalize.compute_affine_map`.
+    Everything on disk (`.nc` files, `consolidate_mga_results`'s output)
+    is completely unaffected -- still real units throughout, since the
+    oracle functions themselves are unchanged; only what
+    `explore.drive`/`VertexEnumMethod` sees is normalized.
+
+    **`tol` is interpreted differently depending on `normalize`, on
+    purpose -- there is no unit that's natural in both modes at once:**
+    - `normalize=False`: `tol` is a plain real-unit distance, exactly as
+      it always was.
+    - `normalize=True`: `tol` is instead a **percentage** (`tol=1` means
+      `1%`), converted internally (`tol_cube = tol / 100 * 2`, since each
+      dimension's real range maps onto a normalized width of `2`) before
+      being used as the actual `[-1, 1]^k`-cube stopping distance. What
+      that percentage bounds depends on `norm` -- each is the same norm,
+      just applied to the vector of per-dimension percentage errors
+      instead of raw values: `norm="linf"` bounds every dimension's own
+      error individually (each is at most `tol`%, not just their
+      average); `norm="l1"` bounds their *sum* (`tol`% split across
+      dimensions however the worst case demands); `norm="l2"` bounds
+      their root-sum-square. All three are exact, provable bounds, not
+      heuristics -- just different ways of combining per-dimension
+      percentages into one stopping number.
+
+    Same per-slack-level broadcasting as `max_iter`.
+
+    `use_objective_cuts` (default `False`, opt-in): also add a
+    `mga_surveyor.common.linearized_objective_cut` for every point the
+    main loop finds (`resolve_main_objective=True`, the default) -- both
+    live (`method.add_cut`, same as its geometric cut) and for any
+    existing `mga_closest_result_*.nc` file read back on a restart
+    (folded into the same `extra_halfspaces` bootstrap call as everything
+    else there, since `Method.bootstrap` isn't called yet at that point).
+    Reuses `duals`/`obj` that are already computed for caching and
+    otherwise never used again. These are provably valid cuts (see that
+    function's docstring: convexity of the achievable-cost-at-x value
+    function makes each one a global underestimator, not a heuristic), so
+    this is free extra tightening, no new solves. Composes with
+    `normalize=True`: every cut is derived in real units first, then
+    transformed the same way any other halfspace is.
+
+    Also adds one free extra cut per slack level from `n`'s own optimum
+    (`optimal.nc`'s own cached `duals`/`obj`) -- unconditionally, since it
+    has no same-run geometric normal to check it against (the optimum
+    isn't a support-function/closest-point query) and, unlike a
+    box-direction point (see below), there's no structural reason for its
+    achievable-cost gradient to align with any single axis.
+
+    Deliberately NOT derived from any box-direction point, even though
+    those are also solved with `resolve_main_objective=True` and have
+    `duals` sitting right there unused -- a box-direction point's own
+    objective cut is, in practice, *always* exactly parallel to its own
+    box halfspace, a direct consequence of the LP's structure at that
+    point (maximizing dimension `i` under the slack budget usually makes
+    the budget itself what limits `i`, and the achievable-cost gradient
+    there works out to be proportional to `e_i`), and
+    `VertexEnumMethod.add_cut` has no degeneracy handling for
+    nearly-coincident hyperplanes. Confirmed in practice, not theoretical:
+    unfiltered, this reliably explodes into hundreds of thousands of
+    spurious crossing vertices and an out-of-memory crash. Closest-point
+    and optimum cuts don't share that structural alignment (confirmed
+    empirically: their angles to any same-run geometric normal are
+    scattered across the whole range, not clustered near 0/180 the way
+    box cuts are), so unlike box cuts, they're never filtered for
+    near-parallelism -- an earlier version of this function did check
+    each closest-point cut against its own same-solve geometric normal
+    (`common.is_parallel_to_existing`, `cos_threshold=0.95`) before
+    adding it, but that check turned out to be net-negative: on the real
+    test network it discarded cuts that still carried real tightening
+    value, costing extra main-loop iterations (7 iterations with the
+    check vs. 4 without, same network/slack/tolerance) for no compensating
+    safety benefit -- `VertexEnumMethod.add_cut`'s own exact-redundancy
+    detection (see its own docstring) already discards any genuinely
+    duplicate cut for free, regardless.
+
+    One more thing every candidate cut from the main loop (or a restart's
+    existing files) is checked against before being added, skip-only
+    (never turns a bad cut into a good one, just avoids adding one that
+    isn't useful) -- the optimum's own cut above is exempt, since it's
+    added unconditionally:
+    - **Already feasible**: if the point this cut came from was itself
+      already feasible (nothing was separated -- same test `explore.drive`
+      itself uses for its own geometric cut, its `cut_added` check), the
+      objective cut is skipped too, not just the geometric one.
 
     `n`'s own optimum is slack-independent, so it's solved/cached once
     (`output_dir/optimal.nc`), not once per slack level, even though each
@@ -948,13 +1211,20 @@ def generate_mga_files(
     oracle factory.
 
     :raises ValueError: If `tol` or `max_iter` is a sequence whose length
-        doesn't match `slack_levels`.
+        doesn't match `slack_levels`; or if `normalize=True` and any
+        dimension has no achievable range under some slack level's own
+        budget (see `normalize.compute_affine_map`).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     keys = list(dimensions.keys())
     k = len(keys)
     tols = _broadcast_per_slack(tol, len(slack_levels), "tol")
+    if normalize:
+        # tol is a percentage in this mode (see docstring) -- converted to
+        # the actual [-1, 1]^k cube stopping distance here, once, so
+        # nothing downstream needs to know the difference.
+        tols = [t / 100 * 2 for t in tols]
     max_iters = _broadcast_per_slack(max_iter, len(slack_levels), "max_iter")
 
     # Each factory below gets its own independent pickled copy of n, not n
@@ -965,22 +1235,115 @@ def generate_mga_files(
         pickle.loads(pickle.dumps(n)), dimensions, output_dir, solver_name=solver_name, **kwargs,
     )
 
+    # optimal.nc's own coordinates/duals/obj -- read back once, up front,
+    # if use_objective_cuts needs them (obj_optimal itself, needed by
+    # every slack level's own linearized_objective_cut; coordinates/duals
+    # for the optimum's own cut, added once per slack level below).
+    # Forces optimal.nc to exist now rather than lazily inside the first
+    # slack level's drive() bootstrap -- a pure cache hit if it already
+    # does.
+    optimal_meta = None
+    obj_optimal = None
+    if use_objective_cuts:
+        solve_optimal()
+        optimal_meta = _read_meta(output_dir / "optimal.nc")
+        obj_optimal = optimal_meta["obj"]
+
     for slack, slack_tol, slack_max_iter in zip(slack_levels, tols, max_iters):
         slack_dir = output_dir / f"slack_{slack}"
+        method = None  # assigned below -- add_objective_cut_from_closest_point's closure reads it late
+
         furthest_point = make_furthest_point_fn(
             pickle.loads(pickle.dumps(n)), dimensions, slack=slack, output_dir=slack_dir,
             resolve_main_objective=True, max_parallel=max_parallel, solver_name=solver_name, **kwargs,
         )
-        closest_point = make_closest_point_fn(
-            pickle.loads(pickle.dumps(n)), dimensions, norm=norm, slack=slack, output_dir=slack_dir,
-            max_parallel=max_parallel, solver_name=solver_name, **kwargs,
-        )
+
+        def add_objective_cut_from_closest_point(
+            point: np.ndarray, normal: np.ndarray, obj: float, duals: np.ndarray | None, target: np.ndarray,
+        ) -> None:
+            # Legal here: the main loop only ever calls closest_point
+            # after Method.bootstrap has already run, so a live add_cut is
+            # fine (unlike a box- or optimum-derived cut would be).
+            if duals is None:
+                return
+            # Same feasibility test drive() itself uses for its own
+            # geometric cut (explore.py's cut_added) -- if the trial point
+            # was already feasible, nothing was separated/learned, so skip
+            # the objective cut too, not just the geometric one. Measured
+            # under norm (not a hardcoded L2 distance -- see explore.py's
+            # own cut_added for why that matters), in whichever space
+            # slack_tol is itself in (normalized, if that's the mode),
+            # since point/target here are always real units regardless of
+            # normalize.
+            check_point = affine_map.to_normalized(point) if affine_map is not None else point
+            check_target = affine_map.to_normalized(target) if affine_map is not None else target
+            if float(gaps(check_point[None, :], check_target[None, :], norm=norm)[0]) <= slack_tol:
+                return
+            cut = linearized_objective_cut(point, obj, duals, obj_optimal, slack)
+            if cut is None:
+                return
+            direction, cut_point = cut
+            if affine_map is not None:
+                direction = affine_map.normal_to_normalized(direction)
+                cut_point = affine_map.to_normalized(cut_point)
+            method.add_cut(direction, cut_point)
+
+        def build_closest_point(weights_arr: np.ndarray | None, _slack=slack, _slack_dir=slack_dir) -> ClosestPointFn:
+            weights = dict(zip(keys, weights_arr)) if weights_arr is not None else None
+            return make_closest_point_fn(
+                pickle.loads(pickle.dumps(n)), dimensions, norm=norm, slack=_slack, output_dir=_slack_dir,
+                max_parallel=max_parallel, solver_name=solver_name, weights=weights,
+                on_solve=add_objective_cut_from_closest_point if use_objective_cuts else None, **kwargs,
+            )
+
+        affine_map = None
+        optimal_fn = solve_optimal
+        if normalize:
+            furthest_point, closest_point, optimal_fn, affine_map = normalize_oracle_fns(
+                furthest_point, build_closest_point, solve_optimal, k, keys,
+            )
+        else:
+            closest_point = build_closest_point(None)
 
         # Points/cuts already known from an earlier, interrupted run --
         # folded into drive()'s own bootstrap call below (Method.bootstrap
         # must be called exactly once, before any add_point/add_cut/
         # find_trial_point), so the main loop doesn't rediscover them.
-        extra_points, extra_halfspaces = _read_existing_closest_points(slack_dir, keys)
+        # Always real units on disk; normalized here too when this slack
+        # level is. tol/affine_map let it replicate explore.drive's own
+        # cut_added check before trusting a file's geometric normal at
+        # all (see its own docstring for the real-network bug this
+        # closes). use_objective_cuts also derives each (separating)
+        # existing file's own linearized_objective_cut from its cached
+        # duals (no box-derived cuts at all -- see generate_mga_files's
+        # own docstring for why those are excluded).
+        extra_points, extra_halfspaces = _read_existing_closest_points(
+            slack_dir, keys, tol=slack_tol, norm=norm, affine_map=affine_map,
+            obj_optimal=obj_optimal, slack=slack if use_objective_cuts else None,
+        )
+
+        if use_objective_cuts:
+            # The optimum's own cut -- one more free extra per slack level
+            # (K depends on slack, so it differs per level even though the
+            # underlying solve is the same one, cached once). Unlike a
+            # box-direction point, the true cost-optimum's own gradient
+            # has no structural reason to align with any single axis, so
+            # there's no known degeneracy risk here -- added
+            # unconditionally, no same-run geometric counterpart exists to
+            # check it against (the optimum isn't a support-function/
+            # closest-point query).
+            opt_point = np.array([optimal_meta["coordinates"][key] for key in keys])
+            opt_duals = np.array([optimal_meta["duals"][key] for key in keys])
+            opt_cut = linearized_objective_cut(opt_point, optimal_meta["obj"], opt_duals, obj_optimal, slack)
+            if opt_cut is not None:
+                extra_halfspaces.append(opt_cut)
+
+        if affine_map is not None:
+            extra_points = [affine_map.to_normalized(p) for p in extra_points]
+            extra_halfspaces = [
+                (affine_map.normal_to_normalized(normal), affine_map.to_normalized(point))
+                for normal, point in extra_halfspaces
+            ]
         if verbose and extra_points:
             logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
 
@@ -990,7 +1353,7 @@ def generate_mga_files(
                 "slack=%s: running VertexEnumMethod (tol=%s, max_iter=%s)", slack, slack_tol, slack_max_iter,
             )
         drive(
-            method, furthest_point, closest_point, solve_optimal,
+            method, furthest_point, closest_point, optimal_fn,
             tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
             extra_points=extra_points, extra_halfspaces=extra_halfspaces,
         )

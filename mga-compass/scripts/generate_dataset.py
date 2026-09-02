@@ -77,6 +77,8 @@ class RunConfig:
     obj_label: str
     slack_levels: list[float]
     tol: float = 1e-3
+    normalize: bool = False
+    use_objective_cuts: bool = False
     max_iter: int = 120
     output_dir: Path = Path(__file__).parent / "output"
     max_parallel: int = 4
@@ -175,8 +177,9 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
 
     generate_mga_files(
         n, network.dimensions, config.output_dir, norm=config.norm, slack_levels=config.slack_levels,
-        solver_name=config.solver_name, tol=config.tol, max_iter=config.max_iter,
+        solver_name=config.solver_name, tol=config.tol, normalize=config.normalize, max_iter=config.max_iter,
         max_parallel=config.max_parallel, solver_options=config.solver_options,
+        use_objective_cuts=config.use_objective_cuts,
     )
     points_df, duals_df, nc_files = consolidate_mga_results(config.output_dir, config.obj_label)
     logging.info(f"Total points: {len(points_df)}")
@@ -201,10 +204,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", type=Path, default=RUN_CONFIG.output_dir, help="Directory to write outputs to."
     )
+    parser.add_argument(
+        "--tol", type=float, default=RUN_CONFIG.tol,
+        help="Convergence tolerance: real units by default, or a percentage (e.g. 4 -> 4%%) if --normalize "
+             "is also given -- see mga_surveyor.generate_mga_files's own docstring.",
+    )
+    parser.add_argument(
+        "--normalize", action="store_true", default=RUN_CONFIG.normalize,
+        help="Explore each slack level's near-optimal region in a [-1, 1]^k-normalized cube instead of raw "
+             "units -- makes --tol a percentage instead of a real-unit distance.",
+    )
+    parser.add_argument(
+        "--use-objective-cuts", action="store_true", default=RUN_CONFIG.use_objective_cuts,
+        help="Also add each solved point's own linearized_objective_cut as free extra tightening -- see "
+             "mga_surveyor.generate_mga_files's own docstring.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    config = replace(RUN_CONFIG, output_dir=args.output_dir)
+    config = replace(
+        RUN_CONFIG, output_dir=args.output_dir, tol=args.tol, normalize=args.normalize,
+        use_objective_cuts=args.use_objective_cuts,
+    )
     main(config=config)

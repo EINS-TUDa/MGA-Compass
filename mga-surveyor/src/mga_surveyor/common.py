@@ -55,3 +55,110 @@ def gaps(outer_vertices: np.ndarray, closest_points: np.ndarray, norm: Norm) -> 
     if norm == "linf":
         return np.abs(diff).max(axis=1)
     return np.linalg.norm(diff, axis=1)
+
+
+def linearized_objective_cut(
+    x0: np.ndarray, obj_value: float, duals: np.ndarray, obj_optimal: float, slack: float, atol: float = 1e-9,
+) -> Halfspace | None:
+    """A supporting halfspace of the true near-optimal region, linearized
+    from a single solved point's own duals -- valid, not a heuristic: the
+    minimum-cost-achievable-at-x value function is convex in x (a standard
+    parametric-LP fact), so its tangent at any solved point x0 is a GLOBAL
+    underestimator, `obj(x) >= obj_value + duals @ (x - x0)` for every x,
+    not just near x0. Near-optimality (`obj(x) <= (1 + slack) *
+    obj_optimal`) therefore forces `duals @ (x - x0) <= K` where `K =
+    (1 + slack) * obj_optimal - obj_value` (>= 0, since x0 -- the point
+    the duals came from -- is itself near-optimal).
+
+    Returned as this package's usual `(direction, point)` halfspace
+    convention: `direction = duals`, and `point` is `x0` shifted along a
+    single axis -- whichever one has `duals`' own largest-magnitude
+    component, `j = argmax(|duals|)` -- by just enough to make `duals @
+    (point - x0) == K` exactly: `point = x0 + (K / duals[j]) * e_j`.
+    Collapses to `x0` itself when `K == 0` (x0 has no slack left), same
+    as any other cut that passes through its own generating point.
+
+    Deliberately NOT the Euclidean projection (`x0 + (K / (duals @
+    duals)) * duals`) despite that also being a valid choice of point on
+    the same halfspace (`add_cut`'s own halfspace only depends on the
+    scalar `direction @ point`, identical for every point actually on the
+    plane -- so this is still just a choice among equally-correct
+    options, not a different halfspace). `duals` mixes real-world units
+    that can differ by orders of magnitude (e.g. $/MW vs $/MWh), so
+    `duals @ duals` can be dominated by whichever dimension happens to
+    have large values there, sending the Euclidean-projection point to a
+    numerically extreme value in every OTHER dimension -- which then
+    makes `direction @ point` (computed downstream in
+    `VertexEnumMethod.add_cut`) suffer catastrophic floating-point
+    cancellation, corrupting that cut's own vertex classification
+    (confirmed in practice: exactly this construction once produced
+    ~187,000 spurious crossing vertices for a 4-dimensional polytope, an
+    OOM crash, not just an inefficiency). Dividing by `duals[j]` itself
+    (the largest-magnitude component, so the least numerically sensitive
+    denominator available) and moving along a single axis avoids ever
+    amplifying small numerical noise into a huge coordinate swing.
+
+    Returns `None` when `duals` is (numerically) the zero vector: then
+    `K >= 0` is the whole constraint, true for every x -- a vacuous cut,
+    not worth adding.
+    """
+    x0 = np.asarray(x0, dtype=float)
+    duals = np.asarray(duals, dtype=float)
+    j = int(np.argmax(np.abs(duals)))
+    if abs(duals[j]) < atol:
+        return None
+    k = max(0.0, (1 + slack) * obj_optimal - obj_value)
+    point = x0.copy()
+    point[j] += k / duals[j]
+    return duals, point
+
+
+def is_parallel_to_existing(direction: np.ndarray, halfspaces: list[Halfspace], cos_threshold: float = 0.999) -> bool:
+    """Whether `direction` is (near-)parallel to any existing halfspace's
+    own direction -- checked via cosine similarity (scale-invariant, so
+    it doesn't matter that different halfspaces' normals carry different
+    magnitudes), not exact equality, since floating-point solves rarely
+    agree bit-for-bit even when mathematically identical.
+
+    A near-parallel halfspace is functionally redundant/degenerate
+    alongside the one it's parallel to -- `VertexEnumMethod.add_cut` has
+    no degeneracy-prevention mechanism (see its module docstring) for
+    nearly-coincident hyperplanes, and adding one can trigger a
+    combinatorial explosion of spurious crossing vertices (confirmed in
+    practice, not theoretical: this is exactly what happened with
+    `linearized_objective_cut`'s own output at a box-direction point --
+    when maximizing dimension `i` is itself what makes the near-optimal
+    budget binding, the achievable-cost value function's gradient there
+    works out to be *exactly* parallel to that box direction, `cos
+    similarity == 1.0`, not a coincidence but a consequence of the LP's
+    own structure at that vertex). Filtering these out before they ever
+    reach `add_cut` avoids the blowup rather than surviving it.
+
+    `cos_threshold=0.999` (not `1.0`): floating-point solves are rarely
+    bit-identical even for a mathematically-exact parallel case.
+
+    A zero-magnitude direction (either `direction` itself, or one of
+    `halfspaces`' own) has no defined orientation, so it's treated as not
+    parallel to anything rather than raising on the division -- this is
+    an expected case in practice, not just theoretical: a closest-point
+    solve's own `normal` comes back as (numerically) zero whenever its
+    trial point was already feasible (nothing to separate it from --
+    same reason `explore.drive` itself skips adding a geometric cut
+    there, via its own `cut_added` check).
+    """
+    if not halfspaces:
+        return False
+    direction = np.asarray(direction, dtype=float)
+    direction_norm = np.linalg.norm(direction)
+    if direction_norm < 1e-12:
+        return False
+    direction = direction / direction_norm
+    for other_direction, _point in halfspaces:
+        other_direction = np.asarray(other_direction, dtype=float)
+        other_norm = np.linalg.norm(other_direction)
+        if other_norm < 1e-12:
+            continue
+        other_direction = other_direction / other_norm
+        if abs(direction @ other_direction) > cos_threshold:
+            return True
+    return False

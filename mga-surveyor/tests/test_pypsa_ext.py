@@ -628,3 +628,208 @@ def test_consolidate_mga_results_requires_optimal_nc(tmp_path):
     back, so nothing meaningful could be consolidated anyway."""
     with pytest.raises(FileNotFoundError, match="optimal.nc"):
         consolidate_mga_results(tmp_path)
+
+
+def test_make_closest_point_fn_weights_change_which_point_is_found():
+    """Heavily downweighting one dimension's residual makes the solve
+    indifferent to it, so it prefers moving along that dimension instead
+    of the other one -- confirms `weights` actually changes what "closest"
+    means (mga_surveyor.normalize's whole reason for needing it), not just
+    accepted as a no-op parameter."""
+    target = np.array([50.0, 50.0])  # well outside the feasible region in both dims
+
+    n1 = _build_network()
+    closest_ignore_solar = make_closest_point_fn(
+        n1, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs", weights={"wind": 1.0, "solar": 1e-6},
+    )
+    point_ignore_solar, _normal = closest_ignore_solar(target)
+
+    n2 = _build_network()
+    closest_ignore_wind = make_closest_point_fn(
+        n2, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs", weights={"wind": 1e-6, "solar": 1.0},
+    )
+    point_ignore_wind, _normal = closest_ignore_wind(target)
+
+    # downweighting solar's residual lets the solve match target[0] (wind)
+    # more closely than when it's solar that's weighted normally, and vice
+    # versa -- the two solves must actually disagree on the point found.
+    assert abs(point_ignore_solar[0] - target[0]) < abs(point_ignore_wind[0] - target[0])
+    assert abs(point_ignore_wind[1] - target[1]) < abs(point_ignore_solar[1] - target[1])
+
+
+def test_generate_mga_files_with_normalize_converges_and_output_is_unaffected(tmp_path):
+    """normalize=True changes what VertexEnumMethod itself explores
+    (a [-1, 1]^2 cube instead of raw MW), but every .nc file written and
+    everything consolidate_mga_results reads back is still real units --
+    the normalization is invisible outside generate_mga_files itself."""
+    n = _build_network()
+
+    generate_mga_files(
+        n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=1.0, max_iter=10, max_parallel=2, verbose=False, normalize=True,  # tol=1.0 -> 1%, normalize=True
+    )
+    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+
+    assert len(points_df) == len(nc_files) > 0
+    assert len(duals_df) == len(points_df)
+    assert set(points_df.columns) == {"wind", "solar", "cost"}
+    # real units, not squeezed into [-1, 1] -- e.g. capacities are >= 0 MW,
+    # not clipped to the normalized cube's own range.
+    assert (points_df["wind"] >= 0).all()
+
+
+def test_make_furthest_point_fn_on_solve_fires_for_fresh_solve_and_cache_hit(tmp_path):
+    """on_solve fires with real obj/duals on a fresh solve, and fires
+    again (from the cached file's own meta) on a cache hit for the exact
+    same direction -- a restart must not silently lose this data."""
+    n = _build_network()
+    calls = []
+
+    def collect(point, normal, obj, duals):
+        calls.append((point.copy(), normal.copy(), obj, None if duals is None else duals.copy()))
+
+    furthest_point = make_furthest_point_fn(
+        n, DIMENSIONS, slack=0.1, output_dir=tmp_path, solver_name="highs",
+        resolve_main_objective=True, on_solve=collect,
+    )
+    direction = np.array([1.0, 0.0])
+    furthest_point(direction)
+    assert len(calls) == 1
+    point1, _normal1, obj1, duals1 = calls[0]
+    assert duals1 is not None
+    assert np.isfinite(obj1)
+
+    n2 = _build_network()
+    furthest_point2 = make_furthest_point_fn(
+        n2, DIMENSIONS, slack=0.1, output_dir=tmp_path, solver_name="not_a_real_solver",  # would raise if re-solved
+        resolve_main_objective=True, on_solve=collect,
+    )
+    furthest_point2(direction)
+    assert len(calls) == 2
+    point2, _normal2, obj2, duals2 = calls[1]
+    np.testing.assert_allclose(point1, point2)
+    assert obj1 == obj2
+    np.testing.assert_allclose(duals1, duals2)
+
+
+def test_make_closest_point_fn_on_solve_fires_for_single_and_batch(tmp_path):
+    """on_solve fires once per target actually solved, single or batch,
+    with the same obj/duals that get cached (but discarded from the
+    return value otherwise), plus the target itself."""
+    calls = []
+
+    def collect(point, normal, obj, duals, target):
+        calls.append((
+            point.copy(), normal.copy(), obj, None if duals is None else duals.copy(), target.copy(),
+        ))
+
+    n1 = _build_network()
+    closest_point = make_closest_point_fn(
+        n1, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs", on_solve=collect,
+    )
+    closest_point(np.array([50.0, 50.0]))
+    assert len(calls) == 1
+    assert calls[0][3] is not None  # duals
+
+    n2 = _build_network()
+    closest_point_batch = make_closest_point_fn(
+        n2, DIMENSIONS, norm="linf", slack=0.1, solver_name="highs", max_parallel=2, on_solve=collect,
+    )
+    closest_point_batch(np.array([[50.0, 50.0], [-50.0, -50.0]]))
+    assert len(calls) == 3
+
+
+def test_generate_mga_files_with_use_objective_cuts_converges_and_output_is_unaffected(tmp_path):
+    """use_objective_cuts=True adds extra cuts to VertexEnumMethod's outer
+    approximation, but every .nc file written and everything
+    consolidate_mga_results reads back is still exactly what it would be
+    without it -- the extra cuts are invisible outside generate_mga_files
+    itself, same property normalize=True has."""
+    n = _build_network()
+
+    generate_mga_files(
+        n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True,
+    )
+    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+
+    assert len(points_df) == len(nc_files) > 0
+    assert len(duals_df) == len(points_df)
+    assert set(points_df.columns) == {"wind", "solar", "cost"}
+    assert (points_df["wind"] >= 0).all()
+    assert (points_df["solar"] >= 0).all()
+
+
+def test_generate_mga_files_with_normalize_and_use_objective_cuts_together(tmp_path):
+    """Both opt-in features composed at once -- must not crash, and the
+    objective cuts must still be expressed correctly once affine_map is
+    known (see generate_mga_files's own docstring on how the two
+    compose)."""
+    n = _build_network()
+
+    generate_mga_files(
+        n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=1.0, max_iter=10, max_parallel=2, verbose=False, normalize=True, use_objective_cuts=True,  # tol=1.0 -> 1%
+    )
+    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+
+    assert len(points_df) == len(nc_files) > 0
+    assert len(duals_df) == len(points_df)
+    assert (points_df["wind"] >= 0).all()
+    assert (points_df["solar"] >= 0).all()
+
+
+def test_generate_mga_files_with_use_objective_cuts_uses_existing_closest_point_files_too(tmp_path):
+    """_read_existing_closest_points' own use_objective_cuts extension
+    only ever runs when there's an existing mga_closest_result_*.nc file
+    to read back -- a fresh single run never exercises it. Mirrors
+    test_generate_mga_files_reuses_existing_closest_point_files_on_restart's
+    own restart structure, this time checking the restart doesn't crash
+    once those existing files' own cached duals also feed
+    linearized_objective_cut."""
+    n = _build_network()
+
+    generate_mga_files(
+        n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=1e-2, max_iter=4, max_parallel=2, verbose=False,
+    )
+    closest_files = sorted((tmp_path / "slack_0.1").glob("mga_closest_result_*.nc"))
+    assert len(closest_files) > 0  # something for the restart below to read back
+    assert all("duals" in pypsa.Network(f).meta for f in closest_files)  # resolve_main_objective=True by default
+
+    n2 = _build_network()
+    generate_mga_files(
+        n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True,
+    )
+    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    assert len(points_df) == len(nc_files) > 0
+    assert len(duals_df) == len(points_df)
+
+
+def test_generate_mga_files_tol_is_a_percentage_when_normalized(tmp_path):
+    """tol under normalize=True is a percentage, not a raw cube distance
+    -- a much looser tol (50%) should converge in far fewer iterations
+    than a much tighter one (0.1%), observable (without needing to reach
+    into drive()'s own internals) as: given the same small max_iter
+    budget, the tight-tol run is still discovering new points when it
+    runs out of budget, while the loose-tol run has already converged
+    and stopped adding new ones well before that budget is used up."""
+    tmp_path_loose = tmp_path / "loose"
+    tmp_path_tight = tmp_path / "tight"
+
+    n1 = _build_network()
+    generate_mga_files(
+        n1, DIMENSIONS, tmp_path_loose, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=50.0, max_iter=15, max_parallel=2, verbose=False, normalize=True,
+    )
+    points_loose, _duals_loose, _files_loose = consolidate_mga_results(tmp_path_loose, obj_label="cost")
+
+    n2 = _build_network()
+    generate_mga_files(
+        n2, DIMENSIONS, tmp_path_tight, norm="linf", slack_levels=[0.1], solver_name="highs",
+        tol=0.1, max_iter=15, max_parallel=2, verbose=False, normalize=True,
+    )
+    points_tight, _duals_tight, _files_tight = consolidate_mga_results(tmp_path_tight, obj_label="cost")
+
+    assert len(points_tight) > len(points_loose)

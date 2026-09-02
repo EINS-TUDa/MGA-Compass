@@ -9,7 +9,13 @@
   by walking the (removed, kept) vertex split it induces and computing the
   new crossing vertices, rather than re-deriving the whole vertex set from
   scratch every time (that full-recompute alternative is
-  :class:`~mga_surveyor.methods.cdd.CddMethod`).
+  :class:`~mga_surveyor.methods.cdd.CddMethod`). A halfspace redundant
+  w.r.t. the current outer polytope (removes no current vertex -- exactly
+  equivalent to globally redundant, and stays redundant forever, not just
+  now, as more cuts only shrink the polytope further) is detected and
+  discarded rather than appended to ``outer_halfspaces``, so a run's
+  worth of redundant cuts doesn't silently slow down every future
+  :meth:`VertexEnumMethod.resync`.
 - Assumes SIMPLE vertices (exactly ``k`` tight constraints each) for edge
   detection between removed/kept vertex pairs, carried over from the
   original implementation this was ported from; no degeneracy-prevention
@@ -361,23 +367,47 @@ class VertexEnumMethod(Method):
             self.closest_normals[pos] = n
 
     def add_cut(self, direction: np.ndarray, point: np.ndarray) -> tuple[int, int]:
-        """Fold in one new halfspace incrementally.
+        """Fold in one new halfspace incrementally -- redundant w.r.t. the
+        current outer polytope (removes no outer vertex) is detected and
+        the halfspace is discarded rather than appended to
+        ``outer_halfspaces``, in which case this is a cheap no-op:
+        ``(0, 0)``.
+
+        Detecting this is exact, not a heuristic: a halfspace containing
+        every vertex of a polytope contains the polytope's whole convex
+        hull too, so "removes no current vertex" and "globally redundant
+        given the current outer_halfspaces" are the same statement. And
+        it stays true forever, not just now -- redundant w.r.t. the
+        current (larger) polytope implies redundant w.r.t. any future
+        (smaller, further-cut) one, since the smaller polytope is even
+        more contained in the halfspace. So discarding it permanently is
+        safe, not just an optimization for this call. Without this,
+        ``outer_halfspaces`` only ever grows, redundant entries included
+        -- costing nothing per :meth:`add_cut` itself (the checks below
+        already short-circuit cheaply either way), but making every
+        future :meth:`resync` (a full cdd recomputation over the whole
+        list) slower than it needs to be.
 
         :param direction: Normal vector of the new supporting hyperplane.
         :param point: A point on the new supporting hyperplane.
         :returns: ``(n_new_vertices, n_removed_vertices)`` -- how many
-            outer vertices the new cut created and removed.
+            outer vertices the new cut created and removed. ``(0, 0)``
+            both when the cut was redundant and (degenerately) when it
+            wasn't but happened to create as many vertices as it removed.
         :rtype: tuple
         """
         direction = np.asarray(direction, dtype=float)
         point = np.asarray(point, dtype=float)
-        new_idx = len(self.outer_halfspaces)
         offset = direction @ point
         signed = self.outer_vertices @ direction - offset
 
         kept_idxs = np.where(signed <= self.tol)[0]
         removed_idxs = np.where(signed > self.tol)[0]
 
+        if len(removed_idxs) == 0:
+            return 0, 0
+
+        new_idx = len(self.outer_halfspaces)
         kept_verts = self.outer_vertices[kept_idxs]
         # already up to date -- add_point refreshes these eagerly whenever
         # I grows, so no separate inner-changed check is needed here

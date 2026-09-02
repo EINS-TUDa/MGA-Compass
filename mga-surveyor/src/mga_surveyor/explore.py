@@ -12,7 +12,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .common import Halfspace
+from .common import Halfspace, gaps
 from .methods.base import Method
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,14 @@ class OptimalPointFn(Protocol):
     """Zero-argument query: the true region's own known optimum -- a free
     extra point to seed the inner approximation with."""
     def __call__(self) -> np.ndarray: ...
+
+
+def box_directions(k: int) -> np.ndarray:
+    """The `2k` axis directions `+-e_i` `drive`'s bootstrap queries
+    `furthest_point` with -- factored out so anything that needs to
+    presolve/intercept that same batch before `drive` gets to it (e.g.
+    `mga_surveyor.normalize.presolve_box_points`) builds it identically."""
+    return np.vstack([np.eye(k), -np.eye(k)])
 
 
 def drive(
@@ -69,8 +77,7 @@ def drive(
     Returns a history list of dicts, one per iteration, with keys "iter",
     "gap", "trial_point", "new_point", "cut_added".
     """
-    box_directions = np.vstack([np.eye(method.k), -np.eye(method.k)])
-    box_points, box_normals = furthest_point(box_directions)
+    box_points, box_normals = furthest_point(box_directions(method.k))
     box_points = np.asarray(box_points, dtype=float)
     initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float), *(extra_points or [])]
     initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
@@ -90,8 +97,14 @@ def drive(
 
         method.add_point(new_point)
         # Cut only needed if the closest point differs from the trial
-        # point, i.e. the trial point itself was infeasible.
-        cut_added = np.linalg.norm(new_point - np.asarray(trial_point)) > tol
+        # point, i.e. the trial point itself was infeasible. Measured
+        # under method.norm -- the same metric find_trial_point's own gap
+        # (and hence this same tol, in the convergence check above) is
+        # measured under -- not a hardcoded L2 distance, which would
+        # otherwise compare a different-norm quantity against tol than
+        # the one the convergence check itself uses (up to sqrt(k)x off
+        # for L2 vs Linf in k dimensions).
+        cut_added = float(gaps(new_point[None, :], np.asarray(trial_point)[None, :], norm=method.norm)[0]) > tol
         if cut_added:
             method.add_cut(normal, new_point)
 
