@@ -524,9 +524,15 @@ def test_generate_mga_files_reuses_existing_closest_point_files_on_restart(tmp_p
 
     # First (short) run: discover at least two closest-point results (so
     # they can be swapped with each other below).
+    # use_objective_cuts=False explicitly: the swap below only keeps
+    # point/normal mutually consistent, not (point, duals, obj) -- see its
+    # own comment -- so deriving an objective cut from the swapped file
+    # would linearize at the wrong point. Not what this test is about
+    # (that's covered by test_generate_mga_files_with_use_objective_cuts_
+    # uses_existing_closest_point_files_too instead).
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=4, max_parallel=2, verbose=False,
+        tol=1e-2, max_iter=4, max_parallel=2, verbose=False, use_objective_cuts=False,
     )
     closest_files = sorted((tmp_path / "slack_0.1").glob("mga_closest_result_*.nc"))
     assert len(closest_files) >= 2  # need two genuine results to swap below
@@ -562,7 +568,7 @@ def test_generate_mga_files_reuses_existing_closest_point_files_on_restart(tmp_p
     n2 = _build_network()
     generate_mga_files(
         n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=0, max_parallel=2, verbose=False,
+        tol=1e-2, max_iter=0, max_parallel=2, verbose=False, use_objective_cuts=False,
     )
     points_df, _duals_df, _nc_files = consolidate_mga_results(tmp_path, obj_label="obj")
     assert ((points_df["wind"] == point_b["wind"]) & (points_df["solar"] == point_b["solar"])).any()

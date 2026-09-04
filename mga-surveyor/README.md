@@ -66,8 +66,9 @@ solve or cache.
 otherwise unused, whenever `resolve_main_objective=True`) into an extra supporting halfspace of the
 true near-optimal region — provably valid, not a heuristic: the achievable-cost-at-x value function
 is convex, so the tangent at any solved point is a global underestimator, not just a local
-approximation. Free tightening, no new solves. `generate_mga_files`'s own `use_objective_cuts=True`
-(opt-in, `False` by default) uses this for every point the main loop finds — live, and for any
+approximation. Free tightening, no new solves. `generate_mga_files`'s own `use_objective_cuts`
+(`True` by default; measured ~5x fewer iterations to converge at `tol=2%`, pass `False` to opt out)
+uses this for every point the main loop finds — live, and for any
 existing result read back on a restart — plus one free extra per slack level from the network's own
 optimum (added unconditionally: it has no same-run geometric normal to check it against, and there's
 no structural reason for its gradient to align with any axis the way a box-direction point's does) —
@@ -80,10 +81,10 @@ nearly-coincident hyperplanes — confirmed in practice to otherwise explode int
 crash, not just a theoretical risk. Closest-point and optimum cuts don't share that structural
 alignment (their angles to any same-run geometric normal come out scattered, not clustered near
 0°/180° the way box cuts are), so they're never filtered for near-parallelism — an earlier version
-did check each closest-point cut against its own same-solve geometric normal
-(`common.is_parallel_to_existing`) first, but on the real test network that check turned out to
-discard cuts that still carried real tightening value, costing extra main-loop iterations for no
-compensating safety benefit, so it was dropped; `VertexEnumMethod.add_cut`'s own exact-redundancy
+did check each closest-point cut against its own same-solve geometric normal first, but on the real
+test network that check turned out to discard cuts that still carried real tightening value, costing
+extra main-loop iterations for no compensating safety benefit, so it was dropped;
+`VertexEnumMethod.add_cut`'s own exact-redundancy
 detection still discards any genuinely duplicate cut for free, regardless. One remaining check
 before any cut from the main loop (or a restart's existing files) is added: skipped if the point it
 came from was already feasible (same test `explore.drive` uses for its own geometric cut).

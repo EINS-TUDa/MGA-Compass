@@ -83,6 +83,21 @@ logger = logging.getLogger(__name__)
 # though worker processes' _worker_init sets the root logger to WARNING.
 logger.setLevel(logging.INFO)
 
+
+def _log_solve(m: Any, status: str, condition: str, what: str) -> None:
+    """One condensed line per successful solve -- status/condition are
+    already returned by n.optimize.solve_model itself, and objective is
+    read directly off the model (m.objective.value, a plain linopy
+    Objective property set right after solving), not scraped from
+    linopy.constants's own multi-line log block, which this replaces.
+    Runtime/dual bound/solution size are skipped for now (not currently
+    needed, and not available as a plain attribute the way objective is --
+    they live on the solver's own report object -- so plumbing them
+    through can wait until something actually needs them).
+    """
+    logger.info("%s solved: status=%s condition=%s objective=%.6e", what, status, condition, m.objective.value)
+
+
 __all__ = [
     "make_optimality_fn",
     "make_furthest_point_fn",
@@ -132,6 +147,7 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
         if status != "ok":
             msg = f"Solve to optimality failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "optimal")
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         obj = n.statistics.capex().sum() + n.statistics.opex().sum()
 
@@ -144,6 +160,7 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
         if status != "ok":
             msg = f"Re-solve at pinned optimal coordinates failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "optimal (pinned duals)")
         duals = np.array([float(m.constraints[f"coord_{key}"].dual) for key in keys])
 
         n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, point)}
@@ -153,6 +170,7 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
 
         optimal_fn.parent.mkdir(parents=True, exist_ok=True)
         n.export_to_netcdf(str(optimal_fn))
+        logger.info("saved to file: %s", optimal_fn.name)
         return point
 
     return solve_optimal
@@ -268,6 +286,7 @@ def _build_furthest_point_solver(
                 f"failed: status={status}, condition={condition}"
             )
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "furthest-point")
         coordinates = n.optimize.project_solved(dimensions)
         point = coordinates.loc[keys].to_numpy(dtype=float)
 
@@ -289,6 +308,7 @@ def _build_furthest_point_solver(
                 f"failed: status={status}, condition={condition}"
             )
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "furthest-point (pinned duals)")
         duals_by_key = {key: float(m.constraints[f"coord_{key}"].dual) for key in pinned_keys}
         duals = np.array([duals_by_key.get(key, 0.0) for key in keys])
 
@@ -357,7 +377,9 @@ def _cache_furthest_point_result(
     n.meta["normal"] = {k: float(v) for k, v in zip(keys, direction)}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    n.export_to_netcdf(str(output_dir / f"mga_furthest_result_{key}.nc"))
+    out_fn = output_dir / f"mga_furthest_result_{key}.nc"
+    n.export_to_netcdf(str(out_fn))
+    logger.info("saved to file: %s", out_fn.name)
 
 
 def make_furthest_point_fn(
@@ -683,6 +705,7 @@ def _build_closest_point_solver(
         if status != "ok":
             msg = f"Closest-point solve for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "closest-point")
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         # Divide back out the internal solve-time rescaling (see
@@ -709,6 +732,7 @@ def _build_closest_point_solver(
         if status != "ok":
             msg = f"Re-solve at pinned coordinates for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
+        _log_solve(m, status, condition, "closest-point (pinned duals)")
         duals = np.array([float(m.constraints[f"coord_{key}"].dual) for key in keys])
 
         # Undo this call's own additions so the model is ready for the next call.
@@ -791,7 +815,9 @@ def _cache_closest_point_result(
     n.meta["target"] = {k: float(v) for k, v in zip(keys, target)}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    n.export_to_netcdf(str(output_dir / f"mga_closest_result_{key}.nc"))
+    out_fn = output_dir / f"mga_closest_result_{key}.nc"
+    n.export_to_netcdf(str(out_fn))
+    logger.info("saved to file: %s", out_fn.name)
 
 
 def make_closest_point_fn(
@@ -1079,7 +1105,7 @@ def generate_mga_files(
     max_parallel: int = 4,
     verbose: bool = True,
     normalize: bool = False,
-    use_objective_cuts: bool = False,
+    use_objective_cuts: bool = True,
     **kwargs: Any,
 ) -> None:
     """Run a `VertexEnumMethod` per slack level (`explore.drive`, up to
@@ -1126,7 +1152,10 @@ def generate_mga_files(
 
     Same per-slack-level broadcasting as `max_iter`.
 
-    `use_objective_cuts` (default `False`, opt-in): also add a
+    `use_objective_cuts` (default `True`; measured ~5x fewer iterations to
+    converge at `tol=2%` on `model_energy`, and the degenerate-dual/
+    scale-inconsistency bugs that once made this risky are now fixed --
+    pass `False` to fall back to plain geometric cuts only): also add a
     `mga_surveyor.common.linearized_objective_cut` for every point the
     main loop finds (`resolve_main_objective=True`, the default) -- both
     live (`method.add_cut`, same as its geometric cut) and for any
@@ -1166,10 +1195,10 @@ def generate_mga_files(
     box cuts are), so unlike box cuts, they're never filtered for
     near-parallelism -- an earlier version of this function did check
     each closest-point cut against its own same-solve geometric normal
-    (`common.is_parallel_to_existing`, `cos_threshold=0.95`) before
-    adding it, but that check turned out to be net-negative: on the real
-    test network it discarded cuts that still carried real tightening
-    value, costing extra main-loop iterations (7 iterations with the
+    (cosine similarity, threshold 0.95) before adding it, but that check
+    turned out to be net-negative: on the real test network it discarded
+    cuts that still carried real tightening value, costing extra
+    main-loop iterations (7 iterations with the
     check vs. 4 without, same network/slack/tolerance) for no compensating
     safety benefit -- `VertexEnumMethod.add_cut`'s own exact-redundancy
     detection (see its own docstring) already discards any genuinely
@@ -1226,6 +1255,13 @@ def generate_mga_files(
         # nothing downstream needs to know the difference.
         tols = [t / 100 * 2 for t in tols]
     max_iters = _broadcast_per_slack(max_iter, len(slack_levels), "max_iter")
+    # Log every gap/tol the same way tol was originally passed in (a
+    # percentage under normalize=True, since that's what a cube-space
+    # number like "0.08" means nothing against otherwise; a plain real-unit
+    # number when normalize=False) -- see gap_scale = tol_cube -> tol
+    # percent's own inverse, `/ 100 * 2` above.
+    gap_scale = 50.0 if normalize else 1.0
+    gap_unit = "%" if normalize else ""
 
     # Each factory below gets its own independent pickled copy of n, not n
     # itself: n.optimize.create_model() stores its model at n.model, a
@@ -1252,6 +1288,11 @@ def generate_mga_files(
     for slack, slack_tol, slack_max_iter in zip(slack_levels, tols, max_iters):
         slack_dir = output_dir / f"slack_{slack}"
         method = None  # assigned below -- add_objective_cut_from_closest_point's closure reads it late
+
+        if verbose:
+            logger.info("=" * 60)
+            logger.info("slack=%s", slack)
+            logger.info("=" * 60)
 
         furthest_point = make_furthest_point_fn(
             pickle.loads(pickle.dumps(n)), dimensions, slack=slack, output_dir=slack_dir,
@@ -1299,6 +1340,15 @@ def generate_mga_files(
         affine_map = None
         optimal_fn = solve_optimal
         if normalize:
+            # normalize_oracle_fns solves the 2k box directions itself
+            # (presolve_box_points, to compute the affine map), earlier
+            # than drive()'s own bootstrap ever would -- so that solving
+            # (and its "saved to file" lines) needs its own banner here,
+            # not just drive()'s own furthest-point one, which by the time
+            # it fires has nothing left to do (box points are already
+            # cached in the wrapped furthest_point closure by then).
+            if verbose:
+                logger.info("[normalize] furthest-point queries: bootstrapping %d box direction(s)", 2 * k)
             furthest_point, closest_point, optimal_fn, affine_map = normalize_oracle_fns(
                 furthest_point, build_closest_point, solve_optimal, k, keys,
             )
@@ -1350,17 +1400,32 @@ def generate_mga_files(
         method = VertexEnumMethod(k=k, norm=norm, backend=solver_name)
         if verbose:
             logger.info(
-                "slack=%s: running VertexEnumMethod (tol=%s, max_iter=%s)", slack, slack_tol, slack_max_iter,
+                "slack=%s: running VertexEnumMethod (tol=%.4f%s, max_iter=%s)",
+                slack, slack_tol * gap_scale, gap_unit, slack_max_iter,
             )
         drive(
             method, furthest_point, closest_point, optimal_fn,
             tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
             extra_points=extra_points, extra_halfspaces=extra_halfspaces,
+            gap_scale=gap_scale, gap_unit=gap_unit,
         )
-        if verbose:
+        final_gap = method.max_gap()
+        if final_gap > slack_tol:
+            # drive() already logged a warning for this (it's the one that
+            # knows whether max_iter was actually hit), but that's easy to
+            # miss buried in per-iteration logging -- and this is the
+            # summary line most callers actually look at, so make the
+            # under-convergence visible here too rather than reusing the
+            # same neutral info line convergence would also produce.
+            logger.warning(
+                "slack=%s: did NOT converge (max_iter=%s exhausted): %d inner point(s), final max_gap=%.4f%s > tol=%.4f%s",
+                slack, slack_max_iter, len(method.inner_vertices),
+                final_gap * gap_scale, gap_unit, slack_tol * gap_scale, gap_unit,
+            )
+        elif verbose:
             logger.info(
-                "slack=%s: %d inner point(s), final max_gap=%.3e",
-                slack, len(method.inner_vertices), method.max_gap(),
+                "slack=%s: %d inner point(s), final max_gap=%.4f%s",
+                slack, len(method.inner_vertices), final_gap * gap_scale, gap_unit,
             )
 
 

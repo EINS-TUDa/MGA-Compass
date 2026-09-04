@@ -50,6 +50,7 @@ def drive(
     method: Method, furthest_point: FurthestPointFn, closest_point: ClosestPointFn, optimal_fn: OptimalPointFn,
     tol: float = 1e-6, max_iter: int | None = None, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
+    gap_scale: float = 1.0, gap_unit: str = "",
 ) -> list[dict]:
     """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
     point, and `extra_points`/`extra_halfspaces` if given -- all together
@@ -74,9 +75,20 @@ def drive(
     loop: correct for any of the three norms, with no separate argument
     needed per norm.
 
+    `gap_scale`/`gap_unit` (default `1.0`/`""`, i.e. no change): every
+    logged gap is multiplied by `gap_scale` and suffixed with `gap_unit`
+    before printing -- purely cosmetic, doesn't touch `tol`/`history`'s own
+    values. Lets a caller display the gap however it originally expressed
+    `tol` (e.g. as a percentage) instead of `drive`'s own internal units.
+
     Returns a history list of dicts, one per iteration, with keys "iter",
-    "gap", "trial_point", "new_point", "cut_added".
+    "gap", "trial_point", "new_point", "cut_added". If `max_iter` is
+    exhausted before `gap < tol`, logs a warning (the return value itself
+    doesn't flag this -- check `history[-1]["gap"]` against `tol`, or the
+    caller's own `method.max_gap()`, to detect it programmatically).
     """
+    if verbose:
+        logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
     box_points, box_normals = furthest_point(box_directions(method.k))
     box_points = np.asarray(box_points, dtype=float)
     initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float), *(extra_points or [])]
@@ -84,12 +96,16 @@ def drive(
     method.bootstrap(initial_points, initial_halfspaces)
 
     history = []
+    last_gap = float("nan")
+    if verbose:
+        logger.info("[drive] closest-point queries: main loop starting")
     iters = itertools.count() if max_iter is None else range(max_iter)
     for it in iters:
         trial_point, gap = method.find_trial_point()
+        last_gap = gap
         if trial_point is None or gap < tol:
             if verbose:
-                logger.info("[drive] converged at iter %d: gap=%.3e", it, gap)
+                logger.info("[drive] converged at iter %d: gap=%.4f%s", it, gap * gap_scale, gap_unit)
             break
 
         new_point, normal = closest_point(trial_point)
@@ -113,6 +129,19 @@ def drive(
             "new_point": new_point, "cut_added": cut_added,
         })
         if verbose:
-            logger.info("[drive] iter %4d: gap=%.6f cut_added=%s", it + 1, gap, cut_added)
+            logger.info(
+                "[drive] iter %4d: gap=%.4f%s cut_added=%s", it + 1, gap * gap_scale, gap_unit, cut_added,
+            )
+    else:
+        # for...else: only reached if the loop ran out of iterations
+        # without ever hitting the `break` above -- i.e. max_iter was
+        # exhausted while still above tol. Silent otherwise (no log line,
+        # no exception), so a caller that doesn't inspect the returned
+        # history could easily mistake this for genuine convergence.
+        if max_iter is not None:
+            logger.warning(
+                "[drive] did NOT converge within max_iter=%d iterations: final gap=%.4f%s (tol=%.4f%s)",
+                max_iter, last_gap * gap_scale, gap_unit, tol * gap_scale, gap_unit,
+            )
 
     return history

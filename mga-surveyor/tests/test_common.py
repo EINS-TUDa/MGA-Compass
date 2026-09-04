@@ -1,6 +1,6 @@
 import numpy as np
 
-from mga_surveyor.common import is_parallel_to_existing, linearized_objective_cut
+from mga_surveyor.common import linearized_objective_cut
 
 
 def test_linearized_objective_cut_collapses_to_x0_when_no_slack_left():
@@ -117,56 +117,3 @@ def test_linearized_objective_cut_avoids_extreme_points_under_mismatched_duals_s
     np.testing.assert_allclose(point[0], x0[0])  # untouched -- not the tiny-denominator axis
     np.testing.assert_allclose(point[1], x0[1] + 200.0 / 100.0)  # shifted along the dominant axis only
     assert abs(point[1] - x0[1]) < 1e3  # nowhere near the ~1e8-scale blowup the old formula gave here
-
-
-def test_is_parallel_to_existing_empty_list_is_never_parallel():
-    assert is_parallel_to_existing(np.array([1.0, 0.0]), []) is False
-
-
-def test_is_parallel_to_existing_detects_same_direction():
-    halfspaces = [(np.array([2.0, 0.0]), np.array([5.0, 5.0]))]  # same direction, different magnitude/point
-    assert is_parallel_to_existing(np.array([1.0, 0.0]), halfspaces) is True
-
-
-def test_is_parallel_to_existing_detects_opposite_direction():
-    """Anti-parallel counts too -- |cosine similarity|, not signed."""
-    halfspaces = [(np.array([-3.0, 0.0]), np.array([0.0, 0.0]))]
-    assert is_parallel_to_existing(np.array([1.0, 0.0]), halfspaces) is True
-
-
-def test_is_parallel_to_existing_orthogonal_is_not_parallel():
-    halfspaces = [(np.array([0.0, 1.0]), np.array([0.0, 0.0]))]
-    assert is_parallel_to_existing(np.array([1.0, 0.0]), halfspaces) is False
-
-
-def test_is_parallel_to_existing_respects_threshold():
-    # ~2.6 degrees off axis -- cos ~ 0.9990
-    near = np.array([1.0, 0.045])
-    halfspaces = [(np.array([1.0, 0.0]), np.array([0.0, 0.0]))]
-    assert is_parallel_to_existing(near, halfspaces, cos_threshold=0.999) is False
-    assert is_parallel_to_existing(near, halfspaces, cos_threshold=0.99) is True
-
-
-def test_is_parallel_to_existing_checks_every_halfspace_not_just_the_first():
-    halfspaces = [
-        (np.array([0.0, 1.0]), np.array([0.0, 0.0])),
-        (np.array([1.0, 1.0]), np.array([0.0, 0.0])),  # non-parallel too
-        (np.array([1.0, 0.0]), np.array([0.0, 0.0])),  # the actual match, listed last
-    ]
-    assert is_parallel_to_existing(np.array([2.0, 0.0]), halfspaces) is True
-
-
-def test_is_parallel_to_existing_ignores_a_zero_magnitude_existing_direction(recwarn):
-    """A halfspace with a zero-magnitude direction (e.g. a closest-point
-    solve's own normal, when its trial point was already feasible -- see
-    this function's own docstring) has no orientation to compare against
-    -- treated as not parallel, not a division-by-zero crash/warning."""
-    halfspaces = [(np.array([0.0, 0.0]), np.array([1.0, 1.0]))]
-    assert is_parallel_to_existing(np.array([1.0, 0.0]), halfspaces) is False
-    assert len(recwarn) == 0
-
-
-def test_is_parallel_to_existing_zero_magnitude_query_direction_is_never_parallel(recwarn):
-    halfspaces = [(np.array([1.0, 0.0]), np.array([0.0, 0.0]))]
-    assert is_parallel_to_existing(np.array([0.0, 0.0]), halfspaces) is False
-    assert len(recwarn) == 0

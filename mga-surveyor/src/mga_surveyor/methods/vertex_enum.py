@@ -45,6 +45,48 @@ class ProjectionFn(Protocol):
     def __call__(self, point: np.ndarray, points: np.ndarray, norm: Norm) -> tuple[np.ndarray, np.ndarray]: ...
 
 
+def _normalize_halfspace(halfspace: Halfspace) -> Halfspace:
+    """Canonicalize a halfspace to unit-norm direction (``point`` is
+    unchanged -- ``{x : direction@x <= direction@point}`` is invariant
+    under scaling ``direction`` by any ``c > 0``, since both sides of the
+    inequality scale together).
+
+    Every stored halfspace's "distance to hyperplane" (``direction@x -
+    offset``) then has consistent, comparable real-geometric units
+    regardless of the raw coefficient scale its ``direction`` happened to
+    arrive with -- box halfspaces, geometric MGA cuts, and
+    objective-derived cuts have wildly different natural magnitudes in
+    this package. Without this, ``self.tol``/``self.dedup_tol``
+    comparisons (the kept-vs-removed vertex split in
+    :meth:`VertexEnumMethod.add_cut`, and the active-constraint
+    classification in :func:`_compute_active_constrs`) silently mean a
+    different real-world distance for every different halfspace's own
+    scale -- a large-coefficient halfspace's tolerance is effectively far
+    tighter (in real units) than a small-coefficient one's, which
+    misclassifies which constraints are genuinely tight at a vertex and
+    was a real contributor to :meth:`VertexEnumMethod.add_cut`'s
+    crossing-vertex count exploding on an already near-degenerate
+    polytope (confirmed against the real network: one cut produced over
+    50,000 candidate crossing vertices).
+
+    :param halfspace: A ``(direction, point)`` supporting hyperplane.
+    :returns: The same halfspace, with ``direction`` rescaled to unit
+        L2 norm.
+    :rtype: tuple
+    """
+    direction, point = halfspace
+    direction = np.asarray(direction, dtype=float)
+    point = np.asarray(point, dtype=float)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-300:
+        # A zero-direction "halfspace" is degenerate (either the whole
+        # space or nothing) regardless of scale -- nothing meaningful to
+        # normalize by; pass it through unchanged rather than divide by
+        # zero.
+        return direction, point
+    return direction / norm, point
+
+
 def _halfspaces_to_scipy(outer_halfspaces: list[Halfspace]) -> np.ndarray:
     """Convert ``outer_halfspaces`` into the ``[A | b]`` row format expected
     by :class:`scipy.spatial.HalfspaceIntersection`, i.e. rows such that
@@ -324,7 +366,7 @@ class VertexEnumMethod(Method):
 
     def bootstrap(self, initial_points: list[np.ndarray], initial_halfspaces: list[Halfspace]) -> None:
         self.inner_vertices = np.array(initial_points, dtype=float)
-        self.outer_halfspaces = list(initial_halfspaces)
+        self.outer_halfspaces = [_normalize_halfspace(hs) for hs in initial_halfspaces]
         interior_point = self.inner_vertices.mean(axis=0)
         hs = HalfspaceIntersection(_halfspaces_to_scipy(self.outer_halfspaces), interior_point)
         self.outer_vertices = hs.intersections
@@ -396,8 +438,8 @@ class VertexEnumMethod(Method):
             wasn't but happened to create as many vertices as it removed.
         :rtype: tuple
         """
-        direction = np.asarray(direction, dtype=float)
-        point = np.asarray(point, dtype=float)
+        direction, point = _normalize_halfspace((direction, point))
+
         offset = direction @ point
         signed = self.outer_vertices @ direction - offset
 

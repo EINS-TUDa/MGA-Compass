@@ -62,8 +62,8 @@ the large-range ones dominate. `pypsa_ext.generate_mga_files`'s own
 true near-optimal region -- provably valid, not a heuristic (see its own
 docstring: convexity of the achievable-cost value function makes the
 tangent at any solved point a global underestimator). Free tightening, no
-new solves. `pypsa_ext.generate_mga_files`'s own `use_objective_cuts=True`
-opts a whole run into using this for every point the main loop finds
+new solves. `pypsa_ext.generate_mga_files`'s own `use_objective_cuts`
+(`True` by default) uses this for every point the main loop finds
 (live, and for any existing result read back on a restart), plus one free
 extra per slack level from the network's own optimum (added
 unconditionally -- it has no same-run geometric normal to check it
@@ -81,17 +81,17 @@ don't share that structural alignment (their angles to any same-run
 geometric normal come out scattered, not clustered near 0/180 the way box
 cuts are), so they're never filtered for near-parallelism -- an earlier
 version did check each closest-point cut against its own same-solve
-geometric normal (`common.is_parallel_to_existing`) first, but on the
-real test network that check discarded cuts that still carried real
-tightening value, costing extra main-loop iterations for no compensating
-safety benefit, so it was dropped; `VertexEnumMethod.add_cut`'s own
+geometric normal first, but on the real test network that check
+discarded cuts that still carried real tightening value, costing extra
+main-loop iterations for no compensating safety benefit, so it was
+dropped; `VertexEnumMethod.add_cut`'s own
 exact-redundancy detection still discards any genuinely duplicate cut for
 free, regardless. One remaining check before any cut from the main loop
 (or a restart's existing files) is added: skipped if the point it came
 from was already feasible (same test `explore.drive` uses for its own
 geometric cut).
 """
-from .common import VALID_NORMS, gaps, is_parallel_to_existing, linearized_objective_cut
+from .common import VALID_NORMS, gaps, linearized_objective_cut
 from .gurobi_projection import closest_point_on_hull
 # Both backend modules name their projection function `closest_point_on_hull`
 # (module-qualified, e.g. `gurobi_projection.closest_point_on_hull` vs
@@ -117,7 +117,7 @@ from .pypsa_ext import (
 )
 
 __all__ = [
-    "VALID_NORMS", "closest_point_on_hull", "gaps", "linearized_objective_cut", "is_parallel_to_existing",
+    "VALID_NORMS", "closest_point_on_hull", "gaps", "linearized_objective_cut",
     "closest_point_on_hull_highs", "VALID_NORMS_HIGHS",
     "Method", "VertexEnumMethod", "BilevelMethod", "solve_farthest_outer_point_milp",
     "CddMethod", "cdd_vertices_of", "drive",

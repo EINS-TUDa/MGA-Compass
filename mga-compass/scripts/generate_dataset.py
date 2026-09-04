@@ -33,6 +33,32 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # PyPSA's "Component-attr" naming convention -- expected and harmless (we
 # read them directly via linopy, not through the network), just noisy.
 logging.getLogger("pypsa.optimization.optimize").setLevel(logging.WARNING)
+# linopy.io logs "Writing time: Xs" and linopy.model logs "Solve problem
+# using X solver" on every single solve -- the solver name is already
+# logged once in main() below, and per-solve write timing isn't used for
+# anything, so both are just noise at this log's per-solve granularity.
+logging.getLogger("linopy.io").setLevel(logging.WARNING)
+logging.getLogger("linopy.model").setLevel(logging.WARNING)
+# linopy.constants logs one pre-formatted multi-line block per solve
+# ("Status: ok\nTermination condition: optimal\nSolution: N primals, M
+# duals\nObjective: X\nSolver: gurobi\nRuntime: Xs\nDual bound: X\nSolver
+# model: available\nSolver message: 2"). pypsa_ext.py already logs its own
+# condensed one-line summary per solve (status/condition/objective, read
+# directly off the model), so this whole block would only duplicate that.
+logging.getLogger("linopy.constants").setLevel(logging.WARNING)
+
+
+# pypsa.network.io logs "Exported network 'X' saved to '<path>' contains:
+# <every component>" on every export; pypsa_ext.py already logs its own
+# short "saved to file: <name>" right after each one (same event, without
+# the full path or component dump), so the pypsa.network.io version would
+# only duplicate that. Its other message, "Imported network ...", fires
+# once at the very start and is still useful, so a level change (which
+# can't distinguish the two, same logger) would lose it too -- this drops
+# only the one starting with "Exported network".
+logging.getLogger("pypsa.network.io").addFilter(
+    lambda record: not record.getMessage().startswith("Exported network")
+)
 
 
 def _add_file_logging(output_dir: Path) -> None:
@@ -78,7 +104,7 @@ class RunConfig:
     slack_levels: list[float]
     tol: float = 1e-3
     normalize: bool = False
-    use_objective_cuts: bool = False
+    use_objective_cuts: bool = True
     max_iter: int = 120
     output_dir: Path = Path(__file__).parent / "output"
     max_parallel: int = 4
@@ -170,6 +196,7 @@ def extract_generation_and_capacity(
 
 def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) -> None:
     _add_file_logging(config.output_dir)
+    logging.info(f"Solver: {config.solver_name}")
 
     n = network.build(config.solver_name, config.solver_options)
     optimal_cost = n.statistics.capex().sum() + n.statistics.opex().sum()
@@ -215,9 +242,14 @@ def parse_args() -> argparse.Namespace:
              "units -- makes --tol a percentage instead of a real-unit distance.",
     )
     parser.add_argument(
-        "--use-objective-cuts", action="store_true", default=RUN_CONFIG.use_objective_cuts,
-        help="Also add each solved point's own linearized_objective_cut as free extra tightening -- see "
-             "mga_surveyor.generate_mga_files's own docstring.",
+        "--no-objective-cuts", action="store_false", dest="use_objective_cuts",
+        default=RUN_CONFIG.use_objective_cuts,
+        help="Disable adding each solved point's own linearized_objective_cut as free extra tightening "
+             "(on by default) -- see mga_surveyor.generate_mga_files's own docstring.",
+    )
+    parser.add_argument(
+        "--max-iter", type=int, default=RUN_CONFIG.max_iter,
+        help="Cap on drive() iterations per slack level -- see mga_surveyor.generate_mga_files's own docstring.",
     )
     return parser.parse_args()
 
@@ -226,6 +258,6 @@ if __name__ == "__main__":
     args = parse_args()
     config = replace(
         RUN_CONFIG, output_dir=args.output_dir, tol=args.tol, normalize=args.normalize,
-        use_objective_cuts=args.use_objective_cuts,
+        use_objective_cuts=args.use_objective_cuts, max_iter=args.max_iter,
     )
     main(config=config)
