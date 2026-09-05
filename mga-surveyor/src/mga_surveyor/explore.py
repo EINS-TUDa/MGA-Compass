@@ -49,7 +49,7 @@ def box_directions(k: int) -> np.ndarray:
 
 def drive(
     method: Method, furthest_point: FurthestPointFn, closest_point: ClosestPointFn, optimal_fn: OptimalPointFn,
-    tol: float = 1e-6, max_iter: int | None = None, verbose: bool = True,
+    max_iter: int | None, tol: float, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
     gap_scale: float = 1.0, gap_unit: str = "",
 ) -> list[dict]:
@@ -58,7 +58,10 @@ def drive(
     in one `method.bootstrap` call, since `Method.bootstrap` must be called
     exactly once, before any `add_point`/`add_cut`/`find_trial_point` call
     -- then drive it through the main loop until the gap closes or
-    `max_iter` is hit. `max_iter=None` (the default) means no cap.
+    `max_iter` is hit. No default -- every caller must decide; pass `None`
+    explicitly for no cap (silent non-convergence is exactly what this
+    forces a caller to consciously opt into, rather than getting it for
+    free by omitting the argument).
 
     - `furthest_point(directions) -> (points, normals)`: called once, with
       all `2k` box directions, for bootstrapping only.

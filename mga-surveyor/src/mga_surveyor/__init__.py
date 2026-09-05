@@ -54,7 +54,7 @@ objective, Gurobi-only).
 dimension units -- useful whenever those units differ wildly in scale
 (e.g. MW vs MWh), since an unweighted polytope over such dimensions lets
 the large-range ones dominate. `pypsa_ext.generate_mga_files`'s own
-`normalize=True` opts a whole run into this.
+`normalize` (`True` by default) wires this in for a whole run.
 
 `common.linearized_objective_cut` turns a single solved point's own
 `duals` (already computed, otherwise unused, whenever

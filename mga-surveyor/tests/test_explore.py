@@ -48,7 +48,7 @@ def test_drive_bootstraps_from_box_directions_and_optimal_point():
     2k box points plus optimal_fn's point."""
     method = _RecordingMethod(k=2, norm="linf")
 
-    drive(method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn, verbose=False)
+    drive(method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn, max_iter=None, tol=1e-6, verbose=False)
 
     assert [c[0] for c in method.calls] == ["bootstrap", "find_trial_point"]
     _, points, halfspaces = method.calls[0]
@@ -67,7 +67,7 @@ def test_drive_folds_extra_points_and_halfspaces_into_the_one_bootstrap_call():
     extra_halfspaces = [(np.array([1.0, 0.0]), np.array([0.5, 0.5]))]
 
     drive(
-        method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn,
+        method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn, max_iter=None, tol=1e-6,
         extra_points=extra_points, extra_halfspaces=extra_halfspaces, verbose=False,
     )
 

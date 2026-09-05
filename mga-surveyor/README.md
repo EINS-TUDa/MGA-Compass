@@ -57,8 +57,8 @@ so the polytope a `Method` explores lives in a `[-1, 1]^k`-normalized cube inste
 units — useful whenever those units differ wildly in scale (e.g. MW vs MWh), since an unweighted
 polytope over such dimensions lets the large-range ones dominate. `explore.drive`/`Method` need no
 changes at all for this — it's just oracle functions that happen to speak normalized coordinates.
-`generate_mga_files`'s own `normalize=True` (opt-in, `False` by default) wires this in for a whole
-run; everything written to disk (and `consolidate_mga_results`'s output) stays in real units either
+`generate_mga_files`'s own `normalize` (`True` by default) wires this in for a whole run; everything
+written to disk (and `consolidate_mga_results`'s output) stays in real units either
 way, since normalization only changes what `Method` itself sees, not what the oracle functions
 solve or cache.
 

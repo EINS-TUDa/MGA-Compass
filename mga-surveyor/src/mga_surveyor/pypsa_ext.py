@@ -1100,11 +1100,11 @@ def generate_mga_files(
     norm: str,
     slack_levels: Sequence[float],
     solver_name: str,
-    tol: float | Sequence[float] = 1e-3,
-    max_iter: int | None | Sequence[int | None] = None,
+    max_iter: int | None | Sequence[int | None],
+    tol: float | Sequence[float],
     max_parallel: int = 4,
     verbose: bool = True,
-    normalize: bool = False,
+    normalize: bool = True,
     use_objective_cuts: bool = True,
     **kwargs: Any,
 ) -> None:
@@ -1118,19 +1118,21 @@ def generate_mga_files(
     level) or a sequence with one entry per `slack_levels` (raises if the
     length doesn't match).
 
-    `normalize` (default `False`, opt-in): if `True`, each slack level's
+    `normalize` (default `True`): if `True`, each slack level's
     `VertexEnumMethod` explores a `[-1, 1]^k`-normalized cube instead of
     raw dimension units, via `mga_surveyor.normalize.normalize_oracle_fns`
     -- see that module for why (mixing e.g. MW and MWh dimensions in one
     unweighted polytope means the ones with the larger natural range
-    dominate). Computed fresh per slack level (each one's own achievable
-    box can differ), from that level's own `furthest_point`'s box-point
-    solves -- raises if any dimension turns out fixed (no achievable
-    range) under that slack budget, see `normalize.compute_affine_map`.
-    Everything on disk (`.nc` files, `consolidate_mga_results`'s output)
-    is completely unaffected -- still real units throughout, since the
-    oracle functions themselves are unchanged; only what
-    `explore.drive`/`VertexEnumMethod` sees is normalized.
+    dominate; on by default since that's true of most real networks, not
+    a narrow edge case). Computed fresh per slack level (each one's own
+    achievable box can differ), from that level's own `furthest_point`'s
+    box-point solves -- raises if any dimension turns out fixed (no
+    achievable range) under that slack budget, see
+    `normalize.compute_affine_map`. Everything on disk (`.nc` files,
+    `consolidate_mga_results`'s output) is completely unaffected -- still
+    real units throughout, since the oracle functions themselves are
+    unchanged; only what `explore.drive`/`VertexEnumMethod` sees is
+    normalized. Pass `False` to explore raw units instead.
 
     **`tol` is interpreted differently depending on `normalize`, on
     purpose -- there is no unit that's natural in both modes at once:**

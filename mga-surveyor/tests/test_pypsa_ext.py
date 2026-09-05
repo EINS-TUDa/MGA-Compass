@@ -484,7 +484,7 @@ def test_generate_mga_files_and_consolidate_end_to_end(tmp_path):
     # the per-slack-level path, not just the scalar-broadcast path.
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=[1e-2], max_iter=[5], max_parallel=2, verbose=False,
+        tol=[1e-2], max_iter=[5], max_parallel=2, verbose=False, normalize=False,
     )
     points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
 
@@ -505,13 +505,13 @@ def test_generate_mga_files_rejects_mismatched_tol_or_max_iter_length(tmp_path):
     with pytest.raises(ValueError, match="tol"):
         generate_mga_files(
             n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.02, 0.05], solver_name="highs",
-            tol=[1e-2],  # only 1 entry for 2 slack levels
+            max_iter=10, tol=[1e-2],  # only 1 entry for 2 slack levels
         )
 
     with pytest.raises(ValueError, match="max_iter"):
         generate_mga_files(
             n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.02, 0.05], solver_name="highs",
-            max_iter=[5, 5, 5],  # 3 entries for 2 slack levels
+            max_iter=[5, 5, 5], tol=1e-2,  # 3 entries for 2 slack levels
         )
 
 
@@ -532,7 +532,7 @@ def test_generate_mga_files_reuses_existing_closest_point_files_on_restart(tmp_p
     # uses_existing_closest_point_files_too instead).
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=4, max_parallel=2, verbose=False, use_objective_cuts=False,
+        tol=1e-2, max_iter=4, max_parallel=2, verbose=False, use_objective_cuts=False, normalize=False,
     )
     closest_files = sorted((tmp_path / "slack_0.1").glob("mga_closest_result_*.nc"))
     assert len(closest_files) >= 2  # need two genuine results to swap below
@@ -568,7 +568,7 @@ def test_generate_mga_files_reuses_existing_closest_point_files_on_restart(tmp_p
     n2 = _build_network()
     generate_mga_files(
         n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=0, max_parallel=2, verbose=False, use_objective_cuts=False,
+        tol=1e-2, max_iter=0, max_parallel=2, verbose=False, use_objective_cuts=False, normalize=False,
     )
     points_df, _duals_df, _nc_files = consolidate_mga_results(tmp_path, obj_label="obj")
     assert ((points_df["wind"] == point_b["wind"]) & (points_df["solar"] == point_b["solar"])).any()
@@ -584,7 +584,7 @@ def test_consolidate_mga_results_is_a_repeatable_read(tmp_path):
 
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=5, max_parallel=2, verbose=False,
+        tol=1e-2, max_iter=5, max_parallel=2, verbose=False, normalize=False,
     )
 
     points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
@@ -604,7 +604,7 @@ def test_generate_mga_files_then_consolidate(tmp_path):
 
     result = generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=5, max_parallel=2, verbose=False,
+        tol=1e-2, max_iter=5, max_parallel=2, verbose=False, normalize=False,
     )
     assert result is None
 
@@ -755,7 +755,7 @@ def test_generate_mga_files_with_use_objective_cuts_converges_and_output_is_unaf
 
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True,
+        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True, normalize=False,
     )
     points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
 
@@ -797,7 +797,7 @@ def test_generate_mga_files_with_use_objective_cuts_uses_existing_closest_point_
 
     generate_mga_files(
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=4, max_parallel=2, verbose=False,
+        tol=1e-2, max_iter=4, max_parallel=2, verbose=False, normalize=False,
     )
     closest_files = sorted((tmp_path / "slack_0.1").glob("mga_closest_result_*.nc"))
     assert len(closest_files) > 0  # something for the restart below to read back
@@ -806,7 +806,7 @@ def test_generate_mga_files_with_use_objective_cuts_uses_existing_closest_point_
     n2 = _build_network()
     generate_mga_files(
         n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True,
+        tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True, normalize=False,
     )
     points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
     assert len(points_df) == len(nc_files) > 0

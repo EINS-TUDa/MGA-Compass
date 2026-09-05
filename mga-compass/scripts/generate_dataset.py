@@ -102,15 +102,17 @@ class RunConfig:
     norm: str
     obj_label: str
     slack_levels: list[float]
-    tol: float = 1e-3
-    normalize: bool = False
+    max_iter: int
+    tol: float
+    normalize: bool = True
     use_objective_cuts: bool = True
-    max_iter: int = 120
     output_dir: Path = Path(__file__).parent / "output"
     max_parallel: int = 4
 
 
-RUN_CONFIG = RunConfig(*_detect_solver(), norm="linf", obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08])
+RUN_CONFIG = RunConfig(
+    *_detect_solver(), norm="linf", obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08], max_iter=120, tol=1e-3,
+)
 
 
 @dataclass
@@ -232,14 +234,17 @@ def parse_args() -> argparse.Namespace:
         "--output-dir", type=Path, default=RUN_CONFIG.output_dir, help="Directory to write outputs to."
     )
     parser.add_argument(
-        "--tol", type=float, default=RUN_CONFIG.tol,
-        help="Convergence tolerance: real units by default, or a percentage (e.g. 4 -> 4%%) if --normalize "
-             "is also given -- see mga_surveyor.generate_mga_files's own docstring.",
+        "--tol", type=float, required=True,
+        help="Convergence tolerance -- a percentage (e.g. 4 -> 4%%) since --normalize is on by default, "
+             "or a real-unit distance if --no-normalize is passed -- see "
+             "mga_surveyor.generate_mga_files's own docstring. No default -- must be chosen explicitly "
+             "for every run.",
     )
     parser.add_argument(
-        "--normalize", action="store_true", default=RUN_CONFIG.normalize,
-        help="Explore each slack level's near-optimal region in a [-1, 1]^k-normalized cube instead of raw "
-             "units -- makes --tol a percentage instead of a real-unit distance.",
+        "--no-normalize", action="store_false", dest="normalize", default=RUN_CONFIG.normalize,
+        help="Explore each slack level's near-optimal region in raw units instead of a [-1, 1]^k "
+             "normalized cube (on by default) -- makes --tol a real-unit distance instead of a "
+             "percentage.",
     )
     parser.add_argument(
         "--no-objective-cuts", action="store_false", dest="use_objective_cuts",
@@ -248,8 +253,9 @@ def parse_args() -> argparse.Namespace:
              "(on by default) -- see mga_surveyor.generate_mga_files's own docstring.",
     )
     parser.add_argument(
-        "--max-iter", type=int, default=RUN_CONFIG.max_iter,
-        help="Cap on drive() iterations per slack level -- see mga_surveyor.generate_mga_files's own docstring.",
+        "--max-iter", type=int, required=True,
+        help="Cap on drive() iterations per slack level -- see mga_surveyor.generate_mga_files's own docstring. "
+             "No default -- must be chosen explicitly for every run.",
     )
     return parser.parse_args()
 

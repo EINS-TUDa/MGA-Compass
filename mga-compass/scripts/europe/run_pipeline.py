@@ -57,12 +57,13 @@ def deploy_mga_script(pypsa_eur_dir: Path) -> Path:
 
 def run_mga_script(
     mga_script: Path, network_path: Path, output_dir: Path,
-    slack_levels: str, max_iter: int, max_parallel: int,
+    slack_levels: str, tol: float, max_iter: int, max_parallel: int,
 ) -> None:
     cmd = [
         sys.executable, str(mga_script), str(network_path),
         "--output-dir", str(output_dir),
         "--slack-levels", slack_levels,
+        "--tol", str(tol),
         "--max-iter", str(max_iter),
         "--max-parallel", str(max_parallel),
     ]
@@ -80,7 +81,16 @@ def main() -> None:
     parser.add_argument("--cores", type=int, default=8, help="Cores for pypsa-eur's own snakemake run")
     parser.add_argument("--force-config", action="store_true", default=False, help="Overwrite an existing config/config.yaml")
     parser.add_argument("--slack-levels", type=str, default="0.05")
-    parser.add_argument("--max-iter", type=int, default=120)
+    parser.add_argument(
+        "--tol", type=float, required=True,
+        help="Convergence tolerance passed through to run_custom_mga.py -- see its own --tol help "
+             "(a percentage by default, since normalize is on there). No default -- must be chosen "
+             "explicitly for every run.",
+    )
+    parser.add_argument(
+        "--max-iter", type=int, required=True,
+        help="Cap on drive() iterations per slack level -- no default, must be chosen explicitly.",
+    )
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--skip-solve", action="store_true", default=False, help="Skip phase 1 entirely (network already solved)")
     args = parser.parse_args()
@@ -96,7 +106,9 @@ def main() -> None:
     mga_script = deploy_mga_script(args.pypsa_eur_dir)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    run_mga_script(mga_script, network_path, args.output_dir, args.slack_levels, args.max_iter, args.max_parallel)
+    run_mga_script(
+        mga_script, network_path, args.output_dir, args.slack_levels, args.tol, args.max_iter, args.max_parallel,
+    )
 
 
 if __name__ == "__main__":
