@@ -8,6 +8,7 @@ own code if this doesn't fit your use case.
 """
 import itertools
 import logging
+import time
 from typing import Protocol
 
 import numpy as np
@@ -82,10 +83,16 @@ def drive(
     `tol` (e.g. as a percentage) instead of `drive`'s own internal units.
 
     Returns a history list of dicts, one per iteration, with keys "iter",
-    "gap", "trial_point", "new_point", "cut_added". If `max_iter` is
-    exhausted before `gap < tol`, logs a warning (the return value itself
-    doesn't flag this -- check `history[-1]["gap"]` against `tol`, or the
-    caller's own `method.max_gap()`, to detect it programmatically).
+    "gap", "trial_point", "new_point", "cut_added", "trial_point_time" (
+    seconds spent inside this iteration's own `method.find_trial_point()`
+    call -- the worst-point search that decides the next point to query,
+    logged since it's the one part of each iteration whose cost scales
+    with the method's own accumulated state, e.g. VertexEnumMethod's
+    growing outer_vertices/outer_halfspaces, unlike closest_point's cost
+    which is external to `drive` itself). If `max_iter` is exhausted before
+    `gap < tol`, logs a warning (the return value itself doesn't flag this
+    -- check `history[-1]["gap"]` against `tol`, or the caller's own
+    `method.max_gap()`, to detect it programmatically).
     """
     if verbose:
         logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
@@ -101,11 +108,16 @@ def drive(
         logger.info("[drive] closest-point queries: main loop starting")
     iters = itertools.count() if max_iter is None else range(max_iter)
     for it in iters:
+        trial_point_start = time.perf_counter()
         trial_point, gap = method.find_trial_point()
+        trial_point_time = time.perf_counter() - trial_point_start
         last_gap = gap
         if trial_point is None or gap < tol:
             if verbose:
-                logger.info("[drive] converged at iter %d: gap=%.4f%s", it, gap * gap_scale, gap_unit)
+                logger.info(
+                    "[drive] converged at iter %d: gap=%.4f%s (find_trial_point: %.3fs)",
+                    it, gap * gap_scale, gap_unit, trial_point_time,
+                )
             break
 
         new_point, normal = closest_point(trial_point)
@@ -126,11 +138,12 @@ def drive(
 
         history.append({
             "iter": it + 1, "gap": gap, "trial_point": trial_point,
-            "new_point": new_point, "cut_added": cut_added,
+            "new_point": new_point, "cut_added": cut_added, "trial_point_time": trial_point_time,
         })
         if verbose:
             logger.info(
-                "[drive] iter %4d: gap=%.4f%s cut_added=%s", it + 1, gap * gap_scale, gap_unit, cut_added,
+                "[drive] iter %4d: gap=%.4f%s cut_added=%s (find_trial_point: %.3fs)",
+                it + 1, gap * gap_scale, gap_unit, cut_added, trial_point_time,
             )
     else:
         # for...else: only reached if the loop ran out of iterations
