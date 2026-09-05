@@ -78,7 +78,6 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write MGA results to")
     parser.add_argument("--cores", type=int, default=8, help="Cores for pypsa-eur's own snakemake run")
-    parser.add_argument("--resolution-elec", type=str, default="24h", help="Snapshot resampling for the config template")
     parser.add_argument("--force-config", action="store_true", default=False, help="Overwrite an existing config/config.yaml")
     parser.add_argument("--slack-levels", type=str, default="0.05")
     parser.add_argument("--max-iter", type=int, default=120)
@@ -89,7 +88,7 @@ def main() -> None:
     if args.skip_solve:
         network_path = build_model.solved_network_path(args.pypsa_eur_dir)
     else:
-        network_path = build_model.build_model(args.pypsa_eur_dir, args.cores, args.resolution_elec, args.force_config)
+        network_path = build_model.build_model(args.pypsa_eur_dir, args.cores, args.force_config)
 
     if not network_path.exists():
         raise SystemExit(f"Expected solved network at {network_path} but it doesn't exist.")

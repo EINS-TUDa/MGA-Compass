@@ -20,7 +20,7 @@ clustering:
   administrative:
     level: 0
   temporal:
-    resolution_elec: {resolution_elec}
+    resolution_elec: 3h
 
 solving:
   solver:

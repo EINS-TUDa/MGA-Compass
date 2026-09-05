@@ -21,7 +21,7 @@ process during this module's own development; build_model does that
 automatically on a LockException before its one retry).
 
 Run standalone with (from the MGA-Dashboard repo root, using its own venv):
-    .venv\\Scripts\\python.exe mga-compass\\scripts\\europe\\build_model.py --resolution-elec 3h
+    .venv\\Scripts\\python.exe mga-compass\\scripts\\europe\\build_model.py
 """
 
 from __future__ import annotations
@@ -47,6 +47,14 @@ PYPSA_EUR_REPO = "https://github.com/pypsa/pypsa-eur.git"
 RUN_NAME = "elec-country-nodes"
 CLUSTERS = 34
 OPTS = ""
+RESOLUTION_ELEC = "3h"
+
+
+def _run_name() -> str:
+    """RUN_NAME is only a fixed prefix -- the resolution is folded into the
+    actual run name so this fixed-3h run keeps writing under the same
+    results/ subtree that already holds the 3h network solved earlier."""
+    return f"{RUN_NAME}-{RESOLUTION_ELEC}"
 
 
 def _snakemake_exe(pypsa_eur_dir: Path) -> Path:
@@ -78,7 +86,7 @@ def ensure_pixi_env(pypsa_eur_dir: Path) -> None:
     subprocess.run(["pixi", "install"], cwd=str(pypsa_eur_dir), check=True)
 
 
-def deploy_config(pypsa_eur_dir: Path, resolution_elec: str, force: bool) -> None:
+def deploy_config(pypsa_eur_dir: Path, force: bool) -> None:
     """Render config.template.yaml -> <pypsa_eur_dir>/config/config.yaml,
     unless one already exists there and `force` isn't set -- an existing
     config.yaml may already hold a user's own customization on top of (or
@@ -90,7 +98,7 @@ def deploy_config(pypsa_eur_dir: Path, resolution_elec: str, force: bool) -> Non
     template = (_EUROPE_DIR / "config.template.yaml").read_text(encoding="utf-8")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        template.format(run_name=RUN_NAME, clusters=CLUSTERS, resolution_elec=resolution_elec),
+        template.format(run_name=_run_name(), clusters=CLUSTERS),
         encoding="utf-8",
     )
     logger.info("Wrote %s", config_path)
@@ -118,28 +126,40 @@ def run_snakemake(pypsa_eur_dir: Path, cores: int) -> None:
     # nothing's incomplete.
     cmd = ["pixi", "run", "snakemake", "--cores", str(cores), "--rerun-incomplete", "solve_elec_networks"]
 
-    result = subprocess.run(cmd, cwd=str(pypsa_eur_dir), capture_output=True, text=True)
-    if result.returncode != 0 and "LockException" in result.stderr:
+    def _stream(cmd: list[str]) -> tuple[int, str]:
+        """Run cmd, printing its combined stdout+stderr live (line by line, as
+        it's produced) while also collecting it -- so a long snakemake run
+        shows progress in the terminal as it happens, instead of going silent
+        until the whole thing finishes, but the LockException check below can
+        still inspect the full text afterward."""
+        proc = subprocess.Popen(
+            cmd, cwd=str(pypsa_eur_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        lines = []
+        for line in proc.stdout:
+            print(line, end="")
+            lines.append(line)
+        proc.wait()
+        return proc.returncode, "".join(lines)
+
+    returncode, output = _stream(cmd)
+    if returncode != 0 and "LockException" in output:
         # Same recovery this project needed by hand during development,
         # after a killed process left a stale lock behind.
         logger.warning("Stale Snakemake lock detected -- unlocking and retrying once")
         subprocess.run(["pixi", "run", "snakemake", "--unlock"], cwd=str(pypsa_eur_dir), check=True)
-        result = subprocess.run(cmd, cwd=str(pypsa_eur_dir))
-        if result.returncode != 0:
+        returncode, _ = _stream(cmd)
+        if returncode != 0:
             raise SystemExit("snakemake failed again after --unlock -- see its own output above.")
-    elif result.returncode != 0:
-        sys.stderr.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        raise SystemExit(f"snakemake failed (exit {result.returncode}) -- see its own output above.")
-    else:
-        logger.info(result.stdout[-4000:])  # tail -- the full log is long
+    elif returncode != 0:
+        raise SystemExit(f"snakemake failed (exit {returncode}) -- see its own output above.")
 
 
 def solved_network_path(pypsa_eur_dir: Path) -> Path:
-    return pypsa_eur_dir / "results" / RUN_NAME / "networks" / f"base_s_{CLUSTERS}_elec_{OPTS}.nc"
+    return pypsa_eur_dir / "results" / _run_name() / "networks" / f"base_s_{CLUSTERS}_elec_{OPTS}.nc"
 
 
-def build_model(pypsa_eur_dir: Path, cores: int, resolution_elec: str, force_config: bool) -> Path:
+def build_model(pypsa_eur_dir: Path, cores: int, force_config: bool) -> Path:
     """Provision + solve in one call -- the single entry point a caller
     (run_pipeline.py's own aggregation, or this module's own CLI) needs for
     phase 1. Returns the solved network's path (see solved_network_path);
@@ -149,7 +169,7 @@ def build_model(pypsa_eur_dir: Path, cores: int, resolution_elec: str, force_con
     """
     ensure_pypsa_eur_checkout(pypsa_eur_dir)
     ensure_pixi_env(pypsa_eur_dir)
-    deploy_config(pypsa_eur_dir, resolution_elec, force_config)
+    deploy_config(pypsa_eur_dir, force_config)
     run_snakemake(pypsa_eur_dir, cores)
     return solved_network_path(pypsa_eur_dir)
 
@@ -162,11 +182,10 @@ def main() -> None:
              f"Defaults to a sibling of this repo (default: {DEFAULT_PYPSA_EUR_DIR}).",
     )
     parser.add_argument("--cores", type=int, default=8, help="Cores for pypsa-eur's own snakemake run")
-    parser.add_argument("--resolution-elec", type=str, default="24h", help="Snapshot resampling for the config template")
     parser.add_argument("--force-config", action="store_true", default=False, help="Overwrite an existing config/config.yaml")
     args = parser.parse_args()
 
-    network_path = build_model(args.pypsa_eur_dir, args.cores, args.resolution_elec, args.force_config)
+    network_path = build_model(args.pypsa_eur_dir, args.cores, args.force_config)
     logger.info("Solved network: %s", network_path)
 
 
