@@ -58,6 +58,7 @@ import hashlib
 import json
 import logging
 import pickle
+import time
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -238,27 +239,33 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
     """
     keys = list(dimensions.keys())
     optimal_fn = Path(output_dir) / "optimal.nc"
+    # Same idea as mga_furthest_result_{key}.log/mga_closest_result_{key}.log
+    # (see _solver_kwargs_with_log) -- optimal.nc's own solve gets its own
+    # log file too, right next to it.
+    log_path = Path(output_dir) / "optimal.log"
 
     def solve_optimal() -> np.ndarray:
         if optimal_fn.exists():
             cached_coordinates = _read_meta(optimal_fn)["coordinates"]
             return np.array([cached_coordinates[k] for k in keys])
 
+        call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         m = n.optimize.create_model(include_objective_constant=True)
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = f"Solve to optimality failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
         _log_solve(m, status, condition, "optimal")
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         obj = n.statistics.capex().sum() + n.statistics.opex().sum()
+        _append_coordinates_to_log(log_path, keys, point)
 
         for key, value in zip(keys, point):
             m.add_constraints(
                 n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == float(value),
                 name=f"coord_{key}",
             )
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = f"Re-solve at pinned optimal coordinates failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
@@ -860,6 +867,7 @@ def _build_closest_point_solver(
     def solve_one(
         target_row: np.ndarray, log_path: Path | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
+        solve_start = time.perf_counter()
         call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
@@ -883,6 +891,7 @@ def _build_closest_point_solver(
         normal = np.array([float(resid_constrs[key].dual) for key in keys]) / _dual_scale
 
         if not resolve_main_objective:
+            logger.info("closest-point solve time: %.3fs", time.perf_counter() - solve_start)
             return point, normal, None, n
 
         pin_scales = {}
@@ -906,6 +915,7 @@ def _build_closest_point_solver(
         add_budget_constraint()
         m.objective = residual_obj
 
+        logger.info("closest-point solve time: %.3fs", time.perf_counter() - solve_start)
         return point, normal, duals, n
 
     return solve_one
@@ -1086,6 +1096,8 @@ def make_closest_point_fn(
             t = target_2d[0]
             key = encode_cache_key(t) if output_dir is not None else None
             log_path = Path(output_dir) / f"mga_closest_result_{key}.log" if output_dir is not None else None
+            if log_path is not None:
+                logger.info("closest-point target given: solving, log at %s", log_path.name)
             point, normal, duals, n_result = solve_one(t, log_path)
             if output_dir is not None or on_solve is not None:
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()

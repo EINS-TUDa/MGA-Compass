@@ -54,6 +54,55 @@ def gaps(outer_vertices: np.ndarray, closest_points: np.ndarray, norm: Norm) -> 
     return np.linalg.norm(diff, axis=1)
 
 
+def select_by_min_angle(points: np.ndarray, n: int, min_angle_deg: float) -> np.ndarray:
+    """Greedily select up to `n` of `points` (as vectors from the origin,
+    walked in the given order -- e.g.
+    `CddMethod.find_trial_points_above_tol`'s own descending-gap order),
+    keeping a point only if its angle to every already-selected point
+    exceeds `min_angle_deg` -- a diversity filter so a batch of parallel
+    candidates doesn't cluster in nearly the same direction. Greedy, not
+    globally optimal: which points end up selected can depend on the
+    input order, e.g. a point skipped for being too close to an
+    earlier-selected one might otherwise have been kept had it come
+    first.
+
+    A point too close to the origin to have a well-defined direction
+    (norm below `1e-12`) is skipped outright, same as if it had failed the
+    angle check against every other point.
+
+    :param points: `(m, k)` candidate points, in priority order.
+    :param n: Maximum number of points to select.
+    :param min_angle_deg: Minimum required angle, in degrees, between
+        every pair of selected points.
+    :returns: `(p, k)` array of the selected points, `p <= min(n,
+        len(points))`, in their original relative order.
+    :raises ValueError: If `min_angle_deg` is not in `[0, 180]`.
+    """
+    if not 0.0 <= min_angle_deg <= 180.0:
+        raise ValueError(f"min_angle_deg must be in [0, 180], got {min_angle_deg!r}")
+    points = np.asarray(points, dtype=float)
+    if len(points) == 0:
+        return points
+
+    selected = []
+    selected_norms = []
+    for p in points:
+        if len(selected) >= n:
+            break
+        p_norm = float(np.linalg.norm(p))
+        if p_norm < 1e-12:
+            continue
+        too_close = any(
+            np.degrees(np.arccos(np.clip(np.dot(p, s) / (p_norm * s_norm), -1.0, 1.0))) <= min_angle_deg
+            for s, s_norm in zip(selected, selected_norms)
+        )
+        if not too_close:
+            selected.append(p)
+            selected_norms.append(p_norm)
+
+    return np.array(selected) if selected else np.empty((0, points.shape[1]))
+
+
 def linearized_objective_cut(
     x0: np.ndarray, obj_value: float, duals: np.ndarray, obj_optimal: float, slack: float, atol: float = 1e-9,
 ) -> Halfspace | None:

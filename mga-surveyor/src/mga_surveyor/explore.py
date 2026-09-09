@@ -52,6 +52,7 @@ def drive(
     max_iter: int | None, tol: float, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
     gap_scale: float = 1.0, gap_unit: str = "",
+    pool_num: int = 1, min_angle_deg: float = 0.0,
 ) -> list[dict]:
     """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
     point, and `extra_points`/`extra_halfspaces` if given -- all together
@@ -85,17 +86,50 @@ def drive(
     values. Lets a caller display the gap however it originally expressed
     `tol` (e.g. as a percentage) instead of `drive`'s own internal units.
 
-    Returns a history list of dicts, one per iteration, with keys "iter",
-    "gap", "trial_point", "new_point", "cut_added", "trial_point_time" (
-    seconds spent inside this iteration's own `method.find_trial_point()`
-    call -- the worst-point search that decides the next point to query,
-    logged since it's the one part of each iteration whose cost scales
-    with the method's own accumulated state, e.g. CddMethod's growing
-    outer_halfspaces, unlike closest_point's cost
-    which is external to `drive` itself). If `max_iter` is exhausted before
-    `gap < tol`, logs a warning (the return value itself doesn't flag this
-    -- check `history[-1]["gap"]` against `tol`, or the caller's own
+    Returns a history list of dicts, one per POINT processed (see
+    `pool_num` below for when that can be more than one per loop
+    iteration), with keys "iter", "gap", "trial_point", "new_point",
+    "cut_added", "trial_point_time" (seconds spent inside this iteration's
+    own worst-point search -- the one part of each iteration whose cost
+    scales with the method's own accumulated state, e.g. CddMethod's
+    growing outer_halfspaces, unlike closest_point's cost which is
+    external to `drive` itself; attributed to the first point of a
+    multi-point iteration, `0.0` for the rest of that same iteration, so
+    summing it across `history` still gives the true total search-time
+    cost). If `max_iter` is exhausted before `gap < tol`, logs a warning
+    (the return value itself doesn't flag this -- check
+    `history[-1]["gap"]` against `tol`, or the caller's own
     `method.max_gap()`, to detect it programmatically).
+
+    `pool_num`/`min_angle_deg` (default `1`/`0.0`, i.e. today's exact
+    single-target behavior -- nothing changes for an existing caller that
+    doesn't pass these): when `pool_num > 1` AND `method` actually
+    supports it (checked via `hasattr` -- currently only
+    `CddMethod.find_pool_trial_points`; anything else, `BilevelMethod`
+    included, silently keeps the original single-target path), each
+    iteration finds up to `pool_num` diverse, still-unconverged candidate
+    trial points at once instead of just the single worst one, and solves
+    all of them in one batched `closest_point` call -- exploiting
+    `closest_point`'s own existing batch/parallel support (see
+    `pypsa_ext.make_closest_point_fn`) instead of the strictly
+    one-at-a-time solves the sequential path is limited to.
+
+    No extra reconciliation is needed when several candidates land in one
+    round: each one's own `(point, normal)` is an independently valid
+    supporting halfspace of the TRUE region (it comes straight from that
+    candidate's own `closest_point` query against the real system, never
+    from the outer polytope's own current state) -- intersecting
+    halfspaces is commutative/associative, so folding in several at once
+    from one round (all chosen against the same, necessarily slightly
+    stale, pre-round snapshot) is exactly as correct as adding them one at
+    a time would have been. It just isn't necessarily as efficient: a
+    later candidate in the round might not still have been the worst
+    point had the earlier ones already been folded in first -- an
+    exploration-strategy tradeoff, not a correctness one. `min_angle_deg`
+    (passed straight to `find_pool_trial_points`) is the main lever
+    against that: keeping a round's candidates spread apart in direction
+    makes one candidate's cut unlikely to make another one in the same
+    round redundant.
     """
     if verbose:
         logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
@@ -105,6 +139,13 @@ def drive(
     initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
     method.bootstrap(initial_points, initial_halfspaces)
 
+    use_pool = pool_num > 1 and hasattr(method, "find_pool_trial_points")
+    if pool_num > 1 and not use_pool and verbose:
+        logger.info(
+            "[drive] pool_num=%d requested, but %s has no find_pool_trial_points -- "
+            "falling back to the single-target path", pool_num, type(method).__name__,
+        )
+
     history = []
     last_gap = float("nan")
     if verbose:
@@ -112,6 +153,45 @@ def drive(
     iters = itertools.count() if max_iter is None else range(max_iter)
     for it in iters:
         trial_point_start = time.perf_counter()
+        if use_pool:
+            trial_points, trial_gaps = method.find_pool_trial_points(pool_num, tol, min_angle_deg)
+            trial_point_time = time.perf_counter() - trial_point_start
+            last_gap = float(trial_gaps[0]) if len(trial_gaps) else 0.0
+            if len(trial_points) == 0:
+                if verbose:
+                    logger.info(
+                        "[drive] converged at iter %d: gap=%.4f%s (find_pool_trial_points: %.3fs)",
+                        it, last_gap * gap_scale, gap_unit, trial_point_time,
+                    )
+                break
+
+            new_points, normals = closest_point(trial_points)
+            new_points = np.atleast_2d(np.asarray(new_points, dtype=float))
+            normals = np.atleast_2d(np.asarray(normals, dtype=float))
+
+            # No extra reconciliation needed across this round's own
+            # candidates -- see this function's own docstring for why
+            # each one's (point, normal) is independently valid regardless
+            # of the others.
+            for i in range(len(trial_points)):
+                trial_point, new_point, normal = trial_points[i], new_points[i], normals[i]
+                method.add_point(new_point)
+                cut_added = float(gaps(new_point[None, :], trial_point[None, :], norm=method.norm)[0]) > tol
+                if cut_added:
+                    method.add_cut(normal, new_point)
+                history.append({
+                    "iter": it + 1, "gap": float(trial_gaps[i]), "trial_point": trial_point,
+                    "new_point": new_point, "cut_added": cut_added,
+                    "trial_point_time": trial_point_time if i == 0 else 0.0,
+                })
+            if verbose:
+                n_cuts = sum(h["cut_added"] for h in history[-len(trial_points):])
+                logger.info(
+                    "[drive] iter %4d: gap=%.4f%s pool_size=%d cuts_added=%d (find_pool_trial_points: %.3fs)",
+                    it + 1, last_gap * gap_scale, gap_unit, len(trial_points), n_cuts, trial_point_time,
+                )
+            continue
+
         trial_point, gap = method.find_trial_point()
         trial_point_time = time.perf_counter() - trial_point_start
         last_gap = gap

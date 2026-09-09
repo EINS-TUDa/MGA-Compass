@@ -15,6 +15,7 @@ Run with: uv run python scripts/generate_dataset.py
 import argparse
 import logging
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -65,10 +66,30 @@ def _add_file_logging(output_dir: Path) -> None:
     """Mirror everything logging.basicConfig above sends to the console into
     output_dir/run.log too -- same handler setup (level, format), just a
     second destination next to optimal.nc, so a run's full log survives
-    after the terminal scrolls away."""
+    after the terminal scrolls away. Appends (mode="a"), not overwrites --
+    re-running against the same output_dir (e.g. a restart that resumes
+    from cached .nc files) keeps every prior run's log instead of losing
+    it."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(output_dir / "run.log", mode="w")
+    file_handler = logging.FileHandler(output_dir / "run.log", mode="a")
     file_handler.setFormatter(logging.Formatter("%(message)s"))
+    # gurobipy has its own Python-logging integration, entirely separate from
+    # its native LogToConsole/OutputFlag parameters (see _detect_solver) --
+    # once any logging.basicConfig() is active (as above), gurobipy mirrors
+    # every console line through logging.getLogger("gurobipy").info(...) too,
+    # which propagates to every handler on the root logger: both the console
+    # (basicConfig's own StreamHandler, where it's the only live progress
+    # signal during a solve -- LogFile is buffered and only flushes on that
+    # solve's own completion) and, unwanted, this FileHandler. Deliberately
+    # not silenced via logging.getLogger("gurobipy").setLevel(...) -- that
+    # would suppress it on the console too. Filtering only this handler
+    # keeps gurobipy's console visibility intact and run.log clean.
+    file_handler.addFilter(lambda record: record.name != "gurobipy")
+    # Written directly to the file (not through the logger), so it lands only
+    # in run.log, not the console -- a separator marking where a new run
+    # starts, since mode="a" above means this file can span several runs.
+    file_handler.stream.write(f"\n\n{'=' * 80}\nRun started: {datetime.now().isoformat(timespec='seconds')}\n{'=' * 80}\n\n")
+    file_handler.stream.flush()
     logging.getLogger().addHandler(file_handler)
 
 
@@ -81,12 +102,18 @@ def _detect_solver() -> tuple[str, dict]:
         return HIGHS_FALLBACK
 
     try:
-        # OutputFlag must be set on the env (created before the model) to
-        # silence the license banner and "Read LP format..." messages, not
-        # just the solve log — models inherit it from there, so no separate
-        # top-level key is needed.
-        with gurobipy.Env(params={"OutputFlag": 0}):
-            return "gurobi", {"env": {"OutputFlag": 0}}
+        # LogToConsole (not OutputFlag) must be set on the env (created before
+        # the model) to silence per-solve console spam — models inherit it
+        # from there, so no separate top-level key is needed. OutputFlag is a
+        # master switch: 0 would suppress output everywhere, including each
+        # solve's own per-call LogFile (see _solver_kwargs_with_log), leaving
+        # those files with nothing but their one-time "logging started"
+        # banner. LogToConsole=0 only silences the console, so LogFile still
+        # captures the real trace. The env-creation license banner itself
+        # isn't gated by either -- it still prints once per worker process,
+        # regardless.
+        with gurobipy.Env(params={"LogToConsole": 0}):
+            return "gurobi", {"env": {"LogToConsole": 0}}
     except gurobipy.GurobiError:
         return HIGHS_FALLBACK
 

@@ -92,7 +92,7 @@ check before any cut from the main loop
 from was already feasible (same test `explore.drive` uses for its own
 geometric cut).
 """
-from .common import VALID_NORMS, gaps, linearized_objective_cut
+from .common import VALID_NORMS, gaps, select_by_min_angle, linearized_objective_cut
 from .gurobi_projection import closest_point_on_hull
 # Both backend modules name their projection function `closest_point_on_hull`
 # (module-qualified, e.g. `gurobi_projection.closest_point_on_hull` vs
@@ -118,7 +118,8 @@ from .pypsa_ext import (
 )
 
 __all__ = [
-    "VALID_NORMS", "closest_point_on_hull", "gaps", "linearized_objective_cut",
+    "VALID_NORMS", "closest_point_on_hull", "gaps", "select_by_min_angle",
+    "linearized_objective_cut",
     "closest_point_on_hull_highs", "VALID_NORMS_HIGHS",
     "Method", "BilevelMethod", "solve_farthest_outer_point_milp",
     "CddMethod", "cdd_vertices_of", "drive",

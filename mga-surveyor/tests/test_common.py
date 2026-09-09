@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from mga_surveyor.common import linearized_objective_cut
+from mga_surveyor.common import linearized_objective_cut, select_by_min_angle
 
 
 def test_linearized_objective_cut_collapses_to_x0_when_no_slack_left():
@@ -118,3 +119,62 @@ def test_linearized_objective_cut_avoids_extreme_points_under_mismatched_duals_s
     np.testing.assert_allclose(point[0], x0[0])  # untouched -- not the tiny-denominator axis
     np.testing.assert_allclose(point[1], x0[1] + 200.0 / 100.0)  # shifted along the dominant axis only
     assert abs(point[1] - x0[1]) < 1e3  # nowhere near the ~1e8-scale blowup the old formula gave here
+
+
+def _rot2d(deg: float) -> np.ndarray:
+    r = np.radians(deg)
+    return np.array([np.cos(r), np.sin(r)])
+
+
+def test_select_by_min_angle_skips_points_too_close_to_an_already_selected_one():
+    """0/30/90/180 degrees, threshold 45: 30 is too close to 0 (30 <= 45)
+    and gets skipped; 90 and 180 both clear 45 degrees from every point
+    kept so far and are kept."""
+    points = np.array([_rot2d(0), _rot2d(30), _rot2d(90), _rot2d(180)])
+
+    selected = select_by_min_angle(points, n=4, min_angle_deg=45.0)
+
+    assert len(selected) == 3
+    np.testing.assert_allclose(selected[0], _rot2d(0), atol=1e-9)
+    np.testing.assert_allclose(selected[1], _rot2d(90), atol=1e-9)
+    np.testing.assert_allclose(selected[2], _rot2d(180), atol=1e-9)
+
+
+def test_select_by_min_angle_caps_at_n_even_when_more_would_qualify():
+    points = np.array([_rot2d(0), _rot2d(90), _rot2d(180), _rot2d(270)])
+    selected = select_by_min_angle(points, n=2, min_angle_deg=45.0)
+    assert len(selected) == 2
+
+
+def test_select_by_min_angle_is_greedy_not_globally_optimal():
+    """Walking order matters: with 0/44/90 and threshold 45, starting from
+    0 skips 44 (44 <= 45) but keeps 90 (90 > 45) -- even though 44 and 90
+    are themselves more than 45 degrees apart and could have coexisted had
+    0 not been picked first."""
+    points = np.array([_rot2d(0), _rot2d(44), _rot2d(90)])
+    selected = select_by_min_angle(points, n=3, min_angle_deg=45.0)
+    assert len(selected) == 2
+    np.testing.assert_allclose(selected[0], _rot2d(0), atol=1e-9)
+    np.testing.assert_allclose(selected[1], _rot2d(90), atol=1e-9)
+
+
+def test_select_by_min_angle_skips_zero_vectors():
+    """A point with no well-defined direction (norm ~0) is skipped
+    outright, not treated as compatible with everything."""
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    selected = select_by_min_angle(points, n=3, min_angle_deg=45.0)
+    assert len(selected) == 2
+    np.testing.assert_allclose(selected, [[1.0, 0.0], [0.0, 1.0]])
+
+
+def test_select_by_min_angle_empty_input_returns_empty_output():
+    selected = select_by_min_angle(np.empty((0, 3)), n=2, min_angle_deg=10.0)
+    assert selected.shape == (0, 3)
+
+
+def test_select_by_min_angle_rejects_out_of_range_threshold():
+    points = np.array([[1.0, 0.0]])
+    with pytest.raises(ValueError, match="min_angle_deg"):
+        select_by_min_angle(points, n=1, min_angle_deg=200.0)
+    with pytest.raises(ValueError, match="min_angle_deg"):
+        select_by_min_angle(points, n=1, min_angle_deg=-1.0)

@@ -52,7 +52,7 @@ from typing import Literal, Protocol
 
 import numpy as np
 
-from ..common import Halfspace, Norm, gaps, check_norm
+from ..common import Halfspace, Norm, gaps, check_norm, select_by_min_angle
 from ..gurobi_projection import closest_point_on_hull
 from .base import Method
 
@@ -434,6 +434,92 @@ class CddMethod(Method):
             return None, 0.0
         i = int(np.argmax(self._gap))
         return self._outer_vertices[i], float(self._gap[i])
+
+    def find_trial_points_above_tol(self, tol: float) -> tuple[np.ndarray, np.ndarray]:
+        """Like :meth:`find_trial_point`, but returns every outer vertex
+        whose gap is at least `tol` (not just the single worst one),
+        together with each one's own gap -- the first stage of solving
+        several candidate closest-point targets in parallel instead of
+        just one per iteration (see :mod:`mga_surveyor.explore`'s own
+        docstring for why the single-target version can't be batched
+        as-is: each iteration's target currently depends on the previous
+        one's result).
+
+        `tol` uses the same cutoff `explore.drive`'s own main loop applies
+        before ever dispatching a solve for the single worst point:
+        `gap < tol` means converged there, so `gap >= tol` (not the
+        stricter `gap > tol`) is the matching "still worth solving"
+        condition here -- a candidate right at `tol` exactly is still one
+        `explore.drive` itself would have dispatched a solve for.
+
+        Not (yet) part of the `Method` interface -- `explore.drive` still
+        only ever calls `find_trial_point`. `BilevelMethod` has no
+        analogous notion of "every other vertex above tol" to offer (its
+        MILP reformulation finds the single worst point directly, without
+        ever enumerating a vertex set), so this lives on `CddMethod` alone
+        for now rather than on the shared base class.
+
+        :param tol: The same convergence tolerance `explore.drive` itself
+            is called with. No default -- see `explore.drive`'s own
+            docstring on why it takes no default either.
+        :returns: `(points, gaps)`, sorted by gap descending -- index 0 is
+            the same point/gap `find_trial_point` itself would return.
+            Both empty if the outer polytope has no vertices yet, or none
+            are at least `tol`.
+        """
+        self._refresh()
+        if len(self._outer_vertices) == 0:
+            return np.empty((0, self.k)), np.empty(0)
+        above_tol = np.where(self._gap >= tol)[0]
+        if len(above_tol) == 0:
+            return np.empty((0, self.k)), np.empty(0)
+        idx = above_tol[np.argsort(self._gap[above_tol])[::-1]]
+        return self._outer_vertices[idx], self._gap[idx]
+
+    def find_pool_trial_points(
+        self, pool_num: int, tol: float, min_angle_deg: float = 0.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Batched stand-in for :meth:`find_trial_point`: up to `pool_num`
+        diverse, above-`tol` candidate trial points to solve in parallel
+        instead of just the single worst one. Pipes
+        :meth:`find_trial_points_above_tol` through
+        :func:`~mga_surveyor.common.select_by_min_angle`, which greedily
+        keeps up to `pool_num` of them, skipping any candidate whose angle
+        to an already-selected one is too small (`min_angle_deg`) -- so a
+        batch doesn't cluster in nearly the same direction.
+
+        Not (yet) wired into `explore.drive` -- that still only ever calls
+        `find_trial_point`. This exists so an experimental batched driving
+        loop has something to call; the sequential-by-construction
+        original is untouched.
+
+        :param pool_num: Upper bound on how many points are returned --
+            meant to match however many parallel workers will actually
+            solve them.
+        :param tol: Passed straight to `find_trial_points_above_tol`. No
+            default, for the same reason it has none there.
+        :param min_angle_deg: Passed straight to `select_by_min_angle`
+            (default `0.0`: that step keeps everything, since any two
+            distinct directions have an angle greater than 0).
+        :returns: `(points, gaps)`, gaps aligned with the selected points,
+            both empty if `find_trial_points_above_tol` itself returns
+            nothing.
+        """
+        above_tol_points, above_tol_gaps = self.find_trial_points_above_tol(tol)
+        if len(above_tol_gaps) == 0:
+            return above_tol_points, above_tol_gaps
+
+        selected_points = select_by_min_angle(above_tol_points, pool_num, min_angle_deg)
+
+        # select_by_min_angle only returns points, not their gaps -- recover them
+        # by exact match against above_tol_points/above_tol_gaps. Safe: every
+        # selected point is a row copied verbatim from above_tol_points (no
+        # arithmetic performed on it), so this is an exact bit-for-bit match,
+        # not an approximate lookup.
+        gap_by_point = {tuple(p): g for p, g in zip(above_tol_points, above_tol_gaps)}
+        selected_gaps = np.array([gap_by_point[tuple(p)] for p in selected_points])
+
+        return selected_points, selected_gaps
 
     def max_gap(self) -> float:
         self._refresh()
