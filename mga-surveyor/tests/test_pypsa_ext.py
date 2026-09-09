@@ -14,6 +14,7 @@ from mga_surveyor import (
     make_oracle_fns,
     drive as mga_surveyor_drive,
 )
+from mga_surveyor.pypsa_ext import _PIN_TOLERANCE
 
 DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},
@@ -93,10 +94,17 @@ def test_make_furthest_point_fn_resolve_main_objective_true_returns_duals(tmp_pa
     assert normals.shape == (1, 2)
     np.testing.assert_allclose(normals[0], direction)  # normal is just the query direction
 
-    # network ends up re-solved exactly at the returned coordinates (single-
-    # direction path mutates n directly, same as the old optimize_mga_in_direction).
-    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(points[0, 0], abs=1e-4)
-    assert n.generators.at["solar", "p_nom_opt"] == pytest.approx(points[0, 1], abs=1e-4)
+    # network ends up re-solved close to (not exactly at) the returned
+    # coordinates -- a pinned coordinate is a _PIN_TOLERANCE-relative band,
+    # not an exact equality (see pypsa_ext's own docstring for why: an exact
+    # pin reliably broke Gurobi's barrier solve on a real network's H2
+    # dimension), so the pinned-duals resolve is free to land anywhere in
+    # that band, and an unpinned dimension (solar here) can shift a bit
+    # further still as a knock-on effect. 20x _PIN_TOLERANCE gives headroom
+    # for that indirect shift while still catching a real regression.
+    rel_tol = _PIN_TOLERANCE * 20
+    assert n.generators.at["wind", "p_nom_opt"] == pytest.approx(points[0, 0], rel=rel_tol)
+    assert n.generators.at["solar", "p_nom_opt"] == pytest.approx(points[0, 1], rel=rel_tol)
 
     # duals: cached in the exported .nc file's meta, not the return value.
     key = encode_cache_key(direction)
