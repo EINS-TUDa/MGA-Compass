@@ -1307,6 +1307,8 @@ def generate_mga_files(
     verbose: bool = True,
     normalize: bool = True,
     use_objective_cuts: bool = True,
+    pool_num: int = 1,
+    min_angle_deg: float = 0.0,
     **kwargs: Any,
 ) -> None:
     """Run a `CddMethod` (exact `'gmp'` arithmetic) per slack level (`explore.drive`, up to
@@ -1314,6 +1316,16 @@ def generate_mga_files(
     network `n`, writing every result to `.nc` files under `output_dir`.
     Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
     afterward for that.
+
+    `pool_num`/`min_angle_deg` (default `1`/`0.0`, i.e. today's exact
+    single-target behavior -- nothing changes unless you pass `pool_num >
+    1`): passed straight through to each slack level's own `explore.drive`
+    call. When `pool_num > 1`, every iteration solves up to `pool_num`
+    diverse candidate closest-points at once (via `closest_point`'s own
+    batch/parallel support, spread across `max_parallel` workers) instead
+    of just the single worst one -- see `explore.drive`'s own docstring
+    for the full picture, including why no extra reconciliation is needed
+    across a round's own results.
 
     `tol`/`max_iter` are each either a single value (used for every slack
     level) or a sequence with one entry per `slack_levels` (raises if the
@@ -1612,6 +1624,7 @@ def generate_mga_files(
             tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
             extra_points=extra_points, extra_halfspaces=extra_halfspaces,
             gap_scale=gap_scale, gap_unit=gap_unit,
+            pool_num=pool_num, min_angle_deg=min_angle_deg,
         )
         final_gap = method.max_gap()
         if final_gap > slack_tol:

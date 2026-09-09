@@ -165,6 +165,12 @@ def drive(
                     )
                 break
 
+            if verbose:
+                logger.info(
+                    "[drive] iter %4d: gap=%.4f%s pool_size=%d -- solving (find_pool_trial_points: %.3fs)",
+                    it + 1, last_gap * gap_scale, gap_unit, len(trial_points), trial_point_time,
+                )
+
             new_points, normals = closest_point(trial_points)
             new_points = np.atleast_2d(np.asarray(new_points, dtype=float))
             normals = np.atleast_2d(np.asarray(normals, dtype=float))
@@ -187,8 +193,7 @@ def drive(
             if verbose:
                 n_cuts = sum(h["cut_added"] for h in history[-len(trial_points):])
                 logger.info(
-                    "[drive] iter %4d: gap=%.4f%s pool_size=%d cuts_added=%d (find_pool_trial_points: %.3fs)",
-                    it + 1, last_gap * gap_scale, gap_unit, len(trial_points), n_cuts, trial_point_time,
+                    "[drive] iter %4d: done -- cuts_added=%d/%d", it + 1, n_cuts, len(trial_points),
                 )
             continue
 
