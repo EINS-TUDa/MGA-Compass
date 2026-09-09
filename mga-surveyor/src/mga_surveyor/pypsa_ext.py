@@ -59,6 +59,7 @@ import json
 import logging
 import pickle
 import time
+import weakref
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1004,6 +1005,20 @@ def _cache_closest_point_result(
     logger.info("saved to file: %s", out_fn.name)
 
 
+def _terminate_pool_box(pool_box: dict) -> None:
+    """weakref.finalize callback for make_closest_point_fn's own batch-path
+    pool (see its own docstring for why it's kept alive across calls
+    instead of recreated every time) -- takes the mutable box, not the
+    pool itself or anything referencing the closest_point closure being
+    finalized, since a finalize callback holding a strong reference back
+    to its own target would keep it alive forever, defeating the point.
+    """
+    pool = pool_box.get("pool")
+    if pool is not None:
+        pool.terminate()
+        pool_box["pool"] = None
+
+
 def make_closest_point_fn(
     n: Network,
     dimensions: dict,
@@ -1078,15 +1093,53 @@ def make_closest_point_fn(
         weights,
     )
 
+    # Lazily built on the first BATCH call (never for single-target calls,
+    # which reuse solve_one above and never need a Pool at all) and reused
+    # for every later batch call from this same closest_point, instead of
+    # recreated per call -- a fresh Pool means a fresh
+    # _init_closest_point_worker per worker, i.e. a fresh
+    # _build_closest_point_solver/create_model, which can dominate an
+    # actual solve's own cost. Since explore.drive's pool_num feature calls
+    # closest_point with a batch once per iteration, recreating the Pool
+    # every time would pay that full model-build cost on every single
+    # round instead of once for the whole run. Grown (old pool terminated,
+    # new one started) if a later call needs more workers than it was
+    # originally sized for -- e.g. a smaller final round doesn't shrink
+    # it, but pool_num changing between calls could grow it. Terminated by
+    # _terminate_pool_box via weakref.finalize below, tied to
+    # closest_point's own lifetime, since ClosestPointFn has no explicit
+    # "done with this" hook of its own for an ordinary caller to use.
+    pool_box: dict[str, Any] = {"pool": None, "n_workers": 0}
+
+    def get_batch_pool(n_workers: int):
+        pool = pool_box["pool"]
+        if pool is not None and pool_box["n_workers"] < n_workers:
+            pool.terminate()
+            pool = None
+        if pool is None:
+            pool = get_context("spawn").Pool(
+                processes=n_workers,
+                initializer=_init_closest_point_worker,
+                initargs=(
+                    pristine_n, dimensions, norm, slack, snapshots,
+                    multi_investment_periods, model_kwargs, kwargs, resolve_main_objective, weights,
+                ),
+            )
+            pool_box["pool"] = pool
+            pool_box["n_workers"] = n_workers
+        return pool
+
     def closest_point(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Shape-preserving: a `(k,)` target returns one `(point, normal)`
         pair; an `(n_targets, k)` batch returns `(n_targets, k)` arrays.
         Always solves -- no existing `output_dir` file is ever read back.
 
         Single target: solved in-process against the persistent model
-        built above. Batch: one `pool.starmap` task per target, spread
-        across `min(max_parallel, n_targets)` worker processes, each
-        building its own solver once.
+        built above. Batch: one task per target, spread across
+        `min(max_parallel, n_targets)` worker processes -- a persistent
+        Pool (see `get_batch_pool` above), each worker building its own
+        solver once for as long as this `closest_point` itself lives, not
+        once per batch call.
         """
         target = np.asarray(target, dtype=float)
         single = target.ndim == 1
@@ -1110,44 +1163,44 @@ def make_closest_point_fn(
             # Passes pristine_n, not n's current state -- n may already be
             # mutated by an earlier single-target call above.
             n_workers = min(max_parallel, len(target_2d))
-            with get_context("spawn").Pool(
-                processes=n_workers,
-                initializer=_init_closest_point_worker,
-                initargs=(
-                    pristine_n, dimensions, norm, slack, snapshots,
-                    multi_investment_periods, model_kwargs, kwargs, resolve_main_objective, weights,
-                ),
-            ) as pool:
-                results = [None] * len(target_2d)
-                tasks = [
-                    (
-                        i, row,
-                        Path(output_dir) / f"mga_closest_result_{encode_cache_key(row)}.log"
-                        if output_dir is not None else None,
-                    )
-                    for i, row in enumerate(target_2d)
-                ]
-                try:
-                    # imap_unordered, not starmap -- see
-                    # _solve_furthest_point_direction's own docstring for why:
-                    # caches/reports each target's result as soon as ITS
-                    # worker finishes, not only after the whole batch is done.
-                    for i, point, normal, duals, n_result in pool.imap_unordered(
-                        _solve_closest_point_target, tasks,
-                    ):
-                        row = target_2d[i]
-                        if output_dir is not None or on_solve is not None:
-                            obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                        if output_dir is not None:
-                            key = encode_cache_key(row)
-                            _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, row)
-                        if on_solve is not None:
-                            on_solve(point, normal, obj, duals, row)
-                        results[i] = (point, normal)
-                except Exception:
-                    pool.terminate()
-                    pool.join()
-                    raise
+            pool = get_batch_pool(n_workers)
+            results = [None] * len(target_2d)
+            tasks = [
+                (
+                    i, row,
+                    Path(output_dir) / f"mga_closest_result_{encode_cache_key(row)}.log"
+                    if output_dir is not None else None,
+                )
+                for i, row in enumerate(target_2d)
+            ]
+            try:
+                # imap_unordered, not starmap -- see
+                # _solve_furthest_point_direction's own docstring for why:
+                # caches/reports each target's result as soon as ITS
+                # worker finishes, not only after the whole batch is done.
+                for i, point, normal, duals, n_result in pool.imap_unordered(
+                    _solve_closest_point_target, tasks,
+                ):
+                    row = target_2d[i]
+                    if output_dir is not None or on_solve is not None:
+                        obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                    if output_dir is not None:
+                        key = encode_cache_key(row)
+                        _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, row)
+                    if on_solve is not None:
+                        on_solve(point, normal, obj, duals, row)
+                    results[i] = (point, normal)
+            except Exception:
+                # Unlike the old per-call Pool, this one is meant to
+                # survive past this call -- but not in a possibly-broken
+                # state after an unhandled worker exception, so it's
+                # torn down here rather than kept for reuse. get_batch_pool
+                # builds a fresh one on the next call, same as if this had
+                # been the first call.
+                pool.terminate()
+                pool.join()
+                pool_box["pool"] = None
+                raise
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
@@ -1156,6 +1209,7 @@ def make_closest_point_fn(
             return points[0], normals[0]
         return points, normals
 
+    weakref.finalize(closest_point, _terminate_pool_box, pool_box)
     return closest_point
 
 
