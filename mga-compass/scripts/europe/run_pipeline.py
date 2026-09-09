@@ -57,16 +57,19 @@ def deploy_mga_script(pypsa_eur_dir: Path) -> Path:
 
 def run_mga_script(
     mga_script: Path, network_path: Path, output_dir: Path,
-    slack_levels: str, tol: float, max_iter: int, max_parallel: int,
+    slack_levels: str, tol: float, max_iter: int | None, max_parallel: int, quiet_solver: bool,
 ) -> None:
     cmd = [
         sys.executable, str(mga_script), str(network_path),
         "--output-dir", str(output_dir),
         "--slack-levels", slack_levels,
         "--tol", str(tol),
-        "--max-iter", str(max_iter),
         "--max-parallel", str(max_parallel),
     ]
+    if max_iter is not None:
+        cmd += ["--max-iter", str(max_iter)]
+    if quiet_solver:
+        cmd += ["--quiet-solver"]
     subprocess.run(cmd, check=True)
 
 
@@ -88,10 +91,17 @@ def main() -> None:
              "explicitly for every run.",
     )
     parser.add_argument(
-        "--max-iter", type=int, required=True,
-        help="Cap on drive() iterations per slack level -- no default, must be chosen explicitly.",
+        "--max-iter", type=int, default=None,
+        help="Cap on drive() iterations per slack level. Omit for no cap -- passed through to "
+             "run_custom_mga.py's own --max-iter, whose default (also None) is unlimited.",
     )
     parser.add_argument("--max-parallel", type=int, default=4)
+    parser.add_argument(
+        "--quiet-solver", action="store_true", default=False,
+        help="Passed through to run_custom_mga.py's own --quiet-solver -- suppresses the solver's "
+             "live progress log on the console (shown by default; each direction/target's own log "
+             "file under --output-dir only flushes once that solve finishes, not live).",
+    )
     parser.add_argument("--skip-solve", action="store_true", default=False, help="Skip phase 1 entirely (network already solved)")
     args = parser.parse_args()
 
@@ -108,6 +118,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_mga_script(
         mga_script, network_path, args.output_dir, args.slack_levels, args.tol, args.max_iter, args.max_parallel,
+        args.quiet_solver,
     )
 
 

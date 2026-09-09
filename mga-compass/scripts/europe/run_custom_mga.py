@@ -38,6 +38,32 @@ logging.getLogger("pypsa.optimization.optimize").setLevel(logging.WARNING)
 logging.getLogger("linopy.io").setLevel(logging.WARNING)
 logging.getLogger("linopy.model").setLevel(logging.WARNING)
 logging.getLogger("linopy.constants").setLevel(logging.WARNING)
+# gurobipy has its own Python-logging integration, entirely separate from
+# its native OutputFlag/LogToConsole parameters (see _GUROBI_TUNING) --
+# once *any* logging.basicConfig() is active (as above), gurobipy starts
+# emitting every console line via logging.getLogger("gurobipy").info(...)
+# too, which propagates to every handler on the root logger: both the
+# console (basicConfig's own StreamHandler) and, unwanted, the run.log
+# FileHandler added in main(). This is deliberately NOT silenced via
+# logging.getLogger("gurobipy").setLevel(...) -- that was tried and
+# reverted: it suppresses gurobipy's messages everywhere, including the
+# console, which is the *only* live progress signal available during a
+# solve (Gurobi's own LogFile is buffered and only flushes on that
+# solve's own completion/interruption -- confirmed by direct testing).
+# Losing that made an in-progress (if slow) solve look identical to a
+# genuinely frozen one. Instead, main() attaches a filter to the run.log
+# FileHandler specifically, excluding only records from the "gurobipy"
+# logger -- so gurobipy's console visibility survives untouched, and only
+# run.log stays clean.
+class _ExcludeLoggerFilter(logging.Filter):
+    def __init__(self, excluded_name: str) -> None:
+        super().__init__()
+        self.excluded_name = excluded_name
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name != self.excluded_name
+
+
 logger = logging.getLogger("run_custom_mga")
 
 #: Fixed MGA axes: (key, component, nominal attribute, plural attribute name)
@@ -55,15 +81,61 @@ DIMENSIONS_SPEC = [
 ]
 
 
-def _detect_solver() -> tuple[str, dict]:
-    highs_fallback = ("highs", {"output_flag": False})
+#: Same barrier-without-crossover tuning as pypsa-eur's own "gurobi-default"
+#: preset (config.default.yaml) -- this script builds/solves the network's
+#: optimum itself (make_optimality_fn's own two full solves) rather than
+#: reusing pypsa-eur's already-solved result, so without these it falls back
+#: to Gurobi's own defaults (crossover ON, no method pinned), which is
+#: markedly slower on a network this size than the settings that solved it
+#: in ~7 min inside pypsa-eur's pipeline.
+#: BarConvTol tightened to 1e-8 (Gurobi's own out-of-the-box default,
+#: confirmed via gurobipy -- pypsa-eur's own "gurobi-default" preset loosens
+#: it to 1e-5): with crossover off, a furthest/closest-point solve's
+#: returned coordinates are only an interior-point approximation, not an
+#: exact vertex -- that point then gets pinned as a (small-tolerance-band,
+#: not exact) constraint in the same solver's own pinned-duals resolve.
+#: LogToConsole=0 unconditionally: Gurobi's console mirror is pure noise at
+#: this scale (license banner, "Read LP format...", full barrier iteration
+#: log) and, when this process's own stdout is captured into run.log (e.g.
+#: a screen -L session or `> run.log 2>&1`), that noise ends up duplicated
+#: into the app-level log too. This is deliberately NOT done via
+#: OutputFlag=0 -- OutputFlag is Gurobi's master output switch, and setting
+#: it to 0 also suppresses LogFile, which is the one place this solve's
+#: full detail is supposed to end up (mga_surveyor.pypsa_ext's per-
+#: direction/target LogFile, written next to that solve's own .nc result).
+#: LogToConsole only silences the console mirror, leaving LogFile intact.
+_GUROBI_TUNING = {
+    "method": 2,
+    "crossover": 0,
+    "BarConvTol": 1.0e-08,
+    "Seed": 123,
+    "AggFill": 0,
+    "PreDual": 0,
+    "GURO_PAR_BARDENSETHRESH": 200,
+    "LogToConsole": 0,
+}
+
+
+def _detect_solver(verbose: bool = True) -> tuple[str, dict]:
+    """Gurobi's own console output is always off (see _GUROBI_TUNING's
+    LogToConsole=0) -- full solver detail goes only to each direction/
+    target's own LogFile, next to its .nc result; run.log stays limited to
+    this app's own summary logging (mga_surveyor.pypsa_ext's `_log_solve`:
+    status/condition per solve; explore.py's `drive`: gap per iteration).
+    `verbose` (`--quiet-solver` inverted) only still matters for the HiGHS
+    fallback, which has no per-direction LogFile of its own (
+    mga_surveyor.pypsa_ext's `_solver_kwargs_with_log` only wires LogFile
+    up for gurobi) -- there, its console output is the only detail
+    available at all, so `verbose=False` there means no detail whatsoever,
+    not "moved to a file" like it does for Gurobi."""
+    highs_fallback = ("highs", {"output_flag": verbose})
     try:
         import gurobipy
     except ImportError:
         return highs_fallback
     try:
-        with gurobipy.Env(params={"OutputFlag": 0}):
-            return "gurobi", {"env": {"OutputFlag": 0}}
+        with gurobipy.Env(params={}):
+            return "gurobi", {"env": {}, **_GUROBI_TUNING}
     except gurobipy.GurobiError:
         return highs_fallback
 
@@ -119,15 +191,29 @@ def main() -> None:
              "tol would let the largest-range dimension dominate convergence.",
     )
     parser.add_argument(
-        "--max-iter", type=int, required=True,
-        help="Cap on drive() iterations per slack level -- no default, must be chosen explicitly.",
+        "--max-iter", type=int, default=None,
+        help="Cap on drive() iterations per slack level. Omit for no cap (mga_surveyor.explore.drive's "
+             "own default: runs until convergence).",
     )
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--obj-label", type=str, default="system_cost")
+    parser.add_argument(
+        "--quiet-solver", action="store_true", default=False,
+        help="HiGHS fallback only -- suppresses its console progress log. No effect on Gurobi: its "
+             "console output is always off (see _GUROBI_TUNING's LogToConsole=0); full solver detail "
+             "goes only to each direction/target's own log file under --output-dir (see "
+             "mga_surveyor.pypsa_ext's LogFile support), not the console, and not run.log.",
+    )
     args = parser.parse_args()
 
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(args.output_dir / "run2.log")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    file_handler.addFilter(_ExcludeLoggerFilter("gurobipy"))
+    logging.getLogger().addHandler(file_handler)
+
     slack_levels = [float(s) for s in args.slack_levels.split(",")]
-    solver_name, solver_options = _detect_solver()
+    solver_name, solver_options = _detect_solver(verbose=not args.quiet_solver)
     logger.info("Solver: %s", solver_name)
 
     n = pypsa.Network(str(args.network))

@@ -98,6 +98,108 @@ def _log_solve(m: Any, status: str, condition: str, what: str) -> None:
     logger.info("%s solved: status=%s condition=%s objective=%.6e", what, status, condition, m.objective.value)
 
 
+def _solver_kwargs_with_log(kwargs: dict, log_path: Path | None) -> dict:
+    """`kwargs` unchanged if `log_path` is None or the active solver isn't
+    Gurobi (HiGHS's own log-file option name isn't handled here, to avoid
+    guessing wrong and silently breaking that fallback path) -- else a
+    shallow copy with `solver_options["LogFile"]` set to `log_path`, so one
+    solve writes its own log file (e.g. alongside its cached .nc result)
+    without mutating the shared `kwargs` dict every other call also uses.
+    Safe to call with the same `log_path` across multiple solves in a row
+    (Gurobi keeps appending to an already-open log file when `LogFile` is
+    set to the same path again) -- e.g. a furthest-point direction's
+    primary solve and its own pinned-duals resolve share one file.
+    """
+    if log_path is None or kwargs.get("solver_name") != "gurobi":
+        return kwargs
+    # Gurobi's own LogFile param doesn't create missing directories --
+    # output_dir/slack_X/ may not exist yet (its own mkdir is otherwise
+    # deferred until a result is cached, after the solve), so this would
+    # otherwise fail with GurobiError("Unable to write file") the first
+    # time a slack level's own results directory hasn't been created yet.
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    solver_options = {**kwargs.get("solver_options", {}), "LogFile": str(log_path)}
+    return {**kwargs, "solver_options": solver_options}
+
+
+def _append_coordinates_to_log(log_path: Path | None, keys: list, point: np.ndarray) -> None:
+    """Appends the primary solve's own coordinates to `log_path` (the same
+    per-direction/target file Gurobi's own LogFile writes to, see
+    `_solver_kwargs_with_log`) -- so, once the point that gets pinned in
+    the pinned-duals resolve right after is known, it's sitting right next
+    to that resolve's own solver log for easy correlation (e.g. whether a
+    "Numerical trouble"/"may be infeasible" pinned-resolve failure lines up
+    with a suspiciously large or otherwise odd coordinate value). No-op if
+    `log_path` is None (output_dir disabled, so there's no file to write
+    into -- matches _solver_kwargs_with_log's own no-op in that case).
+    """
+    if log_path is None:
+        return
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    coordinates = {k: float(v) for k, v in zip(keys, point)}
+    with open(log_path, "a") as f:
+        f.write(f"\nCoordinates after primary solve: {coordinates}\n")
+
+
+def _pin_coord_scale(value: float) -> float:
+    """Scale factor for one pinned-coordinate equality constraint (a
+    furthest/closest-point query's own found point, pinned exactly so its
+    duals can be read off afterward) -- sqrt(|value|), same spirit as
+    add_budget_constraint's own budget_scale. A pinned coordinate can be
+    ~1e8 in magnitude (e.g. this network's own H2 storage dimension),
+    dwarfing every other variable's natural coefficient range and
+    breaking the pinned-duals resolve's own barrier solve with
+    "Numerical trouble" -- confirmed on the real network, and confirmed
+    NOT fixed by giving that solve an exact (crossover) vertex instead of
+    an interior-point approximation, so the pinned value's sheer
+    magnitude is the actual problem, not its precision. 1.0 for a
+    (near-)zero value, since sqrt(0) would make the constraint degenerate
+    (dividing by zero) and there's no large-magnitude problem to fix
+    there anyway.
+    """
+    return abs(value) ** 0.5 if value else 1.0
+
+
+#: Relative half-width of the band a pinned coordinate is allowed to sit in,
+#: instead of an exact equality. An exact pin reliably broke the H2
+#: dimension's pinned-duals resolve with Gurobi's "Numerical trouble
+#: encountered" (status=warning, condition=other) -- confirmed NOT fixed by
+#: BarConvTol tightening (1e-5/1e-6/1e-8), crossover on the primary solve,
+#: or algebraic row-scaling of the same exact equality (_pin_coord_scale
+#: alone): none of those change the underlying equation, so the same
+#: degenerate feasible-set geometry remained. Relaxing to a band is the one
+#: change that alters the feasible set itself, giving the barrier method
+#: room to land somewhere solvable.
+#: This value found by bisection on the real H2 case: 5e-4 and 1e-5 both
+#: converged cleanly (status=ok, condition=optimal); 1e-6 (Gurobi's own
+#: default FeasibilityTol) still completed but got demoted to
+#: condition=suboptimal ("big uncrush violation"); 5e-6 converged cleanly
+#: again. The true boundary sits between 1e-6 and 5e-6 -- 5e-6 kept as a
+#: safety margin above it rather than cutting it exactly.
+_PIN_TOLERANCE = 5e-6
+
+
+def _add_pinned_coord_band(m: Any, n: Network, dimensions: dict, key: str, value: float, scale: float) -> None:
+    """Pin dimension `key` to within `_PIN_TOLERANCE` of `value` (an
+    inequality band: `coord_{key}_lb`/`coord_{key}_ub`) instead of an exact
+    equality -- see `_PIN_TOLERANCE`'s own docstring for why."""
+    expr = n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum()
+    lo = min(value * (1 - _PIN_TOLERANCE), value * (1 + _PIN_TOLERANCE))
+    hi = max(value * (1 - _PIN_TOLERANCE), value * (1 + _PIN_TOLERANCE))
+    m.add_constraints(expr / scale >= lo / scale, name=f"coord_{key}_lb")
+    m.add_constraints(expr / scale <= hi / scale, name=f"coord_{key}_ub")
+
+
+def _read_pinned_coord_dual(m: Any, key: str, scale: float) -> float:
+    """Dual of a `_add_pinned_coord_band` pin -- only one side of the band
+    is ever binding at the optimum (the other's dual is 0), so summing both
+    recovers exactly that one side's sensitivity. Divided back out by
+    `scale` for the same reason `_pin_coord_scale`'s callers do."""
+    dual_lb = float(m.constraints[f"coord_{key}_lb"].dual)
+    dual_ub = float(m.constraints[f"coord_{key}_ub"].dual)
+    return (dual_lb + dual_ub) / scale
+
+
 __all__ = [
     "make_optimality_fn",
     "make_furthest_point_fn",
@@ -265,21 +367,37 @@ def _build_furthest_point_solver(
         optimal_cost = (n.statistics.capex().sum() * w + n.statistics.opex().sum() * w).sum()
         fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
 
+    # A real network's optimal_cost (capex+opex, annual) can be ~1e11.
+    # scaled_objective ties to main_obj ALONE (no fixed_cost, no slack/
+    # optimal_cost added in) via one equality, so that equality never
+    # embeds any large constant -- unlike a prior attempt that added
+    # fixed_cost inside the equality itself (`objective + fixed_cost ==
+    # scaled_obj * budget_scale`), which just relocated the same
+    # ~1e11-magnitude constant into a different constraint. budget_rhs
+    # here is plain Python arithmetic -- computed once, in full
+    # double-precision float, before it ever becomes a linopy expression
+    # -- so the only number handed to the solver for this constraint is
+    # the final, already-small result, never a raw ~1e11 constant.
+    budget_scale = optimal_cost**0.5
+    main_obj_expr = main_obj if isinstance(main_obj, (LinearExpression, QuadraticExpression)) else main_obj.expression
+    scaled_objective = m.add_variables(lower=-np.inf, name="mga_surveyor_scaled_objective")
+    m.add_constraints(main_obj_expr == scaled_objective * budget_scale, name="scaled_objective_def")
+    budget_rhs = ((1 + slack) * optimal_cost - fixed_cost) / budget_scale
+
     def add_budget_constraint() -> None:
-        # Only ever called with m.objective == main_obj.
-        objective = m.objective
-        if not isinstance(objective, (LinearExpression, QuadraticExpression)):
-            objective = objective.expression
-        m.add_constraints(objective + fixed_cost <= (1 + slack) * optimal_cost, name="budget")
+        m.add_constraints(scaled_objective <= budget_rhs, name="budget")
 
     add_budget_constraint()
 
-    def solve_one(direction_row: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
+    def solve_one(
+        direction_row: np.ndarray, log_path: Path | None = None,
+    ) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
+        call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         m.objective = -sum(
             direction_row[i] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
             for i, key in enumerate(keys)
         )
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = (
                 f"Furthest-point solve for direction {dict(zip(keys, direction_row.tolist()))} "
@@ -289,19 +407,21 @@ def _build_furthest_point_solver(
         _log_solve(m, status, condition, "furthest-point")
         coordinates = n.optimize.project_solved(dimensions)
         point = coordinates.loc[keys].to_numpy(dtype=float)
+        _append_coordinates_to_log(log_path, keys, point)
 
         if not resolve_main_objective:
             return point, None, n, condition
 
         pinned_keys = [key for i, key in enumerate(keys) if direction_row[i] != 0]
+        pin_scales = {}
         for key in pinned_keys:
-            m.add_constraints(
-                n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == coordinates[key].item(),
-                name=f"coord_{key}",
-            )
+            value = coordinates[key].item()
+            scale = _pin_coord_scale(value)
+            pin_scales[key] = scale
+            _add_pinned_coord_band(m, n, dimensions, key, value, scale)
         m.remove_constraints("budget")
         m.objective = main_obj
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = (
                 f"Re-solve at pinned coordinates for direction {dict(zip(keys, direction_row.tolist()))} "
@@ -309,12 +429,13 @@ def _build_furthest_point_solver(
             )
             raise RuntimeError(msg)
         _log_solve(m, status, condition, "furthest-point (pinned duals)")
-        duals_by_key = {key: float(m.constraints[f"coord_{key}"].dual) for key in pinned_keys}
+        duals_by_key = {key: _read_pinned_coord_dual(m, key, pin_scales[key]) for key in pinned_keys}
         duals = np.array([duals_by_key.get(key, 0.0) for key in keys])
 
         # Undo this call's own additions so the model is ready for the next call.
         if pinned_keys:
-            m.remove_constraints([f"coord_{key}" for key in pinned_keys])
+            m.remove_constraints([f"coord_{key}_lb" for key in pinned_keys])
+            m.remove_constraints([f"coord_{key}_ub" for key in pinned_keys])
         add_budget_constraint()
 
         return point, duals, n, condition
@@ -349,11 +470,21 @@ def _init_furthest_point_worker(
     )
 
 
-def _solve_furthest_point_direction(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
-    """One `pool.starmap` task: solve a single direction against this
-    worker's already-built solver (see `_init_furthest_point_worker`).
+def _solve_furthest_point_direction(
+    item: tuple[int, np.ndarray, Path | None],
+) -> tuple[int, np.ndarray, np.ndarray | None, Network, str]:
+    """One `pool.imap_unordered` task: solve a single direction against
+    this worker's already-built solver (see `_init_furthest_point_worker`).
+    Carries `i` (its position in this batch's own todo-list) through so
+    the caller can cache/report each direction's result as soon as it
+    finishes, in whatever order workers actually complete them in --
+    not only after every direction in the batch is done. `log_path`, if
+    given, is where this direction's own solver log gets written (see
+    `_solver_kwargs_with_log`).
     """
-    return _worker_furthest_point_solver(direction)
+    i, direction, log_path = item
+    point, duals, n, condition = _worker_furthest_point_solver(direction, log_path)
+    return i, point, duals, n, condition
 
 
 def _cache_furthest_point_result(
@@ -480,7 +611,8 @@ def make_furthest_point_fn(
             if cached is not None:
                 results = [cached]
             else:
-                point, duals, n_result, _condition = solve_one(d)
+                log_path = Path(output_dir) / f"mga_furthest_result_{key}.log" if output_dir is not None else None
+                point, duals, n_result, _condition = solve_one(d, log_path)
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
                 if output_dir is not None:
                     _cache_furthest_point_result(n_result, output_dir, key, keys, point, duals, obj, d)
@@ -524,23 +656,38 @@ def make_furthest_point_fn(
                         multi_investment_periods, model_kwargs, kwargs, resolve_main_objective,
                     ),
                 ) as pool:
-                    try:
-                        todo_results = pool.starmap(
-                            _solve_furthest_point_direction, [(row,) for row in todo_directions],
+                    tasks = [
+                        (
+                            pos, row,
+                            Path(output_dir) / f"mga_furthest_result_{cache_keys[todo_idx[pos]]}.log"
+                            if output_dir is not None else None,
                         )
+                        for pos, row in enumerate(todo_directions)
+                    ]
+                    try:
+                        # imap_unordered, not starmap -- yields each direction's
+                        # result as soon as ITS worker finishes (in completion
+                        # order, not submission order), so the cache/on_solve
+                        # below runs per-direction instead of only after every
+                        # direction in this batch is done (which could hide a
+                        # long-running run's progress for the entire batch's
+                        # duration otherwise).
+                        for pos, point, duals, n_result, _condition in pool.imap_unordered(
+                            _solve_furthest_point_direction, tasks,
+                        ):
+                            i = todo_idx[pos]
+                            obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                            if output_dir is not None:
+                                _cache_furthest_point_result(
+                                    n_result, output_dir, cache_keys[i], keys, point, duals, obj, directions[i],
+                                )
+                            if on_solve is not None:
+                                on_solve(point, directions[i], obj, duals)
+                            results[i] = (point, directions[i])
                     except Exception:
                         pool.terminate()
                         pool.join()
                         raise
-                for i, (point, duals, n_result, _condition) in zip(todo_idx, todo_results):
-                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                    if output_dir is not None:
-                        _cache_furthest_point_result(
-                            n_result, output_dir, cache_keys[i], keys, point, duals, obj, directions[i],
-                        )
-                    if on_solve is not None:
-                        on_solve(point, directions[i], obj, duals)
-                    results[i] = (point, directions[i])
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
@@ -664,12 +811,25 @@ def _build_closest_point_solver(
         optimal_cost = (n.statistics.capex().sum() * w + n.statistics.opex().sum() * w).sum()
         fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
 
+    # A real network's optimal_cost (capex+opex, annual) can be ~1e11.
+    # scaled_objective ties to main_obj ALONE (no fixed_cost, no slack/
+    # optimal_cost added in) via one equality, so that equality never
+    # embeds any large constant -- unlike a prior attempt that added
+    # fixed_cost inside the equality itself (`objective + fixed_cost ==
+    # scaled_obj * budget_scale`), which just relocated the same
+    # ~1e11-magnitude constant into a different constraint. budget_rhs
+    # here is plain Python arithmetic -- computed once, in full
+    # double-precision float, before it ever becomes a linopy expression
+    # -- so the only number handed to the solver for this constraint is
+    # the final, already-small result, never a raw ~1e11 constant.
+    budget_scale = optimal_cost**0.5
+    main_obj_expr = main_obj if isinstance(main_obj, (LinearExpression, QuadraticExpression)) else main_obj.expression
+    scaled_objective = m.add_variables(lower=-np.inf, name="mga_surveyor_scaled_objective")
+    m.add_constraints(main_obj_expr == scaled_objective * budget_scale, name="scaled_objective_def")
+    budget_rhs = ((1 + slack) * optimal_cost - fixed_cost) / budget_scale
+
     def add_budget_constraint() -> None:
-        # Only ever called with m.objective == main_obj.
-        objective = m.objective
-        if not isinstance(objective, (LinearExpression, QuadraticExpression)):
-            objective = objective.expression
-        m.add_constraints(objective + fixed_cost <= (1 + slack) * optimal_cost, name="budget")
+        m.add_constraints(scaled_objective <= budget_rhs, name="budget")
 
     add_budget_constraint()
 
@@ -697,17 +857,21 @@ def _build_closest_point_solver(
         m.objective = sum(s_vars)
     residual_obj = m.objective
 
-    def solve_one(target_row: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
+    def solve_one(
+        target_row: np.ndarray, log_path: Path | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
+        call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
 
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = f"Closest-point solve for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
         _log_solve(m, status, condition, "closest-point")
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
+        _append_coordinates_to_log(log_path, keys, point)
         # Divide back out the internal solve-time rescaling (see
         # _dual_scale's own comment above) -- resid_constrs[key].dual was
         # computed against solve_weights (C times the real weights), and
@@ -721,22 +885,24 @@ def _build_closest_point_solver(
         if not resolve_main_objective:
             return point, normal, None, n
 
+        pin_scales = {}
         for key, value in zip(keys, point):
-            m.add_constraints(
-                n.optimize.build_linexpr_from_weights(dimensions[key], model=m).sum() == float(value),
-                name=f"coord_{key}",
-            )
+            value = float(value)
+            scale = _pin_coord_scale(value)
+            pin_scales[key] = scale
+            _add_pinned_coord_band(m, n, dimensions, key, value, scale)
         m.remove_constraints("budget")
         m.objective = main_obj
-        status, condition = n.optimize.solve_model(**kwargs)
+        status, condition = n.optimize.solve_model(**call_kwargs)
         if status != "ok":
             msg = f"Re-solve at pinned coordinates for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
         _log_solve(m, status, condition, "closest-point (pinned duals)")
-        duals = np.array([float(m.constraints[f"coord_{key}"].dual) for key in keys])
+        duals = np.array([_read_pinned_coord_dual(m, key, pin_scales[key]) for key in keys])
 
         # Undo this call's own additions so the model is ready for the next call.
-        m.remove_constraints([f"coord_{key}" for key in keys])
+        m.remove_constraints([f"coord_{key}_lb" for key in keys])
+        m.remove_constraints([f"coord_{key}_ub" for key in keys])
         add_budget_constraint()
         m.objective = residual_obj
 
@@ -776,11 +942,19 @@ def _init_closest_point_worker(
     )
 
 
-def _solve_closest_point_target(target: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
-    """One `pool.starmap` task: solve a single target against this
+def _solve_closest_point_target(
+    item: tuple[int, np.ndarray, Path | None],
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None, Network]:
+    """One `pool.imap_unordered` task: solve a single target against this
     worker's already-built solver (see `_init_closest_point_worker`).
+    Carries `i` (its position in this batch) through -- see
+    `_solve_furthest_point_direction`'s own docstring for why. `log_path`,
+    if given, is where this target's own solver log gets written (see
+    `_solver_kwargs_with_log`).
     """
-    return _worker_closest_point_solver(target)
+    i, target, log_path = item
+    point, normal, duals, n = _worker_closest_point_solver(target, log_path)
+    return i, point, normal, duals, n
 
 
 def _cache_closest_point_result(
@@ -910,11 +1084,12 @@ def make_closest_point_fn(
 
         if len(target_2d) == 1:
             t = target_2d[0]
-            point, normal, duals, n_result = solve_one(t)
+            key = encode_cache_key(t) if output_dir is not None else None
+            log_path = Path(output_dir) / f"mga_closest_result_{key}.log" if output_dir is not None else None
+            point, normal, duals, n_result = solve_one(t, log_path)
             if output_dir is not None or on_solve is not None:
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
             if output_dir is not None:
-                key = encode_cache_key(t)
                 _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, t)
             if on_solve is not None:
                 on_solve(point, normal, obj, duals, t)
@@ -931,22 +1106,36 @@ def make_closest_point_fn(
                     multi_investment_periods, model_kwargs, kwargs, resolve_main_objective, weights,
                 ),
             ) as pool:
+                results = [None] * len(target_2d)
+                tasks = [
+                    (
+                        i, row,
+                        Path(output_dir) / f"mga_closest_result_{encode_cache_key(row)}.log"
+                        if output_dir is not None else None,
+                    )
+                    for i, row in enumerate(target_2d)
+                ]
                 try:
-                    batch_results = pool.starmap(_solve_closest_point_target, [(row,) for row in target_2d])
+                    # imap_unordered, not starmap -- see
+                    # _solve_furthest_point_direction's own docstring for why:
+                    # caches/reports each target's result as soon as ITS
+                    # worker finishes, not only after the whole batch is done.
+                    for i, point, normal, duals, n_result in pool.imap_unordered(
+                        _solve_closest_point_target, tasks,
+                    ):
+                        row = target_2d[i]
+                        if output_dir is not None or on_solve is not None:
+                            obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
+                        if output_dir is not None:
+                            key = encode_cache_key(row)
+                            _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, row)
+                        if on_solve is not None:
+                            on_solve(point, normal, obj, duals, row)
+                        results[i] = (point, normal)
                 except Exception:
                     pool.terminate()
                     pool.join()
                     raise
-            results = []
-            for row, (point, normal, duals, n_result) in zip(target_2d, batch_results):
-                if output_dir is not None or on_solve is not None:
-                    obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
-                if output_dir is not None:
-                    key = encode_cache_key(row)
-                    _cache_closest_point_result(n_result, output_dir, key, keys, point, normal, duals, obj, row)
-                if on_solve is not None:
-                    on_solve(point, normal, obj, duals, row)
-                results.append((point, normal))
 
         points = np.array([r[0] for r in results])
         normals = np.array([r[1] for r in results])
