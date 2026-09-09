@@ -22,17 +22,15 @@ fixed set of hyperplane directions.
   farthest from `I` (the convergence gap) → ask the true region for the closest feasible point to
   it → grow `I` with that point, and if the trial point itself was infeasible, shrink `O` with a
   new cut → repeat until the gap closes below tolerance.
-- Three interchangeable **worst-point methods**, all implementing the same `Method` interface
+- Two interchangeable **worst-point methods**, both implementing the same `Method` interface
   ([`methods/base.py`](src/mga_surveyor/methods/base.py)):
-  - [`VertexEnumMethod`](src/mga_surveyor/methods/vertex_enum.py) — incrementally maintains `O`'s
-    vertex set and exploits convexity (the worst point is always a vertex); no MILP needed. A
-    halfspace redundant w.r.t. the current outer polytope (removes no current vertex) is detected
-    exactly and discarded rather than accumulated forever, so a run's worth of redundant cuts
-    (e.g. from `mga_surveyor.common.linearized_objective_cut`) doesn't silently slow down every
-    future `resync`.
-  - [`CddMethod`](src/mga_surveyor/methods/cdd.py) — recomputes `O`'s vertex set from scratch via
-    `cdd`'s Double Description method every call; simplest, strongest correctness guarantee, also
-    usable as a periodic ground-truth checkpoint (`VertexEnumMethod.resync`).
+  - [`CddMethod`](src/mga_surveyor/methods/cdd.py) — maintains `O`'s vertex set via `cdd`'s Double
+    Description method: from scratch on every call against a stock `pycddlib` install, or
+    incrementally (folding in only the newest halfspaces) when the installed `cdd`/`cdd.gmp` has
+    the local incremental-append patch (see [`vendor/cdd/README.md`](vendor/cdd/README.md)). Two
+    arithmetic backends (`backend='float'`, the default, or `'gmp'` for exact rational arithmetic,
+    immune to float precision limits on degenerate/near-degenerate halfspaces) and, separately, a
+    choice of solver for its own inner-hull projection (`projection_backend`, below).
   - [`BilevelMethod`](src/mga_surveyor/methods/bilevel.py) — the original KKT+Big-M MILP
     reformulation (Turán, Moret & Bardow's "ORACLE" method). `linf` only, Gurobi-only.
 - Each method supports **3 norms** (`l1`, `l2`, `linf`) for what "farthest/closest" means, backed
@@ -76,16 +74,18 @@ composing with `normalize=True` if that's also on (every cut is derived in real 
 transformed the same way any other halfspace is). Deliberately *not* derived from any box-direction
 point, even though those also have `duals` sitting unused: a box-direction point's own objective cut
 is, in practice, *always* exactly parallel to its own box halfspace (a direct consequence of the LP's
-structure there, not a coincidence), and `VertexEnumMethod.add_cut` has no degeneracy handling for
-nearly-coincident hyperplanes — confirmed in practice to otherwise explode into an out-of-memory
-crash, not just a theoretical risk. Closest-point and optimum cuts don't share that structural
-alignment (their angles to any same-run geometric normal come out scattered, not clustered near
-0°/180° the way box cuts are), so they're never filtered for near-parallelism — an earlier version
-did check each closest-point cut against its own same-solve geometric normal first, but on the real
-test network that check turned out to discard cuts that still carried real tightening value, costing
-extra main-loop iterations for no compensating safety benefit, so it was dropped;
-`VertexEnumMethod.add_cut`'s own exact-redundancy
-detection still discards any genuinely duplicate cut for free, regardless. One remaining check
+structure there, not a coincidence), and nearly-coincident hyperplanes are a real degeneracy risk
+regardless of which method processes them — confirmed in practice against the incremental
+edge-walking construction this project used before `CddMethod` became the production method, which
+reliably exploded into an out-of-memory crash when unfiltered; kept excluded here as a precaution,
+not re-validated against `CddMethod`'s own construction. Closest-point and optimum cuts don't share
+that structural alignment (their angles to any same-run geometric normal come out scattered, not
+clustered near 0°/180° the way box cuts are), so they're never filtered for near-parallelism — an
+earlier version did check each closest-point cut against its own same-solve geometric normal first,
+but on the real test network that check turned out to discard cuts that still carried real
+tightening value, costing extra main-loop iterations for no compensating safety benefit, so it was
+dropped; cddlib's own Double Description construction already discards any genuinely
+duplicate/redundant cut for free, regardless. One remaining check
 before any cut from the main loop (or a restart's existing files) is added: skipped if the point it
 came from was already feasible (same test `explore.drive` uses for its own geometric cut).
 
@@ -101,11 +101,11 @@ vertex/facet count.
 `gurobipy` and `highspy` are on the default install (nearly every real use needs at least one
 solver backend), but both are still imported lazily in code — picking one backend never requires
 the other to actually be used. `pycddlib` is the one true optional extra, needed only for
-`CddMethod`/`VertexEnumMethod.resync`'s ground-truth checkpoint:
+`CddMethod` itself:
 
 | Extra | Package | Needed for |
 |---|---|---|
-| `cdd` | `pycddlib` | `CddMethod`, `VertexEnumMethod.resync` |
+| `cdd` | `pycddlib` | `CddMethod` |
 
 `gurobi_projection`/`BilevelMethod`/`mga_surveyor.tests.lp_region` need `gurobipy` specifically
 (a Gurobi license); `highs_projection` needs `highspy` (open-source, `l1`/`linf` only — HiGHS has

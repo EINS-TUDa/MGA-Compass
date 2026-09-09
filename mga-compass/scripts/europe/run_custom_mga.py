@@ -148,8 +148,8 @@ def build_dimensions(n: pypsa.Network) -> dict:
     reindexes these weights against the component's own extendables). Raises
     if a spec'd carrier turns out to have no extendable elements in `n` --
     DIMENSIONS_SPEC is meant for this exact network; a silent empty
-    dimension would otherwise break `VertexEnumMethod.bootstrap`'s Qhull call
-    the same way a saturated one does (zero achievable range either way).
+    dimension gives no meaningful MGA axis at all -- same as a saturated one
+    (zero achievable range either way).
     """
     dimensions: dict = {}
     for key, comp, attr, plural in DIMENSIONS_SPEC:

@@ -1,5 +1,5 @@
-"""pytest suite: all three Methods (`VertexEnumMethod`, `CddMethod`,
-`BilevelMethod`) converge to the truncated icosahedron test region (see
+"""pytest suite: both Methods (`CddMethod`, `BilevelMethod`) converge to
+the truncated icosahedron test region (see
 `truncated_icosahedron.py` for its construction) under every norm each one
 supports.
 
@@ -43,9 +43,6 @@ def test_truncated_icosahedron_geometry(true_region):
 
 
 @pytest.mark.parametrize("method_name,norm", [
-    ("vertex_enum", "l1"),
-    ("vertex_enum", "l2"),
-    ("vertex_enum", "linf"),
     ("cdd", "l1"),
     ("cdd", "l2"),
     ("cdd", "linf"),

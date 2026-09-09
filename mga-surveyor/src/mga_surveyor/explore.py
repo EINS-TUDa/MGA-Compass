@@ -90,8 +90,8 @@ def drive(
     seconds spent inside this iteration's own `method.find_trial_point()`
     call -- the worst-point search that decides the next point to query,
     logged since it's the one part of each iteration whose cost scales
-    with the method's own accumulated state, e.g. VertexEnumMethod's
-    growing outer_vertices/outer_halfspaces, unlike closest_point's cost
+    with the method's own accumulated state, e.g. CddMethod's growing
+    outer_halfspaces, unlike closest_point's cost
     which is external to `drive` itself). If `max_iter` is exhausted before
     `gap < tol`, logs a warning (the return value itself doesn't flag this
     -- check `history[-1]["gap"]` against `tol`, or the caller's own

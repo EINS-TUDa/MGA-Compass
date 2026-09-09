@@ -1,21 +1,19 @@
 """mga_surveyor: reusable inner/outer polytope approximation for
-near-optimal-space exploration, with three interchangeable worst-point /
+near-optimal-space exploration, with two interchangeable worst-point /
 convergence-metric methods:
 
-- `VertexEnumMethod` ("my solution"): replaces the bilevel-MILP worst-point
-  search with vertex enumeration of the outer approximation, exploiting the
-  fact that a convex function's max over a polytope is attained at a
-  vertex -- so no MILP is needed at all. Maintains the outer polytope's
-  vertex set incrementally.
+- `CddMethod` ("cdd solution"): recomputes the outer polytope's vertex set
+  via cdd's Double Description method -- from scratch on every call, or
+  incrementally (folding in only the newest halfspaces) when the installed
+  `cdd`/`cdd.gmp` has the local incremental-append patch (see
+  `vendor/cdd/README.md`). Two arithmetic backends (`backend='float'`,
+  the default, or `'gmp'` for exact rational arithmetic) and, separately, a
+  choice of solver for its own inner-hull projection (`projection_backend`,
+  `'gurobi'` or `'highs'`).
 - `BilevelMethod` ("bilevel solution"): the original KKT + Big-M MILP
   reformulation. L_infinity only.
-- `CddMethod` ("cdd solution"): recomputes the outer polytope's vertex set
-  from scratch via cdd's Double Description method on every call. Simpler
-  and more independently-verified than the incremental path, at the cost
-  of redoing more work each time; also useful as a periodic ground-truth
-  checkpoint on top of `VertexEnumMethod` (see `VertexEnumMethod.resync`).
 
-All three share the same `Method` interface (`methods/base.py`) and
+Both share the same `Method` interface (`methods/base.py`) and
 accept `norm` (`'l1'`, `'l2'`, or `'linf'`) as a constructor argument
 (`BilevelMethod` is restricted to `'linf'`; see its docstring for why).
 
@@ -73,20 +71,23 @@ if that's also on. Deliberately NOT derived from any box-direction point,
 even though those also have `duals` sitting unused -- a box-direction
 point's own objective cut, in particular, turns out to be *exactly*
 parallel to its own box halfspace as a direct consequence of the LP's
-structure there, not a coincidence, and `VertexEnumMethod` has no
-degeneracy handling for nearly-coincident hyperplanes (confirmed in
-practice: unfiltered, this reliably triggers a combinatorial explosion in
-`add_cut`'s crossing-vertex computation). Closest-point and optimum cuts
-don't share that structural alignment (their angles to any same-run
-geometric normal come out scattered, not clustered near 0/180 the way box
-cuts are), so they're never filtered for near-parallelism -- an earlier
-version did check each closest-point cut against its own same-solve
-geometric normal first, but on the real test network that check
-discarded cuts that still carried real tightening value, costing extra
-main-loop iterations for no compensating safety benefit, so it was
-dropped; `VertexEnumMethod.add_cut`'s own
-exact-redundancy detection still discards any genuinely duplicate cut for
-free, regardless. One remaining check before any cut from the main loop
+structure there, not a coincidence, and nearly-coincident hyperplanes are
+a real degeneracy risk regardless of which method processes them
+(confirmed in practice against the incremental edge-walking construction
+this project used before `CddMethod` became the production method:
+unfiltered, this reliably triggered a combinatorial explosion in its
+crossing-vertex computation; kept excluded here as a precaution, not
+re-validated against `CddMethod`'s own construction). Closest-point and
+optimum cuts don't share that structural alignment (their angles to any
+same-run geometric normal come out scattered, not clustered near 0/180
+the way box cuts are), so they're never filtered for near-parallelism --
+an earlier version did check each closest-point cut against its own
+same-solve geometric normal first, but on the real test network that
+check discarded cuts that still carried real tightening value, costing
+extra main-loop iterations for no compensating safety benefit, so it was
+dropped; cddlib's own Double Description construction already discards
+any genuinely duplicate/redundant cut for free, regardless. One remaining
+check before any cut from the main loop
 (or a restart's existing files) is added: skipped if the point it came
 from was already feasible (same test `explore.drive` uses for its own
 geometric cut).
@@ -101,7 +102,7 @@ from .gurobi_projection import closest_point_on_hull
 # so the highs one needs an alias here to avoid shadowing the gurobi one.
 from .highs_projection import closest_point_on_hull as closest_point_on_hull_highs, VALID_NORMS_HIGHS
 from .methods import (
-    Method, VertexEnumMethod, BilevelMethod, solve_farthest_outer_point_milp,
+    Method, BilevelMethod, solve_farthest_outer_point_milp,
     CddMethod, cdd_vertices_of,
 )
 from .explore import drive
@@ -119,7 +120,7 @@ from .pypsa_ext import (
 __all__ = [
     "VALID_NORMS", "closest_point_on_hull", "gaps", "linearized_objective_cut",
     "closest_point_on_hull_highs", "VALID_NORMS_HIGHS",
-    "Method", "VertexEnumMethod", "BilevelMethod", "solve_farthest_outer_point_milp",
+    "Method", "BilevelMethod", "solve_farthest_outer_point_milp",
     "CddMethod", "cdd_vertices_of", "drive",
     "AffineMap", "compute_affine_map", "normalize_oracle_fns", "normalize_from_box_points",
     "make_optimality_fn", "make_furthest_point_fn", "make_closest_point_fn", "make_oracle_fns",

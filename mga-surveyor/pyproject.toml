@@ -33,7 +33,7 @@ dependencies = [
     "netCDF4",
     "numpy",
     "scipy",
-    # closest_point_on_hull backends (methods/vertex_enum.py, methods/cdd.py) and
+    # closest_point_on_hull backends (methods/cdd.py) and
     # BilevelMethod's MILP -- both gurobipy/highspy are imported lazily elsewhere, so
     # picking one backend never requires the other to actually be used. Also required
     # (non-lazily -- a top-level import) by mga_surveyor.tests.lp_region, the
@@ -45,10 +45,9 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
-# methods/cdd.py's ground-truth vertex computation (CddMethod, and
-# VertexEnumMethod.resync's default checkpoint). Imported lazily inside
-# cdd_vertices_of, so the package works without this extra as long as
-# CddMethod/resync are never actually called. Built locally from the
+# methods/cdd.py's ground-truth vertex computation (CddMethod). Imported
+# lazily inside cdd_vertices_of, so the package works without this extra
+# as long as CddMethod is never actually called. Built locally from the
 # patched, vendored submodule at vendor/cdd/pycddlib (see tool.uv.sources
 # below and vendor/cdd/README.md) rather than a PyPI wheel -- run
 # `python vendor/cdd/build.py` once per machine/venv before `uv sync

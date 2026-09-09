@@ -1,5 +1,5 @@
-"""Example/test: run all three Methods (`VertexEnumMethod`, `BilevelMethod`,
-`CddMethod`) against a second well-known, fixed 3D test region -- the
+"""Example/test: run both Methods (`BilevelMethod`, `CddMethod`) against a
+second well-known, fixed 3D test region -- the
 disdyakis triacontahedron (62 vertices, 120 triangular facets), the
 Catalan solid dual of the truncated icosidodecahedron and the most-faceted
 of the standard named 3D polyhedra. See `truncated_icosahedron.py` for the
@@ -27,14 +27,12 @@ enumeration solves numerically fragile).
 Even so, this shape is noticeably harder-conditioned than
 `truncated_icosahedron.py`'s (its 120 facets are scalene, not the near-
 regular pentagons/hexagons there): with `tol=1e-6` (this package's usual
-default), `VertexEnumMethod`'s L2 run stalls indefinitely a hair above
-tolerance (~1.08e-6, never quite crossing it) rather than diverging or
-being wrong, and `CddMethod`'s float-mode Double Description solver
-occasionally hits cddlib's own documented float-precision limit ("Numerical
+default), `CddMethod`'s float-mode Double Description solver occasionally
+hits cddlib's own documented float-precision limit ("Numerical
 inconsistency... use the GMP exact arithmetic") on the accumulated
-halfspaces for L2 specifically. Both are avoided by using a looser
-`tol=1e-4` in `drive()` -- still far tighter than anything visually
-meaningful -- rather than by further tuning the geometry; see
+halfspaces for L2 specifically. Avoided by using a looser `tol=1e-4` in
+`drive()` -- still far tighter than anything visually meaningful -- rather
+than by further tuning the geometry; see
 `test_disdyakis_triacontahedron.py` for exactly which (method, norm)
 combinations are exercised as real, passing tests versus documented as
 expected-to-fail.
@@ -43,7 +41,7 @@ Scaled to fit inside `[-1, 1]^3` (a "unit cube" centered at the origin),
 same convention as `truncated_icosahedron.py`.
 
 Run with: python mga_surveyor/tests/disdyakis_triacontahedron.py [method] [norm] [n_iters]
-  method in {vertex_enum, bilevel, cdd}, default vertex_enum
+  method in {bilevel, cdd}, default cdd
   norm in {l1, l2, linf}, default l2 (bilevel forces linf regardless)
   n_iters default None (run to convergence, see `explore.drive`)
 """
@@ -60,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 logging.basicConfig(level=logging.INFO, format="%(message)s")  # explore.drive's per-iteration logging
 
 from mga_surveyor import (
-    VertexEnumMethod, BilevelMethod, CddMethod,
+    BilevelMethod, CddMethod,
     drive,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
@@ -128,8 +126,6 @@ def n_unique_facets(hull, decimals=6):
 
 
 def build_method(name, k, norm, executor=None):
-    if name == "vertex_enum":
-        return VertexEnumMethod(k, norm=norm, executor=executor)
     if name == "bilevel":
         return BilevelMethod(k, norm="linf")  # only norm this method supports
     if name == "cdd":
@@ -138,7 +134,7 @@ def build_method(name, k, norm, executor=None):
 
 
 def main():
-    method_name = sys.argv[1] if len(sys.argv) > 1 else "vertex_enum"
+    method_name = sys.argv[1] if len(sys.argv) > 1 else "cdd"
     norm = sys.argv[2] if len(sys.argv) > 2 else "l2"
     n_iters = int(sys.argv[3]) if len(sys.argv) > 3 else None
 

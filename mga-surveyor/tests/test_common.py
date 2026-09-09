@@ -100,8 +100,9 @@ def test_linearized_objective_cut_point_choice_does_not_affect_the_halfspace():
 def test_linearized_objective_cut_avoids_extreme_points_under_mismatched_duals_scale():
     """duals mixing very different real-world-unit magnitudes (e.g. $/MW
     vs $/MWh) -- the scenario that produced a real ~187,000-vertex OOM
-    crash in VertexEnumMethod.add_cut in practice, traced back to this
-    function's point construction -- must not send `point` to a
+    crash in this project's (now-removed) incremental edge-walking
+    construction, traced back to this function's point construction --
+    must not send `point` to a
     numerically extreme value. Picking the largest-magnitude axis instead
     of the Euclidean projection keeps the shift confined to a single,
     well-conditioned dimension, never dividing by the tiny one."""

@@ -4,7 +4,6 @@
   metric and method to explore all near-optimal designs for energy
   systems", Computers & Chemical Engineering (2026).
 - Only ``norm='linf'`` is supported; L1/L2 aren't implemented (use
-  :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod` or
   :class:`~mga_surveyor.methods.cdd.CddMethod` instead).
 - Requires ``gurobipy`` and a Gurobi license; no open-source backend.
 - Reformulates the max-min bilevel LP into a single-level MILP via KKT +
@@ -56,9 +55,9 @@ def solve_farthest_outer_point_milp(
         raise ImportError(
             "BilevelMethod requires the `gurobipy` package and a valid "
             "Gurobi license -- its MILP reformulation is Gurobi-specific, with no "
-            "backend option (unlike VertexEnumMethod/CddMethod; see module "
-            "docstring). Install gurobipy, or use VertexEnumMethod instead "
-            "(backend='highs' needs no Gurobi at all, for norm in "
+            "backend option (unlike CddMethod's own projection_backend; see module "
+            "docstring). Install gurobipy, or use CddMethod instead "
+            "(projection_backend='highs' needs no Gurobi at all, for norm in "
             "('l1', 'linf'))."
         )
     inner_points = np.asarray(inner_points, dtype=float)
@@ -151,7 +150,7 @@ class BilevelMethod(Method):
             raise NotImplementedError(
                 "BilevelMethod only supports norm='linf' -- see module docstring "
                 "for why L1/L2 would each need a different reformulation. "
-                "Use VertexEnumMethod or CddMethod for other norms."
+                "Use CddMethod for other norms."
             )
         super().__init__(k, norm)
         self.M_P = M_P

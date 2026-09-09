@@ -1,8 +1,7 @@
 """``CddMethod``.
 
 - Uses cdd's (Fukuda's) Double Description method for the outer polytope's
-  vertex set, rather than maintaining it independently in Python the way
-  :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod` does.
+  vertex set.
 - Two arithmetic backends, selected via ``backend``: ``'float'`` (default)
   uses cdd's native C double arithmetic; ``'gmp'`` uses ``cdd.gmp``'s exact
   rational (GMP) arithmetic instead, at higher per-call cost, immune to the
@@ -31,12 +30,11 @@
   aren't met for this polytope -- see its docstring), :meth:`_vertices_with_ids`
   transparently falls back to a full rebuild from ``self.outer_halfspaces``
   -- still correct either way, just not incremental for that one step. So
-  this class keeps the strongest correctness guarantee of the three
+  this class keeps the strongest correctness guarantee of the two
   methods (cdd is a mature, independent implementation) regardless of
   which ``cdd`` build is installed; only the cost profile changes.
 - The per-vertex closest-inner-point solve is cached across refreshes by
-  generator identity, the same way :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod`
-  caches by index: ``copy_generators_with_ids`` (also part of the local
+  generator identity: ``copy_generators_with_ids`` (also part of the local
   patch) tags every vertex with a persistent integer id that survives an
   incremental append unchanged, so :meth:`_refresh` can tell "this is the
   same vertex as last time" by exact id match instead of geometric
@@ -50,7 +48,7 @@
 from concurrent.futures import Executor
 from fractions import Fraction
 from types import ModuleType
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 
@@ -61,6 +59,15 @@ from .base import Method
 #: Which cdd arithmetic backend to use -- ``'float'`` (cdd's native C
 #: double arithmetic) or ``'gmp'`` (cdd.gmp's exact rational arithmetic).
 CddBackend = Literal["float", "gmp"]
+
+
+class ProjectionFn(Protocol):
+    """Contract for `projection_fn`: project `point` onto `conv(points)`
+    under `norm`, returning `(closest_point, normal)` -- exactly what
+    `gurobi_projection.closest_point_on_hull` / `highs_projection.
+    closest_point_on_hull` implement (see either's docstring).
+    """
+    def __call__(self, point: np.ndarray, points: np.ndarray, norm: Norm) -> tuple[np.ndarray, np.ndarray]: ...
 
 
 def check_cdd_backend(backend: str) -> None:
@@ -169,10 +176,10 @@ def cdd_vertices_of(outer_halfspaces: list[Halfspace], backend: CddBackend = "fl
     from scratch (all-at-once, not incremental).
 
     Used independently of any :class:`CddMethod` instance's own
-    incremental state -- e.g. by
-    :meth:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod.resync` as a
-    from-scratch cross-check, where reusing incremental state would defeat
-    the point.
+    incremental state -- e.g. as a from-scratch ground-truth cross-check
+    against a live instance's incrementally-maintained vertex set (see
+    ``tests/test_cdd_incremental.py``), where reusing incremental state
+    would defeat the point.
 
     :param outer_halfspaces: ``(direction, point)`` pairs, each defining a
         supporting hyperplane of the outer polytope.
@@ -200,12 +207,32 @@ class CddMethod(Method):
         given.
     :type executor: concurrent.futures.Executor, optional
     :param backend: ``'float'`` (default) or ``'gmp'`` -- see module
-        docstring.
+        docstring. Unrelated to ``projection_backend``/``projection_fn``
+        below: this picks cdd's own outer-polytope arithmetic, not the
+        inner-hull projection's solver.
     :type backend: str
+    :param projection_fn: Lower-level override of the inner-hull projection
+        callable itself, signature ``(point, points, norm) ->
+        (closest_point, normal)`` -- takes precedence over
+        ``projection_backend`` if given. Every call site goes through
+        ``self.projection_fn``, so any callable matching that contract
+        works, not just the two built-in backends.
+    :param projection_backend: Which persistent solver to use for the
+        inner-hull projection -- ``'gurobi'`` (default, all three norms) or
+        ``'highs'`` (open-source, no license required; L1/Linf only --
+        HiGHS has no quadratic-objective support). Same choice this
+        project's now-removed incremental-vertex-enumeration method used
+        to expose as its own ``backend`` parameter -- named differently
+        here since ``backend`` on this class already means cdd's
+        arithmetic.
+    :type projection_backend: str
+    :raises ValueError: If ``projection_backend`` is not ``'gurobi'`` or
+        ``'highs'``.
     """
 
     def __init__(
         self, k: int, norm: Norm, executor: Executor | None = None, backend: CddBackend = "float",
+        projection_fn: ProjectionFn | None = None, projection_backend: Literal["gurobi", "highs"] = "gurobi",
     ) -> None:
         check_norm(norm)
         check_cdd_backend(backend)
@@ -215,6 +242,21 @@ class CddMethod(Method):
             executor = ThreadPoolExecutor(max_workers=8)
         self.executor = executor
         self.backend = backend
+        self.projection_backend = projection_backend
+        if projection_fn is not None:
+            self.projection_fn = projection_fn
+        elif projection_backend == "highs":
+            # aliased on import: gurobi_projection.py/highs_projection.py both
+            # name their projection function `closest_point_on_hull` -- see
+            # either's own docstring -- so an alias is needed here to avoid
+            # shadowing the one this module already imported for the
+            # 'gurobi' default.
+            from ..highs_projection import closest_point_on_hull as closest_point_on_hull_highs
+            self.projection_fn = closest_point_on_hull_highs
+        elif projection_backend == "gurobi":
+            self.projection_fn = closest_point_on_hull
+        else:
+            raise ValueError(f"projection_backend must be 'gurobi' or 'highs', got {projection_backend!r}")
 
         self.inner_vertices = None
         self.outer_halfspaces = []
@@ -249,13 +291,11 @@ class CddMethod(Method):
         normal pairs (keyed by generator id -- see :meth:`_refresh`) may no
         longer be optimal -- exactly those whose cached separating
         hyperplane ``new_inner_vertex`` violates. Recompute only those
-        (cheap ``O(outer_vertices)`` check first). Mirrors
-        :meth:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod._refresh_stale_closest_points`
-        exactly; only called when ``self._closest_normals`` is populated,
-        i.e. the last refresh actually had id-tracked caching to keep
-        valid -- with no such cache, the next :meth:`_refresh` recomputes
-        every vertex unconditionally anyway, so doing this check would be
-        pure waste.
+        (cheap ``O(outer_vertices)`` check first). Only called when
+        ``self._closest_normals`` is populated, i.e. the last refresh
+        actually had id-tracked caching to keep valid -- with no such
+        cache, the next :meth:`_refresh` recomputes every vertex
+        unconditionally anyway, so doing this check would be pure waste.
 
         :param new_inner_vertex: The newly added inner vertex.
         """
@@ -268,7 +308,7 @@ class CddMethod(Method):
             return
         stale_points = list(self._outer_vertices[stale_positions])
         results = list(self.executor.map(
-            lambda p: closest_point_on_hull(p, self.inner_vertices, norm=self.norm), stale_points
+            lambda p: self.projection_fn(p, self.inner_vertices, norm=self.norm), stale_points
         ))
         for pos, (c, n) in zip(stale_positions.tolist(), results):
             self._closest_points[pos] = c
@@ -366,14 +406,14 @@ class CddMethod(Method):
                     normals[i] = self._closest_normals[old_i]
             if to_solve:
                 results = list(self.executor.map(
-                    lambda i: closest_point_on_hull(verts[i], self.inner_vertices, norm=self.norm), to_solve
+                    lambda i: self.projection_fn(verts[i], self.inner_vertices, norm=self.norm), to_solve
                 ))
                 for i, (c, n) in zip(to_solve, results):
                     closest[i] = c
                     normals[i] = n
         elif len(verts):
             results = list(self.executor.map(
-                lambda v: closest_point_on_hull(v, self.inner_vertices, norm=self.norm), verts
+                lambda v: self.projection_fn(v, self.inner_vertices, norm=self.norm), verts
             ))
             closest = np.array([r[0] for r in results])
             normals = np.array([r[1] for r in results]) if ids is not None else None

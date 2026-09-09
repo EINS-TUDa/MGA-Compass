@@ -1,8 +1,5 @@
 """Norm-generic geometric primitives usable by any worst-point method -- not
-tied to one method's specific algorithm, unlike e.g. `halfspaces_to_scipy`/
-`compute_active_constrs`, which live in `methods/vertex_enum.py` instead
-because only `VertexEnumMethod`'s incremental vertex-maintenance actually
-needs them.
+tied to one method's specific algorithm.
 
 Everything here operates only on point clouds and halfspace lists handed to
 it -- nothing in this module knows anything about where those points or
@@ -88,12 +85,14 @@ def linearized_objective_cut(
     `duals @ duals` can be dominated by whichever dimension happens to
     have large values there, sending the Euclidean-projection point to a
     numerically extreme value in every OTHER dimension -- which then
-    makes `direction @ point` (computed downstream in
-    `VertexEnumMethod.add_cut`) suffer catastrophic floating-point
+    makes `direction @ point` (computed downstream by whichever method
+    processes this halfspace) suffer catastrophic floating-point
     cancellation, corrupting that cut's own vertex classification
-    (confirmed in practice: exactly this construction once produced
-    ~187,000 spurious crossing vertices for a 4-dimensional polytope, an
-    OOM crash, not just an inefficiency). Dividing by `duals[j]` itself
+    (confirmed in practice, against this project's incremental edge-walking
+    construction before `CddMethod` became the production method: exactly
+    this construction once produced ~187,000 spurious crossing vertices for
+    a 4-dimensional polytope, an OOM crash, not just an inefficiency).
+    Dividing by `duals[j]` itself
     (the largest-magnitude component, so the least numerically sensitive
     denominator available) and moving along a single axis avoids ever
     amplifying small numerical noise into a huge coordinate swing.

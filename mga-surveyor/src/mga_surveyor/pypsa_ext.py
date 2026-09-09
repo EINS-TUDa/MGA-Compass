@@ -41,7 +41,7 @@ make_oracle_fns builds all three of the above in one call, sharing
 n/dimensions/output_dir -- a convenience for feeding explore.drive's three
 callback parameters directly.
 
-generate_mga_files runs a VertexEnumMethod per slack level (via
+generate_mga_files runs a CddMethod per slack level (via
 explore.drive) against a real network, writing every result to .nc files
 under output_dir -- resuming from whatever's already there (cached
 optimal/furthest-point solves are read back, and existing closest-point
@@ -70,7 +70,7 @@ from pypsa.optimization.mga import _worker_init
 
 from .common import Halfspace, Norm, gaps, linearized_objective_cut
 from .explore import ClosestPointFn, drive
-from .methods import VertexEnumMethod
+from .methods import CddMethod
 from .normalize import AffineMap, normalize_oracle_fns
 
 if TYPE_CHECKING:
@@ -1297,7 +1297,7 @@ def generate_mga_files(
     use_objective_cuts: bool = True,
     **kwargs: Any,
 ) -> None:
-    """Run a `VertexEnumMethod` per slack level (`explore.drive`, up to
+    """Run a `CddMethod` (exact `'gmp'` arithmetic) per slack level (`explore.drive`, up to
     `max_iter` iterations each) against a real, already-solved PyPSA
     network `n`, writing every result to `.nc` files under `output_dir`.
     Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
@@ -1308,7 +1308,7 @@ def generate_mga_files(
     length doesn't match).
 
     `normalize` (default `True`): if `True`, each slack level's
-    `VertexEnumMethod` explores a `[-1, 1]^k`-normalized cube instead of
+    `CddMethod` explores a `[-1, 1]^k`-normalized cube instead of
     raw dimension units, via `mga_surveyor.normalize.normalize_oracle_fns`
     -- see that module for why (mixing e.g. MW and MWh dimensions in one
     unweighted polytope means the ones with the larger natural range
@@ -1320,7 +1320,7 @@ def generate_mga_files(
     `normalize.compute_affine_map`. Everything on disk (`.nc` files,
     `consolidate_mga_results`'s output) is completely unaffected -- still
     real units throughout, since the oracle functions themselves are
-    unchanged; only what `explore.drive`/`VertexEnumMethod` sees is
+    unchanged; only what `explore.drive`/`CddMethod` sees is
     normalized. Pass `False` to explore raw units instead.
 
     **`tol` is interpreted differently depending on `normalize`, on
@@ -1375,11 +1375,14 @@ def generate_mga_files(
     box halfspace, a direct consequence of the LP's structure at that
     point (maximizing dimension `i` under the slack budget usually makes
     the budget itself what limits `i`, and the achievable-cost gradient
-    there works out to be proportional to `e_i`), and
-    `VertexEnumMethod.add_cut` has no degeneracy handling for
-    nearly-coincident hyperplanes. Confirmed in practice, not theoretical:
-    unfiltered, this reliably explodes into hundreds of thousands of
-    spurious crossing vertices and an out-of-memory crash. Closest-point
+    there works out to be proportional to `e_i`), and nearly-coincident
+    hyperplanes are a real degeneracy risk regardless of which method
+    processes them. Confirmed in practice against the incremental
+    edge-walking construction this project used before `CddMethod` became
+    the production method: unfiltered, this reliably exploded into
+    hundreds of thousands of spurious crossing vertices and an
+    out-of-memory crash -- kept excluded here as a precaution, not
+    re-validated against `CddMethod`'s own construction. Closest-point
     and optimum cuts don't share that structural alignment (confirmed
     empirically: their angles to any same-run geometric normal are
     scattered across the whole range, not clustered near 0/180 the way
@@ -1391,9 +1394,8 @@ def generate_mga_files(
     cuts that still carried real tightening value, costing extra
     main-loop iterations (7 iterations with the
     check vs. 4 without, same network/slack/tolerance) for no compensating
-    safety benefit -- `VertexEnumMethod.add_cut`'s own exact-redundancy
-    detection (see its own docstring) already discards any genuinely
-    duplicate cut for free, regardless.
+    safety benefit -- cddlib's own Double Description construction already
+    discards any genuinely duplicate/redundant cut for free, regardless.
 
     One more thing every candidate cut from the main loop (or a restart's
     existing files) is checked against before being added, skip-only
@@ -1421,12 +1423,11 @@ def generate_mga_files(
     folded into its one `Method.bootstrap` call, so those points/cuts
     don't need to be rediscovered. Assumes those earlier results are
     genuine near-optimal points for `n`/`dimensions`/this slack level --
-    `VertexEnumMethod.bootstrap` needs a single point (the mean of all of
-    them, box points included) that's a valid Qhull interior point for
-    every halfspace at once, which a wildly incompatible stray file (e.g.
-    from a different network or corrupted by hand) could break.
+    a wildly incompatible stray file (e.g. from a different network or
+    corrupted by hand) could otherwise seed `CddMethod.bootstrap` with
+    points/halfspaces that don't describe a coherent region.
 
-    `solver_name` also becomes each slack level's `VertexEnumMethod`
+    `solver_name` also becomes each slack level's `CddMethod`
     backend. `**kwargs` (e.g. `solver_options`) is forwarded to every
     oracle factory.
 
@@ -1588,10 +1589,10 @@ def generate_mga_files(
         if verbose and extra_points:
             logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
 
-        method = VertexEnumMethod(k=k, norm=norm, backend=solver_name)
+        method = CddMethod(k=k, norm=norm, backend="gmp", projection_backend=solver_name)
         if verbose:
             logger.info(
-                "slack=%s: running VertexEnumMethod (tol=%.4f%s, max_iter=%s)",
+                "slack=%s: running CddMethod (tol=%.4f%s, max_iter=%s)",
                 slack, slack_tol * gap_scale, gap_unit, slack_max_iter,
             )
         drive(

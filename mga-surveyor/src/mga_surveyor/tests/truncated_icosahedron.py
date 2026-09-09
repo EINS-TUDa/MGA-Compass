@@ -1,5 +1,5 @@
-"""Example/test: run all three Methods (`VertexEnumMethod`, `BilevelMethod`,
-`CddMethod`) against a well-known, fixed 3D test region -- the truncated
+"""Example/test: run both Methods (`BilevelMethod`, `CddMethod`) against a
+well-known, fixed 3D test region -- the truncated
 icosahedron (60 vertices, 32 facets: 12 pentagons + 20 hexagons) -- instead
 of `synthetic_ball.py`'s random perturbed-ball region, so convergence can
 be checked against an exact, independently-known vertex/facet count rather
@@ -16,7 +16,7 @@ the origin with bounding box `[-phi, phi]^3`, so a single uniform scale
 suffices.
 
 Run with: python mga_surveyor/tests/truncated_icosahedron.py [method] [norm] [n_iters]
-  method in {vertex_enum, bilevel, cdd}, default vertex_enum
+  method in {bilevel, cdd}, default cdd
   norm in {l1, l2, linf}, default l2 (bilevel forces linf regardless)
   n_iters default None (run to convergence, see `explore.drive`)
 """
@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 logging.basicConfig(level=logging.INFO, format="%(message)s")  # explore.drive's per-iteration logging
 
 from mga_surveyor import (
-    VertexEnumMethod, BilevelMethod, CddMethod,
+    BilevelMethod, CddMethod,
     drive,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
@@ -84,8 +84,6 @@ def n_unique_facets(hull, decimals=6):
 
 
 def build_method(name, k, norm, executor=None):
-    if name == "vertex_enum":
-        return VertexEnumMethod(k, norm=norm, executor=executor)
     if name == "bilevel":
         return BilevelMethod(k, norm="linf")  # only norm this method supports
     if name == "cdd":
@@ -94,7 +92,7 @@ def build_method(name, k, norm, executor=None):
 
 
 def main():
-    method_name = sys.argv[1] if len(sys.argv) > 1 else "vertex_enum"
+    method_name = sys.argv[1] if len(sys.argv) > 1 else "cdd"
     norm = sys.argv[2] if len(sys.argv) > 2 else "l2"
     n_iters = int(sys.argv[3]) if len(sys.argv) > 3 else None
 

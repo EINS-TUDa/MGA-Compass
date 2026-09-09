@@ -1,6 +1,6 @@
-"""pytest suite: `VertexEnumMethod` and `CddMethod` converge to the
+"""pytest suite: `CddMethod` converges to the
 disdyakis triacontahedron test region (see `disdyakis_triacontahedron.py`
-for its construction) under the norms each one handles cleanly on this
+for its construction) under the norms it handles cleanly on this
 particular shape.
 
 `BilevelMethod` is deliberately not exercised here -- its MILP
@@ -16,8 +16,8 @@ Description solver, not a bug in this test.
 
 Run with: pytest mga_surveyor/tests/test_disdyakis_triacontahedron.py -v
 
-Marked `slow` (whole module -- ~1 minute across 7 method/norm
-combinations): deselect with `pytest -m "not slow"`, or select just these
+Marked `slow` (whole module across the 3 norm combinations below):
+deselect with `pytest -m "not slow"`, or select just these
 with `pytest -m slow`.
 """
 import numpy as np
@@ -51,9 +51,6 @@ def test_disdyakis_triacontahedron_geometry(true_region):
 
 
 @pytest.mark.parametrize("method_name,norm", [
-    ("vertex_enum", "l1"),
-    ("vertex_enum", "l2"),
-    ("vertex_enum", "linf"),
     ("cdd", "l1"),
     pytest.param("cdd", "l2", marks=pytest.mark.xfail(
         reason="cddlib float-mode Double Description hits its own documented "

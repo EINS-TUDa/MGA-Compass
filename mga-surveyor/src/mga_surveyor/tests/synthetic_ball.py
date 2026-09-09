@@ -1,4 +1,4 @@
-"""Example: run any of the three Methods against a synthetic test
+"""Example: run either of the two Methods against a synthetic test
 region (points sampled from a perturbed ball, as used throughout this
 project's validation), via mga_surveyor's generic explore.drive.
 
@@ -8,7 +8,7 @@ region -- the library itself (mga_surveyor/) never does. Swap the
 system model to use the same methods/explore.drive on a real problem.
 
 Run with: python mga_surveyor/tests/synthetic_ball.py [method] [norm] [n_iters]
-  method in {vertex_enum, bilevel, cdd}, default vertex_enum
+  method in {bilevel, cdd}, default cdd
   norm in {l1, l2, linf}, default l2 (bilevel forces linf regardless)
   n_iters default 50
 """
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 logging.basicConfig(level=logging.INFO, format="%(message)s")  # explore.drive's per-iteration logging
 
 from mga_surveyor import (
-    VertexEnumMethod, BilevelMethod, CddMethod,
+    BilevelMethod, CddMethod,
     drive,
 )
 from mga_surveyor.tests.lp_region import furthest_point, closest_point_in_region
@@ -52,8 +52,6 @@ def build_test_region(n=400, k=6, seed=0):
 
 
 def build_method(name, k, norm, executor=None):
-    if name == "vertex_enum":
-        return VertexEnumMethod(k, norm=norm, executor=executor)
     if name == "bilevel":
         return BilevelMethod(k, norm="linf")  # only norm this method supports
     if name == "cdd":
@@ -62,7 +60,7 @@ def build_method(name, k, norm, executor=None):
 
 
 def main():
-    method_name = sys.argv[1] if len(sys.argv) > 1 else "vertex_enum"
+    method_name = sys.argv[1] if len(sys.argv) > 1 else "cdd"
     norm = sys.argv[2] if len(sys.argv) > 2 else "l2"
     n_iters = int(sys.argv[3]) if len(sys.argv) > 3 else 50
 

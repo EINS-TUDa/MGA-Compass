@@ -4,7 +4,7 @@ import pypsa
 import pytest
 
 from mga_surveyor import (
-    VertexEnumMethod,
+    CddMethod,
     consolidate_mga_results,
     encode_cache_key,
     generate_mga_files,
@@ -164,11 +164,12 @@ def test_make_furthest_point_fn_bootstraps_method_directly():
     assert points.shape == (2 * k, k)
     np.testing.assert_allclose(normals, box_directions)
 
-    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method = CddMethod(k=k, norm="linf", projection_backend="highs")
     method.bootstrap(list(points), list(zip(normals, points)))
 
-    assert method.outer_vertices is not None
-    assert len(method.outer_vertices) > 0
+    trial_point, gap = method.find_trial_point()
+    assert trial_point is not None
+    assert gap >= 0.0
     assert method.max_gap() >= 0.0
 
 
@@ -355,7 +356,7 @@ def test_make_closest_point_fn_exports_every_result_in_a_batch(tmp_path):
 
 
 def test_make_closest_point_fn_end_to_end_with_explore_drive(tmp_path):
-    """The strongest check: bootstrap a real VertexEnumMethod from a real
+    """The strongest check: bootstrap a real CddMethod from a real
     network via make_oracle_fns (furthest_point, closest_point, and
     solve_optimal, wired straight into explore.drive's own parameter order)
     and drive it to convergence -- confirms all three PyPSA-side oracles
@@ -367,7 +368,7 @@ def test_make_closest_point_fn_end_to_end_with_explore_drive(tmp_path):
         n, DIMENSIONS, slack=0.1, norm="linf", output_dir=tmp_path, solver_name="highs", max_parallel=4,
     )
 
-    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method = CddMethod(k=k, norm="linf", projection_backend="highs")
     history = mga_surveyor_drive(
         method, furthest_point, closest_point, solve_optimal, tol=1e-3, max_iter=30, verbose=False,
     )
@@ -475,14 +476,14 @@ def test_make_oracle_fns_returns_three_independently_usable_callables(tmp_path):
     np.testing.assert_allclose(box_points2, box_points)
     np.testing.assert_allclose(box_normals2, box_normals)
 
-    method = VertexEnumMethod(k=k, norm="linf", backend="highs")
+    method = CddMethod(k=k, norm="linf", projection_backend="highs")
     method.bootstrap([*box_points, optimal_point], list(zip(box_normals, box_points)))
     assert method.max_gap() > 0
 
 
 def test_generate_mga_files_and_consolidate_end_to_end(tmp_path):
     """The full pipeline moved out of a caller script: builds all the
-    oracles, drives a VertexEnumMethod per slack level, writes result .nc
+    oracles, drives a CddMethod per slack level, writes result .nc
     files, then consolidates every discovered point's
     coordinates/duals/obj into two DataFrames."""
     n = _build_network()
@@ -672,7 +673,7 @@ def test_make_closest_point_fn_weights_change_which_point_is_found():
 
 
 def test_generate_mga_files_with_normalize_converges_and_output_is_unaffected(tmp_path):
-    """normalize=True changes what VertexEnumMethod itself explores
+    """normalize=True changes what CddMethod itself explores
     (a [-1, 1]^2 cube instead of raw MW), but every .nc file written and
     everything consolidate_mga_results reads back is still real units --
     the normalization is invisible outside generate_mga_files itself."""
@@ -754,7 +755,7 @@ def test_make_closest_point_fn_on_solve_fires_for_single_and_batch(tmp_path):
 
 
 def test_generate_mga_files_with_use_objective_cuts_converges_and_output_is_unaffected(tmp_path):
-    """use_objective_cuts=True adds extra cuts to VertexEnumMethod's outer
+    """use_objective_cuts=True adds extra cuts to CddMethod's outer
     approximation, but every .nc file written and everything
     consolidate_mga_results reads back is still exactly what it would be
     without it -- the extra cuts are invisible outside generate_mga_files
