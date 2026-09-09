@@ -33,22 +33,28 @@ dependencies = [
     "netCDF4",
     "numpy",
     "scipy",
+    # closest_point_on_hull backends (methods/vertex_enum.py, methods/cdd.py) and
+    # BilevelMethod's MILP -- both gurobipy/highspy are imported lazily elsewhere, so
+    # picking one backend never requires the other to actually be used. Also required
+    # (non-lazily -- a top-level import) by mga_surveyor.tests.lp_region, the
+    # test/example true-region oracle used by tests/test_*_icosahedron.py. On the
+    # default install (not an extra) since nearly every real use needs at least one.
+    "gurobipy>=13.0.2",
+    "highspy>=1.14.0",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
-# closest_point_on_hull backends (methods/vertex_enum.py, methods/cdd.py) and
-# BilevelMethod's MILP -- both gurobipy/highspy are imported lazily, so
-# picking one backend never requires the other to be installed.
-# Also required (non-lazily -- a top-level import) by mga_surveyor.tests.lp_region,
-# the test/example true-region oracle used by tests/test_*_icosahedron.py.
-gurobi = ["gurobipy>=13.0.2"]
-highs = ["highspy>=1.14.0"]
 # methods/cdd.py's ground-truth vertex computation (CddMethod, and
 # VertexEnumMethod.resync's default checkpoint). Imported lazily inside
 # cdd_vertices_of, so the package works without this extra as long as
-# CddMethod/resync are never actually called. No PyPI wheel for Python >3.13
-# on Windows as of this writing -- if `uv sync --extra cdd` fails to find a
-# build, that's why; check availability for your platform/Python before
-# depending on this extra.
-cdd = ["pycddlib>=3.0.0"]
+# CddMethod/resync are never actually called. Built locally from the
+# patched, vendored submodule at vendor/cdd/pycddlib (see tool.uv.sources
+# below and vendor/cdd/README.md) rather than a PyPI wheel -- run
+# `python vendor/cdd/build.py` once per machine/venv before `uv sync
+# --extra cdd`, or this extra will fail to build (missing cdd/cddgmp/gmp
+# headers and libs).
+cdd = ["pycddlib"]
+
+[tool.uv.sources]
+pycddlib = { path = "vendor/cdd/pycddlib", editable = true }

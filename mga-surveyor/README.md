@@ -98,14 +98,18 @@ vertex/facet count.
 
 ## Optional extras
 
-`gurobipy`, `highspy`, and `pycddlib` are all imported lazily, so installing `mga-surveyor` alone
-never forces any of them on you. Install what you need explicitly:
+`gurobipy` and `highspy` are on the default install (nearly every real use needs at least one
+solver backend), but both are still imported lazily in code — picking one backend never requires
+the other to actually be used. `pycddlib` is the one true optional extra, needed only for
+`CddMethod`/`VertexEnumMethod.resync`'s ground-truth checkpoint:
 
 | Extra | Package | Needed for |
 |---|---|---|
-| `gurobi` | `gurobipy` | `gurobi_projection`, `BilevelMethod`, and `mga_surveyor.tests.lp_region` |
-| `highs` | `highspy` | `highs_projection` (`l1`/`linf` only) |
 | `cdd` | `pycddlib` | `CddMethod`, `VertexEnumMethod.resync` |
+
+`gurobi_projection`/`BilevelMethod`/`mga_surveyor.tests.lp_region` need `gurobipy` specifically
+(a Gurobi license); `highs_projection` needs `highspy` (open-source, `l1`/`linf` only — HiGHS has
+no quadratic-objective support).
 
 `pycddlib` has no prebuilt wheel for Python 3.14 on Windows as of this writing and fails building
 from source there — check availability for your platform/Python before depending on it.

@@ -1,0 +1,730 @@
+diff --git a/lib-src/cdd.h b/lib-src/cdd.h
+index 09cfb7d..1a55c0e 100644
+--- a/lib-src/cdd.h
++++ b/lib-src/cdd.h
+@@ -90,12 +90,34 @@ dd_MatrixPtr dd_CopyInput(dd_PolyhedraPtr poly);
+ dd_MatrixPtr dd_CopyOutput(dd_PolyhedraPtr poly);
+ dd_MatrixPtr dd_CopyInequalities(dd_PolyhedraPtr poly);
+ dd_MatrixPtr dd_CopyGenerators(dd_PolyhedraPtr poly);
++dd_MatrixPtr dd_CopyGeneratorsWithIds(dd_PolyhedraPtr poly, dd_rowindex *ids,
++    dd_ErrorType *err);
++  /* Like dd_CopyGenerators, but for an inequality-representation poly
++     with poly->child->LinearityDim==0 (exactly what dd_DDAppendHalfspaces
++     supports) -- also allocates *ids as a parallel array (one entry per
++     output row, caller must free) holding each row's persistent ray id
++     (see dd_RayType.id / dd_AddRay), which stays the same for a ray that
++     survives across dd_DDAppendHalfspaces calls.  Returns NULL (and
++     leaves *ids untouched, *err set) if poly isn't an inequality
++     representation, has no fully-computed child, or has LinearityDim!=0. */
+ dd_SetFamilyPtr dd_CopyIncidence(dd_PolyhedraPtr poly);
+ dd_SetFamilyPtr dd_CopyAdjacency(dd_PolyhedraPtr poly);
+ dd_SetFamilyPtr dd_CopyInputIncidence(dd_PolyhedraPtr poly);
+ dd_SetFamilyPtr dd_CopyInputAdjacency(dd_PolyhedraPtr poly);
+ dd_boolean dd_DDFile2File(char *ifile, char *ofile, dd_ErrorType *err);
+ dd_boolean dd_DDInputAppend(dd_PolyhedraPtr* poly, dd_MatrixPtr M, dd_ErrorType* err);
++dd_boolean dd_DDAppendHalfspaces(dd_PolyhedraPtr* poly, dd_MatrixPtr M, dd_ErrorType* err);
++  /* Incrementally append the inequality rows of M to an already-computed *poly,
++     resuming the double description method instead of recomputing from scratch.
++     Restrictions: *poly must be an H-representation already fully computed
++     (dd_DDMatrix2Poly or a prior call to this function); M must contain no
++     linearity/equality rows (M->linset must be empty); every row of M must
++     match (*poly)->homogeneous (a zero first column if *poly is homogeneous);
++     and (*poly)->child->LinearityDim must be 0, i.e. the *original* matrix
++     given to dd_DDMatrix2Poly must already have full column rank (no
++     direction left entirely unconstrained) -- if it doesn't, cddlib
++     permanently reduces the cone's internal dimension during that first
++     build, and this function cannot safely append rows afterwards. */
+ dd_MatrixPtr dd_PolyFile2Matrix(FILE *f, dd_ErrorType * Error);
+ 
+ dd_PolyhedraPtr dd_DDMatrix2Poly(dd_MatrixPtr M, dd_ErrorType * err);
+@@ -230,6 +252,14 @@ void dd_CheckAdjacency(dd_ConePtr cone, dd_RayPtr* RP1, dd_RayPtr* RP2, dd_boole
+ void dd_CheckEquality(dd_colrange d_size, dd_RayPtr * RP1, dd_RayPtr * RP2, dd_boolean * equal);
+ void dd_ComputeRowOrderVector(dd_ConePtr cone);
+ void dd_ConditionalAddEdge(dd_ConePtr cone,dd_RayPtr Ray1, dd_RayPtr Ray2, dd_RayPtr ValidFirstRay);
++void dd_ConeGrowCapacity(dd_ConePtr cone, dd_rowrange new_alloc);
++void dd_ConeGrowRayZeroSets(dd_ConePtr cone, dd_rowrange new_cone_m);
++void dd_ConeInsertNewRowsIntoA(dd_ConePtr cone, dd_MatrixPtr Mnew, dd_rowrange old_cone_m, dd_rowrange new_cone_m, dd_boolean has_hom_row);
++void dd_ConeUpdateExistingRayZeroSets(dd_ConePtr cone, dd_rowrange new_row_first, dd_rowrange new_row_last);
++void dd_ConeExtendOrderVector(dd_ConePtr cone, dd_rowrange old_cone_m, dd_rowrange new_cone_m, dd_boolean has_hom_row);
++void dd_ConeRelabelHomogenizingRow(dd_ConePtr cone, dd_rowrange old_cone_m, dd_rowrange new_cone_m);
++void dd_ConePatchFirstInfeasIndex(dd_ConePtr cone, dd_rowrange old_cone_m, dd_rowrange new_cone_m);
++void dd_PolyhedraAppendRows(dd_PolyhedraPtr poly, dd_MatrixPtr Mnew);
+ void dd_CopyArow(mytype * acopy, mytype * a, dd_colrange d);
+ void dd_CopyNormalizedAmatrix(mytype ** Acopy, mytype ** A, dd_rowrange m, dd_colrange d);
+ void dd_CopyNormalizedArow(mytype * acopy, mytype * a, dd_colrange d);
+diff --git a/lib-src/cddcore.c b/lib-src/cddcore.c
+index 3e93d25..584a07f 100644
+--- a/lib-src/cddcore.c
++++ b/lib-src/cddcore.c
+@@ -94,10 +94,10 @@ dd_clear(TempPtr->Ray[j]);
+ void dd_SetInequalitySets(dd_ConePtr cone)
+ {
+   dd_rowrange i;
+-  
++
+   set_emptyset(cone->GroundSet);
+   set_emptyset(cone->EqualitySet);
+-  set_emptyset(cone->NonequalitySet);  
++  set_emptyset(cone->NonequalitySet);
+   for (i = 1; i <= (cone->parent->m); i++){
+     set_addelem(cone->GroundSet, i);
+     if (cone->parent->EqualityIndex[i]==1) set_addelem(cone->EqualitySet,i);
+@@ -105,6 +105,236 @@ void dd_SetInequalitySets(dd_ConePtr cone)
+   }
+ }
+ 
++/* --- Incremental halfspace append support (dd_DDAppendHalfspaces) ---
++   The following six helpers grow and relabel a live cone's row-indexed
++   state so that dd_DDMain can be resumed after new inequalities are
++   appended, instead of rebuilding the cone from scratch.  See
++   dd_DDAppendHalfspaces in cddlib.c for the orchestration and rationale. */
++
++void dd_ConeGrowCapacity(dd_ConePtr cone, dd_rowrange new_alloc)
++/* Grow the m_alloc-sized arrays of cone (bitsets, Edges, OrderVector, A) to
++   hold at least new_alloc rows.  This only grows capacity; it does not
++   change cone->m or fill in any new row's content -- see
++   dd_ConeInsertNewRowsIntoA for that.  A no-op if already large enough. */
++{
++  dd_rowrange old_alloc,i;
++
++  old_alloc=cone->m_alloc;
++  if (new_alloc<=old_alloc) return;
++
++  set_realloc(&(cone->GroundSet), new_alloc);
++  set_realloc(&(cone->EqualitySet), new_alloc);
++  set_realloc(&(cone->NonequalitySet), new_alloc);
++  set_realloc(&(cone->AddedHalfspaces), new_alloc);
++  set_realloc(&(cone->WeaklyAddedHalfspaces), new_alloc);
++  set_realloc(&(cone->InitialHalfspaces), new_alloc);
++    /* InitialHalfspaces is only ever read during the one-time
++       dd_FindInitialRays/dd_InitialDataSetup sequence, never again on a
++       resumed run -- grown here only defensively, for size consistency. */
++
++  cone->Edges=(dd_AdjacencyType**) realloc(cone->Edges, new_alloc*sizeof(dd_AdjacencyType*));
++  for (i=old_alloc; i<new_alloc; i++) cone->Edges[i]=NULL;
++
++  cone->OrderVector=(long*) realloc(cone->OrderVector, (new_alloc+1)*sizeof(long));
++
++  cone->A=(dd_Amatrix) realloc(cone->A, new_alloc*sizeof(mytype*));
++  for (i=old_alloc; i<new_alloc; i++) dd_InitializeArow(cone->d, &(cone->A[i]));
++
++  cone->m_alloc=new_alloc;
++}
++
++void dd_ConeGrowRayZeroSets(dd_ConePtr cone, dd_rowrange new_cone_m)
++/* Grow every live ray's ZeroSet (and the artificial ray's) to size
++   new_cone_m, matching how a freshly-created ray's ZeroSet is sized
++   (set_initialize(&RR->ZeroSet, cone->m) in dd_StoreRay1/2).  Without this,
++   later set_member/set_int/set_subset calls against the now-larger
++   AddedHalfspaces/ZeroSet pairs (e.g. in dd_ConditionalAddEdge) would be
++   size-mismatched.  Must run before dd_ConeRelabelHomogenizingRow. */
++{
++  dd_RayPtr RayPtr;
++
++  if (cone->ArtificialRay!=NULL)
++    set_realloc(&(cone->ArtificialRay->ZeroSet), new_cone_m);
++  for (RayPtr=cone->FirstRay; RayPtr!=NULL; RayPtr=RayPtr->Next)
++    set_realloc(&(RayPtr->ZeroSet), new_cone_m);
++}
++
++void dd_ConeInsertNewRowsIntoA(dd_ConePtr cone, dd_MatrixPtr Mnew,
++    dd_rowrange old_cone_m, dd_rowrange new_cone_m, dd_boolean has_hom_row)
++/* Write the newly appended rows' coefficients into cone->A.  When an
++   inhomogeneous H-representation's artificial homogenizing row (1,0,...,0)
++   is present, it currently occupies row old_cone_m and must move to the
++   new last row new_cone_m, since the new inequalities take over its old
++   slot.  The move is done by rotating row-POINTERS (never copying row
++   values), so the homogenizing row's own storage is never aliased or
++   overwritten by the dd_set calls that follow. */
++{
++  dd_rowrange i,k=Mnew->rowsize,fill_start;
++  dd_colrange j,d=cone->d;
++  mytype *hom_row;
++
++  if (has_hom_row) {
++    hom_row=cone->A[old_cone_m-1];
++    for (i=old_cone_m-1; i<new_cone_m-1; i++)
++      cone->A[i]=cone->A[i+1];
++    cone->A[new_cone_m-1]=hom_row;
++    fill_start=old_cone_m-1;
++  } else {
++    fill_start=old_cone_m;
++  }
++
++  for (i=0; i<k; i++)
++    for (j=0; j<d; j++)
++      dd_set(cone->A[fill_start+i][j], Mnew->matrix[i][j]);
++}
++
++void dd_ConeUpdateExistingRayZeroSets(dd_ConePtr cone,
++    dd_rowrange new_row_first, dd_rowrange new_row_last)
++/* A ray's ZeroSet is populated once, at creation time (dd_StoreRay1/2), by
++   testing it against exactly the rows that existed at that moment -- it is
++   never retroactively re-tested against rows appended later, even when a
++   newly appended row happens to be exactly tight (zero) for that ray. In a
++   normal from-scratch run this is harmless, since cone->m is fixed and
++   known from the start, so every ray's ZeroSet already reflects the full
++   and final row set the instant it is created. On resume, though, a ray
++   surviving from before this append can be genuinely tight against one of
++   the newly-inserted rows without that ever being recorded.
++   dd_CheckAdjacency's combinatorial test intersects two rays' ZeroSets
++   with cone->AddedHalfspaces to measure their common face: an omitted bit
++   here silently undercounts that face and can wrongly declare a genuinely
++   adjacent pair non-adjacent, causing dd_AddNewHalfspace1 to skip a vertex/
++   ray it should have created. Evaluate every currently-live ray (and the
++   artificial ray) against each newly-inserted row and record any exact
++   zero, before dd_DDMain resumes. Must run after dd_ConeInsertNewRowsIntoA
++   (needs the new rows' data already in cone->A) and after
++   dd_ConeGrowRayZeroSets (needs capacity for the new row numbers).
++
++   Same pass also repairs cone->WeaklyFeasibleRayCount, for the same
++   underlying reason: dd_StoreRay1/2 sets a ray's `feasible` flag (and
++   increments this counter) by testing it against cone->m AT THE RAY'S OWN
++   CREATION TIME. A ray surviving from before this append had that test
++   done against the OLD, smaller m -- it has never actually been checked
++   against the newly-inserted rows, yet its `feasible` flag and this
++   counter's contribution from it are already fixed as if it had been.
++   dd_DDMain's own early-exit optimization (cddlib.c: "if
++   (cone->RayCount==cone->WeaklyFeasibleRayCount) cone->CompStatus=
++   dd_AllFound") trusts this counter to mean "every currently-live ray is
++   feasible against the full current row set, so nothing further can ever
++   go infeasible" -- true in a fresh build (m fixed throughout), false
++   here unless corrected: a stale-feasible survivor that actually violates
++   one of the not-yet-processed new rows can make RayCount equal this
++   counter by sheer coincidence (eliminations and new-ray creations
++   changing both sides in step) long before every new row has actually
++   been folded in via dd_AddNewHalfspace1/2, causing dd_DDMain to stop and
++   silently skip whichever new rows dd_SelectNextHalfspace0's
++   largest-index-first order had not yet reached (confirmed in practice:
++   a 3-row batch append left 2 of the 3 rows completely unprocessed this
++   way, producing 14 vertices where the true, independently-recomputed
++   answer was 12). A ray found negative here was, in truth, never
++   feasible against the current row set at all -- correct its `feasible`
++   flag and this counter immediately, rather than waiting for
++   dd_AddNewHalfspace1 to eventually reach the offending row and evaluate
++   it directly (which still happens, and still correctly eliminates it --
++   this fix only stops the early-exit heuristic from short-circuiting
++   before that happens). */
++{
++  dd_RayPtr RayPtr;
++  dd_rowrange k;
++  mytype temp;
++
++  dd_init(temp);
++  for (k=new_row_first; k<=new_row_last; k++) {
++    dd_AValue(&temp, cone->d, cone->A, cone->ArtificialRay->Ray, k);
++    if (dd_EqualToZero(temp)) set_addelem(cone->ArtificialRay->ZeroSet, k);
++    for (RayPtr=cone->FirstRay; RayPtr!=NULL; RayPtr=RayPtr->Next) {
++      dd_AValue(&temp, cone->d, cone->A, RayPtr->Ray, k);
++      if (dd_EqualToZero(temp)) set_addelem(RayPtr->ZeroSet, k);
++      else if (dd_Negative(temp) && RayPtr->feasible) {
++        RayPtr->feasible = dd_FALSE;
++        (cone->WeaklyFeasibleRayCount)--;
++      }
++    }
++  }
++  dd_clear(temp);
++}
++
++void dd_ConeExtendOrderVector(dd_ConePtr cone, dd_rowrange old_cone_m,
++    dd_rowrange new_cone_m, dd_boolean has_hom_row)
++/* Append entries for the newly appended rows to cone->OrderVector, without
++   touching positions [1..old_cone_m] except relocating the homogenizing
++   row's own entry when present (its row number changes from old_cone_m to
++   new_cone_m -- see dd_ConeInsertNewRowsIntoA).  Safe for both
++   PreOrderedRun settings: dd_SelectPreorderedNext just linearly scans
++   OrderVector[1..m] for an unprocessed row, and the non-preordered
++   dd_DDMain loop rewrites OrderVector dynamically as it goes regardless. */
++{
++  dd_rowrange p,idx;
++
++  if (has_hom_row) {
++    for (p=1; p<=old_cone_m; p++)
++      if (cone->OrderVector[p]==old_cone_m) { cone->OrderVector[p]=new_cone_m; break; }
++    for (idx=1; idx<=new_cone_m-old_cone_m; idx++)
++      cone->OrderVector[old_cone_m+idx]=old_cone_m+idx-1;
++  } else {
++    for (idx=1; idx<=new_cone_m-old_cone_m; idx++)
++      cone->OrderVector[old_cone_m+idx]=old_cone_m+idx;
++  }
++}
++
++void dd_ConeRelabelHomogenizingRow(dd_ConePtr cone, dd_rowrange old_cone_m,
++    dd_rowrange new_cone_m)
++/* The homogenizing row's cone-row-number changed from old_cone_m to
++   new_cone_m (see dd_ConeInsertNewRowsIntoA).  Move the corresponding bit
++   in every row-indexed set that may reference it: AddedHalfspaces,
++   WeaklyAddedHalfspaces, and every live (including artificial) ray's
++   ZeroSet.  Must run after dd_ConeGrowRayZeroSets, since set_addelem
++   silently no-ops on a set too small to hold new_cone_m. */
++{
++  dd_RayPtr RayPtr;
++
++  if (set_member(old_cone_m, cone->AddedHalfspaces)) {
++    set_delelem(cone->AddedHalfspaces, old_cone_m);
++    set_addelem(cone->AddedHalfspaces, new_cone_m);
++  }
++  if (set_member(old_cone_m, cone->WeaklyAddedHalfspaces)) {
++    set_delelem(cone->WeaklyAddedHalfspaces, old_cone_m);
++    set_addelem(cone->WeaklyAddedHalfspaces, new_cone_m);
++  }
++  if (cone->ArtificialRay!=NULL && set_member(old_cone_m, cone->ArtificialRay->ZeroSet)) {
++    set_delelem(cone->ArtificialRay->ZeroSet, old_cone_m);
++    set_addelem(cone->ArtificialRay->ZeroSet, new_cone_m);
++  }
++  for (RayPtr=cone->FirstRay; RayPtr!=NULL; RayPtr=RayPtr->Next) {
++    if (set_member(old_cone_m, RayPtr->ZeroSet)) {
++      set_delelem(RayPtr->ZeroSet, old_cone_m);
++      set_addelem(RayPtr->ZeroSet, new_cone_m);
++    }
++  }
++}
++
++void dd_ConePatchFirstInfeasIndex(dd_ConePtr cone, dd_rowrange old_cone_m,
++    dd_rowrange new_cone_m)
++/* Every ray alive when a run finishes carries FirstInfeasIndex==old_cone_m+1
++   as a sentinel meaning "feasible against every row tested so far" (see
++   dd_StoreRay1/dd_StoreRay2).  Once cone->m grows, that stale value would
++   silently become a real, wrong iteration position instead of "infinity",
++   which would corrupt dd_ConditionalAddEdge/dd_AddNewHalfspace2's edge
++   scheduling.  dd_DDAppendHalfspaces currently forces PreOrderedRun=FALSE
++   for every resumed call specifically because that scheduling has its own,
++   deeper incompatibility with resumption (see the comment in
++   dd_DDAppendHalfspaces), so dd_AddNewHalfspace1 -- which never reads
++   FirstInfeasIndex -- is what actually runs.  This patch is kept anyway as
++   a defensive measure, in case PreOrderedRun is ever re-enabled here. */
++{
++  dd_RayPtr RayPtr;
++
++  if (cone->ArtificialRay!=NULL && cone->ArtificialRay->FirstInfeasIndex==old_cone_m+1)
++    cone->ArtificialRay->FirstInfeasIndex=new_cone_m+1;
++  for (RayPtr=cone->FirstRay; RayPtr!=NULL; RayPtr=RayPtr->Next)
++    if (RayPtr->FirstInfeasIndex==old_cone_m+1)
++      RayPtr->FirstInfeasIndex=new_cone_m+1;
++}
++
+ 
+ void dd_AValue(mytype *val, dd_colrange d_size, dd_Amatrix A, mytype *p, dd_rowrange i)
+ {
+@@ -236,6 +466,7 @@ void dd_AddRay(dd_ConePtr cone, mytype *p)
+     cone->LastRay = cone->LastRay->Next;
+   }
+   cone->LastRay->Next = NULL;
++  cone->LastRay->id = (cone->NextRayId)++;
+   cone->RayCount++;
+   cone->TotalRayCount++;
+   if (dd_debug) {
+@@ -275,6 +506,7 @@ void dd_AddArtificialRay(dd_ConePtr cone)
+   cone->ArtificialRay->Ray = (mytype *) calloc(d1, sizeof(mytype));
+   for (j=0; j<d1; j++) dd_init(cone->ArtificialRay->Ray[j]);
+   dd_init(cone->ArtificialRay->ARay);
++  cone->ArtificialRay->id = 0;  /* reserved: never a real, emitted generator */
+ 
+   if (dd_debug) fprintf(stderr,"Create the artificial ray pointer\n");
+ 
+diff --git a/lib-src/cddio.c b/lib-src/cddio.c
+index dfb3847..24c9abf 100644
+--- a/lib-src/cddio.c
++++ b/lib-src/cddio.c
+@@ -763,6 +763,42 @@ dd_PolyhedraPtr dd_CreatePolyhedraData(dd_rowrange m, dd_colrange d)
+   return poly;
+ }
+ 
++void dd_PolyhedraAppendRows(dd_PolyhedraPtr poly, dd_MatrixPtr Mnew)
++/* Append the rows of Mnew to poly->A in place, growing poly->A and
++   poly->EqualityIndex only when the existing m+2 slack allocation
++   (dd_CreatePolyhedraData) is not enough.  Used by dd_DDAppendHalfspaces
++   (cddlib.c) for the incremental halfspace-append feature; unlike
++   dd_AppendMatrix2Poly/dd_MatrixAppendTo, this never rebuilds a fresh
++   matrix and copies everything -- since poly->A is an array of
++   independently-allocated row pointers, growing it is a cheap realloc of
++   the pointer array plus initializing only the new rows. */
++{
++  dd_rowrange old_m,new_m,old_alloc,new_alloc,i;
++  dd_colrange j,d=poly->d;
++
++  old_m=poly->m;
++  new_m=old_m+Mnew->rowsize;
++  old_alloc=poly->m_alloc;
++  new_alloc=new_m+2;
++
++  if (new_alloc>old_alloc) {
++    poly->A=(dd_Amatrix) realloc(poly->A, new_alloc*sizeof(mytype*));
++    for (i=old_alloc; i<new_alloc; i++) dd_InitializeArow(d, &(poly->A[i]));
++
++    poly->EqualityIndex=(dd_rowflag) realloc(poly->EqualityIndex, new_alloc*sizeof(int));
++    for (i=old_alloc; i<new_alloc; i++) poly->EqualityIndex[i]=0;
++
++    poly->m_alloc=new_alloc;
++  }
++
++  for (i=0; i<Mnew->rowsize; i++)
++    for (j=0; j<d; j++)
++      dd_set(poly->A[old_m+i][j], Mnew->matrix[i][j]);
++
++  poly->m=new_m;
++  poly->n=-1;  /* output size is stale until dd_DDMain recomputes it */
++}
++
+ dd_boolean dd_InitializeConeData(dd_rowrange m, dd_colrange d, dd_ConePtr *cone)
+ {
+   dd_boolean success=dd_TRUE;
+@@ -811,7 +847,8 @@ dd_boolean dd_InitializeConeData(dd_rowrange m, dd_colrange d, dd_ConePtr *cone)
+   (*cone)->count_int_good=0;
+   (*cone)->count_int_bad=0;
+   (*cone)->rseed=1;  /* random seed for random row permutation */
+- 
++  (*cone)->NextRayId=1;  /* 0 is reserved/unused, see dd_RayType.id */
++
+   dd_InitializeBmatrix((*cone)->d_alloc, &((*cone)->B));
+   dd_InitializeBmatrix((*cone)->d_alloc, &((*cone)->Bsave));
+   dd_InitializeAmatrix((*cone)->m_alloc,(*cone)->d_alloc,&((*cone)->A));
+@@ -1729,7 +1766,11 @@ void dd_WriteErrorMessages(FILE *f, dd_ErrorType Error)
+  case dd_NumericallyInconsistent:
+     fprintf(f, "*Error: Numerical inconsistency is found.  Use the GMP exact arithmetic.\n");
+     break;
+-    
++
++ case dd_PolyhedraNotComputed:
++    fprintf(f, "*Error: dd_DDAppendHalfspaces requires a polyhedron already fully computed by dd_DDMatrix2Poly (or a prior dd_DDAppendHalfspaces call), and the appended matrix must contain no linearity/equality rows and must match the polyhedron's homogeneity.\n");
++    break;
++
+   case dd_NoError:
+     fprintf(f,"*No Error found.\n");
+     break;
+@@ -1925,6 +1966,64 @@ dd_MatrixPtr dd_CopyGenerators(dd_PolyhedraPtr poly)
+   return M;
+ }
+ 
++dd_MatrixPtr dd_CopyGeneratorsWithIds(dd_PolyhedraPtr poly, dd_rowindex *ids,
++    dd_ErrorType *err)
++/* Like dd_CopyOutput/dd_CopyGenerators, but for exactly the case
++   dd_DDAppendHalfspaces supports (an inequality/H-representation
++   polyhedron with poly->child->LinearityDim==0, so every output row
++   corresponds to a real, live dd_RayType and none to a synthetic
++   dependent-column or origin row).  Returns the same generator matrix
++   dd_CopyGenerators would, and additionally allocates *ids as a parallel
++   array (one entry per output row, 0-indexed to match M->matrix) holding
++   that row's persistent ray id -- dd_RayType.id, assigned once when the
++   ray is created and never reused or changed for as long as the ray
++   survives (see dd_AddRay).  A ray that is untouched by a
++   dd_DDAppendHalfspaces call keeps the same id across the call, so a
++   caller can recognize "the same vertex" by an exact integer match
++   instead of a floating-point-tolerant value comparison; a row whose id
++   was not present in an earlier snapshot is a newly created generator,
++   and an id from an earlier snapshot missing from a later one was
++   eliminated.  Caller must free(*ids).  Returns NULL (and leaves *ids
++   untouched, *err set) if poly is not an inequality representation
++   (dd_NotAvailForV), has no fully-computed child (dd_PolyhedraNotComputed),
++   or has LinearityDim!=0 (dd_CannotHandleLinearity, the same restriction
++   and error code dd_DDAppendHalfspaces uses for this condition). */
++{
++  dd_RayPtr RayPtr;
++  dd_MatrixPtr M=NULL;
++  dd_rowrange i=0,total;
++
++  *ids=NULL;
++  *err=dd_NoError;
++  if (poly==NULL || poly->representation!=dd_Inequality) {
++    *err=dd_NotAvailForV;
++    return NULL;
++  }
++  if (poly->child==NULL || poly->child->CompStatus!=dd_AllFound) {
++    *err=dd_PolyhedraNotComputed;
++    return NULL;
++  }
++  if (poly->child->LinearityDim!=0) {
++    *err=dd_CannotHandleLinearity;
++    return NULL;
++  }
++
++  total=poly->child->FeasibleRayCount;
++  M=dd_CreateMatrix(total, poly->d);
++  *ids=(dd_rowindex) calloc(total>0 ? total : 1, sizeof(long));
++
++  for (RayPtr=poly->child->FirstRay; RayPtr!=NULL; RayPtr=RayPtr->Next) {
++    if (RayPtr->feasible) {
++      dd_CopyRay(M->matrix[i], poly->d, RayPtr, dd_Generator, poly->child->newcol);
++      (*ids)[i]=RayPtr->id;
++      i++;
++    }
++  }
++  dd_MatrixIntegerFilter(M);
++  M->representation=dd_Generator;
++  return M;
++}
++
+ dd_MatrixPtr dd_CopyInequalities(dd_PolyhedraPtr poly)
+ {
+   dd_MatrixPtr M=NULL;
+diff --git a/lib-src/cddlib.c b/lib-src/cddlib.c
+index 56db80a..ffc716a 100644
+--- a/lib-src/cddlib.c
++++ b/lib-src/cddlib.c
+@@ -329,6 +329,161 @@ dd_boolean dd_DDInputAppend(dd_PolyhedraPtr *poly, dd_MatrixPtr M,
+   return found;
+ }
+ 
++dd_boolean dd_DDAppendHalfspaces(dd_PolyhedraPtr *poly, dd_MatrixPtr Mnew,
++  dd_ErrorType *err)
++{
++  /* True incremental append: unlike dd_DDInputAppend/dd_AppendMatrix2Poly
++     above, this keeps the existing cone alive and resumes dd_DDMain over
++     only the newly appended rows, instead of recomputing everything.
++     See cdd.h for the restrictions this relies on (no equality rows in
++     Mnew; homogeneity of *poly must be preserved by every appended row;
++     *poly must already be fully computed). */
++  dd_PolyhedraPtr p;
++  dd_ConePtr cone;
++  dd_rowrange old_cone_m,new_cone_m,new_row_first,new_row_last,i;
++  dd_boolean has_hom_row;
++
++  *err=dd_NoError;
++  p=*poly;
++
++  if (p==NULL || p->representation!=dd_Inequality) {
++    *err=dd_NotAvailForV;
++    return dd_FALSE;
++  }
++  if (p->child==NULL || p->child->CompStatus!=dd_AllFound) {
++    *err=dd_PolyhedraNotComputed;
++    return dd_FALSE;
++  }
++  if (Mnew==NULL || Mnew->rowsize==0) return dd_TRUE;  /* nothing to do */
++  if (Mnew->colsize!=p->d) {
++    *err=dd_ColIndexOutOfRange;
++    return dd_FALSE;
++  }
++  if (set_card(Mnew->linset)>0) {
++    *err=dd_CannotHandleLinearity;
++    return dd_FALSE;
++  }
++  if (p->child->LinearityDim>0) {
++    /* cone->d was permanently reduced by dd_ColumnReduce during the initial
++       build (cddcore.c: cone->LinearityDim = cone->d - rank(A), triggered
++       whenever the *initial* matrix leaves some direction unconstrained --
++       not only by explicit equality rows).  cone->A's columns no longer
++       correspond 1:1 to Mnew's columns, and re-deriving the reduced basis
++       to accommodate new rows is exactly the destructive
++       dd_FindInitialRays/dd_InitialDataSetup work this function must skip.
++       Reject rather than silently insert misaligned column data. */
++    *err=dd_CannotHandleLinearity;
++    return dd_FALSE;
++  }
++  if (p->homogeneous) {
++    for (i=1; i<=Mnew->rowsize; i++)
++      if (dd_Nonzero(Mnew->matrix[i-1][0])) {
++        *err=dd_PolyhedraNotComputed;
++        return dd_FALSE;
++      }
++  }
++
++  cone=p->child;
++  old_cone_m=cone->m;
++  has_hom_row=(p->representation==dd_Inequality && !p->homogeneous);
++
++  dd_PolyhedraAppendRows(p, Mnew);
++  new_cone_m=p->m+(has_hom_row ? 1 : 0);
++
++  dd_ConeGrowCapacity(cone, new_cone_m+2);
++  dd_SetInequalitySets(cone);  /* rebuild GroundSet/EqualitySet/NonequalitySet for the new poly->m */
++  dd_ConeGrowRayZeroSets(cone, new_cone_m);  /* must precede relabeling below */
++  dd_ConeInsertNewRowsIntoA(cone, Mnew, old_cone_m, new_cone_m, has_hom_row);
++  dd_ConeExtendOrderVector(cone, old_cone_m, new_cone_m, has_hom_row);
++  if (has_hom_row) dd_ConeRelabelHomogenizingRow(cone, old_cone_m, new_cone_m);
++    /* Must run BEFORE dd_ConeUpdateExistingRayZeroSets below: right after
++       dd_ConeInsertNewRowsIntoA, the newly-inserted row's number is the
++       SAME number the homogenizing row used to have (its old slot was
++       reused).  Relabeling moves the *old* meaning of that bit (tightness
++       against the homogenizing row) away to its new number first, so that
++       setting the bit again next -- for the unrelated fact that a ray may
++       also be tight against the genuinely new row now at that same number
++       -- can never be confused with or clobbered by the relabeling. */
++  if (has_hom_row) { new_row_first=old_cone_m; new_row_last=new_cone_m-1; }
++  else { new_row_first=old_cone_m+1; new_row_last=new_cone_m; }
++  dd_ConeUpdateExistingRayZeroSets(cone, new_row_first, new_row_last);
++  dd_ConePatchFirstInfeasIndex(cone, old_cone_m, new_cone_m);
++
++  cone->m=new_cone_m;
++  p->m1=new_cone_m;
++  cone->CompStatus=dd_InProgress;
++  cone->Iteration=old_cone_m+1;
++    /* dd_DDMain's own loop has an early-exit path (cddlib.c: once
++       RayCount==WeaklyFeasibleRayCount mid-loop, it jumps to its tail via
++       goto _L99 WITHOUT running the loop's own Iteration++) that can leave
++       cone->Iteration well short of old_cone_m+1 even though every row up
++       to old_cone_m was already correctly folded in and CompStatus is
++       dd_AllFound -- the precondition check above only verifies
++       CompStatus, not Iteration, so a resumed run can inherit that stale
++       value.  Left uncorrected, the while(Iteration<=m) loop below then
++       runs MORE iterations than there are actually-new rows to process:
++       after the genuinely new rows are exhausted, dd_SelectNextHalfspace
++       has nothing left to select (every row is already in
++       WeaklyAddedHalfspaces) and returns an invalid row number, which
++       dd_AddNewHalfspace1 then dereferences into cone->A -- an
++       out-of-bounds access. Resetting Iteration here to exactly
++       old_cone_m+1 makes the resumed loop run precisely
++       new_cone_m-old_cone_m times (one per newly appended row),
++       regardless of what the previous run's own Iteration bookkeeping
++       happened to end on. */
++  cone->PreOrderedRun=dd_FALSE;
++    /* Force dd_AddNewHalfspace1 for the resumed portion, regardless of the
++       HalfspaceOrder used for the initial build.  dd_AddNewHalfspace2 (the
++       PreOrderedRun==TRUE path, e.g. the dd_LexMin default) relies entirely
++       on adjacency pairs pre-scheduled into cone->Edges[] at ray-creation
++       time via dd_ConditionalAddEdge -- and that scheduler explicitly skips
++       any pair whose FirstInfeasIndex values are EQUAL (cddcore.c: "equal
++       FII value -> No edge added"), reasoning that two rays which are both
++       "feasible forever" never need to be combined.  That is true only if m
++       never grows: once new rows are appended, two such rays can still be
++       genuinely adjacent and require combining if one of them is later
++       eliminated -- but that pair was never scheduled, at any iteration, so
++       dd_AddNewHalfspace2 silently drops the new vertex/ray that should
++       replace the eliminated one.  dd_AddNewHalfspace1 has no such
++       precomputed schedule: it re-derives adjacency by a fresh pairwise
++       scan of the live ray list on every call, so it always finds this
++       combination correctly.  Row selection order is a performance
++       heuristic only (dd_SelectNextHalfspace falls back to
++       dd_SelectNextHalfspace0 for any HalfspaceOrder it doesn't special-case
++       when PreOrderedRun is off), so this never affects correctness. */
++
++  dd_DDMain(cone);  /* resumes from cone->Iteration=old_cone_m+1, set above */
++
++  if (cone->CompStatus==dd_InProgress && cone->Iteration>cone->m)
++    cone->CompStatus=dd_AllFound;
++    /* Safety net: WeaklyFeasibleRayCount only ever increases, so if this
++       append eliminated a ray that an earlier run had already counted as
++       weakly feasible, RayCount==WeaklyFeasibleRayCount may never become
++       true again even though the loop has legitimately finished. */
++
++  if (cone->CompStatus==dd_AllFound) {
++    /* dd_DDMain's own tail bookkeeping (cone->parent->n/ldim, the output
++       size) is derived from cone->FeasibleRayCount -- a count that, unlike
++       in a from-scratch run, is stale here: it only ever increases, so a
++       ray that was feasible against the smaller old m but got eliminated
++       by a newly appended row is still counted.  Once the run has
++       genuinely completed, every ray still in FirstRay is, by the DD
++       method's own invariant, feasible against all cone->m rows, so
++       cone->RayCount is the correct current count -- resync it and
++       recompute the output size exactly as dd_DDMain's tail does. */
++    cone->FeasibleRayCount=cone->RayCount;
++    if (cone->d<=0 || cone->newcol[1]==0){
++      cone->parent->n=cone->LinearityDim + cone->FeasibleRayCount -1;
++      cone->parent->ldim=cone->LinearityDim -1;
++    } else {
++      cone->parent->n=cone->LinearityDim + cone->FeasibleRayCount;
++      cone->parent->ldim=cone->LinearityDim;
++    }
++  }
++
++  return (cone->CompStatus==dd_AllFound);
++}
++
+ dd_boolean dd_DDFile2File(char *ifile, char *ofile, dd_ErrorType *err)
+ {
+   /* The representation conversion from an input file to an outfile.  */
+diff --git a/lib-src/cddtypes.h b/lib-src/cddtypes.h
+index 03b147b..bfa6b14 100644
+--- a/lib-src/cddtypes.h
++++ b/lib-src/cddtypes.h
+@@ -55,6 +55,10 @@ typedef struct dd_raydata {
+   dd_rowrange FirstInfeasIndex;  /* the first inequality the ray violates */
+   dd_boolean feasible;  /* flag to store the feasibility */
+   mytype ARay;   /* temporary area to store some row of A*Ray */
++  long id;  /* assigned once at creation from cone->NextRayId (dd_AddRay);
++               never reused or changed while the ray survives, including
++               across dd_DDAppendHalfspaces calls -- see
++               dd_CopyGeneratorsWithIds. 0 is reserved/unused. */
+   dd_RayPtr Next;
+ } dd_RayType;
+ 
+@@ -105,6 +109,7 @@ typedef enum {
+   dd_NotAvailForH, dd_NotAvailForV, dd_CannotHandleLinearity,
+   dd_RowIndexOutOfRange, dd_ColIndexOutOfRange,
+   dd_LPCycling, dd_NumericallyInconsistent,
++  dd_PolyhedraNotComputed,
+   dd_NoError
+ } dd_ErrorType;
+ 
+@@ -295,6 +300,9 @@ typedef struct dd_conedata {
+   dd_RayPtr PosHead, ZeroHead, NegHead, PosLast, ZeroLast, NegLast;
+   dd_AdjacencyType **Edges;  /* adjacency relation storage for iteration k */
+   unsigned int rseed;  /* random seed for random row permutation */
++  long NextRayId;  /* next id to assign to a new ray (dd_AddRay); keeps
++                       counting up across dd_DDAppendHalfspaces calls, so
++                       ids are never reused for as long as the cone lives */
+ 
+   dd_boolean ColReduced;  /* flag to indicate that a column basis is computed and reduced */
+   dd_bigrange LinearityDim;   
+diff --git a/lib-src/setoper.c b/lib-src/setoper.c
+index 1967598..98f622a 100644
+--- a/lib-src/setoper.c
++++ b/lib-src/setoper.c
+@@ -69,6 +69,27 @@ void set_free(set_type set)
+     free(set);
+ }
+ 
++void set_realloc(set_type *setp, long newlength)
++/* Grow or shrink the set *setp in place to a new ground set size,
++   preserving elements that still fit and zero-filling the rest.
++   Note: set_copy() must NOT be used for growing a set -- it loops over
++   set_blocks(setcopy[0])-1 blocks reading from the source, so if the
++   destination is larger than the source it reads past the source's
++   allocation. */
++{
++	set_type newset;
++	long oldblocks,newblocks,copyblocks,i;
++
++	oldblocks=set_blocks((*setp)[0])-1;
++	set_initialize(&newset, newlength);
++	newblocks=set_blocks(newset[0])-1;
++	copyblocks=(oldblocks<newblocks) ? oldblocks : newblocks;
++	for (i=1; i<=copyblocks; i++)
++		newset[i]=(*setp)[i];
++	set_free(*setp);
++	*setp=newset;
++}
++
+ void set_emptyset(set_type set)
+ /* Set set to be the emptyset  */
+ {
+diff --git a/lib-src/setoper.h b/lib-src/setoper.h
+index 2677c13..fc6d7c7 100644
+--- a/lib-src/setoper.h
++++ b/lib-src/setoper.h
+@@ -23,6 +23,7 @@ extern "C" {
+ 
+ unsigned long set_blocks(long len);
+ void set_initialize(set_type *setp,long length);
++void set_realloc(set_type *setp,long newlength); /* grow/shrink a set in place, preserving existing elements */
+ void set_free(set_type set);
+ void set_emptyset(set_type set);
+ void set_copy(set_type setcopy,set_type set);
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 21313d4..04b0990 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -19,7 +19,8 @@ cddexec
+ noinst_PROGRAMS = \
+ redexter \
+ redundancies \
+-redundancies_clarkson
++redundancies_clarkson \
++testcdd_incremental
+ 
+ LDADD = ../lib-src/libcdd.la
+ AM_CPPFLAGS = -I$(top_srcdir)/lib-src
+diff --git a/src/Makefile.gmp.am b/src/Makefile.gmp.am
+index cfd798b..c1a80be 100644
+--- a/src/Makefile.gmp.am
++++ b/src/Makefile.gmp.am
+@@ -92,4 +92,9 @@ redexter_gmp_SOURCES = redexter.c
+ redexter_gmp_LDADD = $(gmp_ldflags)
+ redexter_gmp_CPPFLAGS = $(gmp_cppflags)
+ 
++noinst_PROGRAMS += testcdd_incremental_gmp
++testcdd_incremental_gmp_SOURCES = testcdd_incremental.c
++testcdd_incremental_gmp_LDADD = $(gmp_ldflags)
++testcdd_incremental_gmp_CPPFLAGS = $(gmp_cppflags)
++
+ endif

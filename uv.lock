@@ -982,6 +982,8 @@ name = "mga-surveyor"
 version = "0.1.0"
 source = { editable = "mga-surveyor" }
 dependencies = [
+    { name = "gurobipy" },
+    { name = "highspy" },
     { name = "netcdf4" },
     { name = "numpy" },
     { name = "pandas" },
@@ -993,29 +995,23 @@ dependencies = [
 cdd = [
     { name = "pycddlib" },
 ]
-gurobi = [
-    { name = "gurobipy" },
-]
-highs = [
-    { name = "highspy" },
-]
 test = [
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "gurobipy", marker = "extra == 'gurobi'", specifier = ">=13.0.2" },
-    { name = "highspy", marker = "extra == 'highs'", specifier = ">=1.14.0" },
+    { name = "gurobipy", specifier = ">=13.0.2" },
+    { name = "highspy", specifier = ">=1.14.0" },
     { name = "netcdf4" },
     { name = "numpy" },
     { name = "pandas" },
-    { name = "pycddlib", marker = "extra == 'cdd'", specifier = ">=3.0.0" },
+    { name = "pycddlib", marker = "extra == 'cdd'", editable = "mga-surveyor/vendor/cdd/pycddlib" },
     { name = "pypsa", specifier = ">=1.3.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },
     { name = "scipy" },
 ]
-provides-extras = ["test", "gurobi", "highs", "cdd"]
+provides-extras = ["test", "cdd"]
 
 [[package]]
 name = "mgaserver"
@@ -1417,12 +1413,21 @@ wheels = [
 
 [[package]]
 name = "pycddlib"
-version = "3.0.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d2/25/85e2e17491a4d51f796f7212a13cef7d6d3b2967dfba104627a465224f06/pycddlib-3.0.2.tar.gz", hash = "sha256:50f43f039818ab97c8cb44345eed9a365dae66789ce11cc8c95a74134a8907a7", size = 31621, upload-time = "2025-01-13T10:18:41.869Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/8f/5356fcce6a101c3af56bb465e603f49958304d649b939a36487d1f31a3cb/pycddlib-3.0.2-cp313-cp313-win_amd64.whl", hash = "sha256:d22c9525aa2b271efde3a04306979d59513a663e320c60ece068d1d1ecede12d", size = 353982, upload-time = "2025-01-13T10:18:37.59Z" },
+version = "3.0.3a2"
+source = { editable = "mga-surveyor/vendor/cdd/pycddlib" }
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'test'" },
+    { name = "flake8", marker = "extra == 'test'" },
+    { name = "gmpy2", marker = "extra == 'test'" },
+    { name = "isort", marker = "extra == 'test'" },
+    { name = "mypy", marker = "extra == 'test'" },
+    { name = "numpy", marker = "extra == 'test'" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "sphinx", marker = "extra == 'doc'" },
 ]
+provides-extras = ["test", "doc"]
 
 [[package]]
 name = "pydantic"

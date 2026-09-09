@@ -20,8 +20,9 @@
   recomputing the whole polytope -- via ``polyhedron_append_halfspaces``
   (present on both the ``cdd`` and ``cdd.gmp`` modules), when the installed
   ``cdd``/``cdd.gmp`` has it. That function is a local patch on top of
-  pycddlib/cddlib (see the ``mycode/cdd`` project notes) that isn't part of
-  any upstream pycddlib release: cddlib's own public incremental-looking
+  pycddlib/cddlib (vendored, with the patch, under ``vendor/cdd`` -- see
+  ``vendor/cdd/README.md``) that isn't part of any upstream pycddlib
+  release: cddlib's own public incremental-looking
   entry point, ``dd_DDInputAppend``, is an admitted stub ("This is
   incomplete. It simply solves the problem from scratch.") that just
   reruns the whole Double Description method. When

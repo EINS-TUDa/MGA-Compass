@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# vendor/cdd build.py output (vendor/cdd/README.md documents how to regenerate)
+vendor/cdd/_build/
+vendor/cdd/_install/
+vendor/cdd/_vcpkg/
+vendor/cdd/vcpkg_installed/
