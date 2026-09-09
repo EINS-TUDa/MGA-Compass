@@ -1,26 +1,55 @@
 """``CddMethod``.
 
-- Recomputes the outer polytope's vertex set from scratch each time it's
-  needed, via cdd's (Fukuda's) Double Description method, rather than
-  maintaining it incrementally.
-- The simplest of the three methods and the one with the strongest
-  correctness guarantee (cdd is a mature, independent implementation), at
-  the cost of redoing O(accumulated halfspaces) work on every call instead
-  of folding in one cut at a time. See
-  :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod` for the
-  incremental alternative, and
-  :meth:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod.resync` for
-  using this method as a periodic ground-truth checkpoint on top of that
-  faster path instead of using it as the primary engine.
-
-``cdd``'s public API has no supported way to resume a previous computation:
-``dd_DDInputAppend`` exists in cddlib with a signature suggesting exactly
-that, but its actual implementation is an admitted stub ("This is
-incomplete. It simply solves the problem from scratch.") that just reruns
-the whole Double Description method -- see project notes. So every call
-here genuinely does pay for a full recomputation.
+- Uses cdd's (Fukuda's) Double Description method for the outer polytope's
+  vertex set, rather than maintaining it independently in Python the way
+  :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod` does.
+- Two arithmetic backends, selected via ``backend``: ``'float'`` (default)
+  uses cdd's native C double arithmetic; ``'gmp'`` uses ``cdd.gmp``'s exact
+  rational (GMP) arithmetic instead, at higher per-call cost, immune to the
+  float backend's documented numerical-inconsistency failure mode on
+  degenerate/near-degenerate accumulated halfspaces (see
+  ``disdyakis_triacontahedron.py``'s module docstring for a real instance
+  of that failure). Every halfspace coefficient is converted to
+  ``fractions.Fraction`` before being handed to ``cdd.gmp`` -- an exact,
+  lossless reinterpretation of whatever binary float value it already was,
+  not a new source of imprecision, and not an attempt to recover exactness
+  the upstream float computation (LP duals, etc.) never had in the first
+  place.
+- :meth:`CddMethod.add_cut` folds a new halfspace in incrementally --
+  resuming cddlib's own Double Description computation instead of
+  recomputing the whole polytope -- via ``polyhedron_append_halfspaces``
+  (present on both the ``cdd`` and ``cdd.gmp`` modules), when the installed
+  ``cdd``/``cdd.gmp`` has it. That function is a local patch on top of
+  pycddlib/cddlib (see the ``mycode/cdd`` project notes) that isn't part of
+  any upstream pycddlib release: cddlib's own public incremental-looking
+  entry point, ``dd_DDInputAppend``, is an admitted stub ("This is
+  incomplete. It simply solves the problem from scratch.") that just
+  reruns the whole Double Description method. When
+  ``polyhedron_append_halfspaces`` either isn't present (a stock
+  ``pycddlib`` install) or raises (its own restrictions on the append
+  aren't met for this polytope -- see its docstring), :meth:`_vertices_with_ids`
+  transparently falls back to a full rebuild from ``self.outer_halfspaces``
+  -- still correct either way, just not incremental for that one step. So
+  this class keeps the strongest correctness guarantee of the three
+  methods (cdd is a mature, independent implementation) regardless of
+  which ``cdd`` build is installed; only the cost profile changes.
+- The per-vertex closest-inner-point solve is cached across refreshes by
+  generator identity, the same way :class:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod`
+  caches by index: ``copy_generators_with_ids`` (also part of the local
+  patch) tags every vertex with a persistent integer id that survives an
+  incremental append unchanged, so :meth:`_refresh` can tell "this is the
+  same vertex as last time" by exact id match instead of geometric
+  comparison, reuse its cached closest point/normal, and only solve for
+  vertices whose id is new. A full rebuild's ids are NOT comparable to a
+  previous build's (cddlib restarts its id counter from scratch every
+  time), so every vertex is treated as new whenever that path runs. When
+  ``copy_generators_with_ids`` isn't available, every vertex is solved
+  every refresh, exactly as before this caching existed.
 """
 from concurrent.futures import Executor
+from fractions import Fraction
+from types import ModuleType
+from typing import Literal
 
 import numpy as np
 
@@ -28,32 +57,134 @@ from ..common import Halfspace, Norm, gaps, check_norm
 from ..gurobi_projection import closest_point_on_hull
 from .base import Method
 
+#: Which cdd arithmetic backend to use -- ``'float'`` (cdd's native C
+#: double arithmetic) or ``'gmp'`` (cdd.gmp's exact rational arithmetic).
+CddBackend = Literal["float", "gmp"]
 
-def cdd_vertices_of(outer_halfspaces: list[Halfspace]) -> np.ndarray:
-    """Ground-truth V-representation of the outer polytope defined by
-    ``outer_halfspaces``, via a fresh cdd float-mode double description
-    computation.
 
-    :param outer_halfspaces: ``(direction, point)`` pairs, each defining a
-        supporting hyperplane of the outer polytope.
-    :returns: The polytope's vertices, as an ``(m, k)`` array.
+def check_cdd_backend(backend: str) -> None:
+    """Validate an untrusted ``backend`` value at a package boundary --
+    the ``cdd``-specific counterpart of :func:`~mga_surveyor.common.check_norm`.
+    """
+    if backend not in ("float", "gmp"):
+        raise ValueError(f"backend must be 'float' or 'gmp', got {backend!r}")
+
+
+def _cdd_module(backend: CddBackend) -> ModuleType:
+    """Import and return the cdd module for ``backend`` -- ``cdd`` itself
+    for ``'float'``, ``cdd.gmp`` for ``'gmp'``. A separate function (rather
+    than inlining the import) so every call site imports lazily, keeping
+    ``cdd``/``cdd.gmp`` genuinely optional dependencies -- see the ``cdd``
+    extra's note in ``pyproject.toml``.
+    """
+    check_cdd_backend(backend)
+    if backend == "float":
+        import cdd
+        return cdd
+    else:
+        import cdd.gmp
+        return cdd.gmp
+
+
+def _halfspace_row(direction: np.ndarray, point: np.ndarray, backend: CddBackend) -> list:
+    """One row of cdd's ``[b | A]`` H-representation for the halfspace
+    ``{x : direction@x <= direction@point}``.
+
+    Under ``backend='gmp'``, every entry is converted to an exact
+    ``Fraction`` -- required by ``cdd.gmp`` (it rejects plain ``float``
+    input outright, since silently rounding would defeat the point of
+    requesting exact arithmetic) and lossless: ``Fraction(x)`` on a float
+    ``x`` is the exact rational value of that float's own binary
+    representation, not a new approximation of it.
+    """
+    b = float(np.asarray(direction) @ np.asarray(point))
+    row = [b] + [-float(c) for c in direction]
+    if backend == "gmp":
+        return [Fraction(x) for x in row]
+    return row
+
+
+def _extract_vertices(cdd_mod: ModuleType, poly) -> np.ndarray:
+    """Pull the finite vertices (as opposed to rays) out of a cdd
+    ``Polyhedron``'s generators -- a generator row is a vertex iff its
+    leading column is ``1`` rather than ``0`` (cdd's homogeneous
+    V-representation convention). Backend-agnostic: ``round()``/``float()``
+    both work the same on a ``gmp`` row's ``Fraction`` entries as on a
+    ``float`` row's plain floats.
+
+    :param cdd_mod: The cdd module (``cdd`` or ``cdd.gmp``) ``poly`` was
+        built with.
+    :param poly: A cdd ``Polyhedron`` in H-representation with its
+        generators already computed.
+    :returns: The polyhedron's vertices, as an ``(m, k)`` array.
     :rtype: numpy.ndarray
     """
-    import cdd
-
-    rows = []
-    for direction, point in outer_halfspaces:
-        b = float(np.asarray(direction) @ np.asarray(point))
-        rows.append([b] + [-float(c) for c in direction])
-    mat = cdd.matrix_from_array(rows, rep_type=cdd.RepType.INEQUALITY)
-    poly = cdd.polyhedron_from_matrix(mat)
-    gens = cdd.copy_generators(poly)
+    gens = cdd_mod.copy_generators(poly)
     verts = [
         [float(x) for x in row[1:]]
         for row in gens.array
         if round(row[0]) == 1
     ]
     return np.array(verts)
+
+
+def _extract_vertices_with_ids(cdd_mod: ModuleType, poly) -> tuple[np.ndarray, list[int] | None]:
+    """Like :func:`_extract_vertices`, but also returns each vertex's
+    persistent generator id -- via ``copy_generators_with_ids`` -- when the
+    installed cdd module has that function and it accepts ``poly`` (it
+    shares ``polyhedron_append_halfspaces``'s own restrictions: H-repr,
+    full column rank; raises :exc:`ValueError` otherwise, e.g. for a
+    not-yet-fully-bounded polytope). Returns ``ids=None`` whenever id
+    tracking isn't available for this call, signalling the caller to fall
+    back to solving every vertex fresh, same as if this function didn't
+    exist at all.
+
+    :param cdd_mod: The cdd module (``cdd`` or ``cdd.gmp``) ``poly`` was
+        built with.
+    :param poly: A cdd ``Polyhedron`` in H-representation with its
+        generators already computed.
+    :returns: ``(vertices, ids)`` -- ``vertices`` as an ``(m, k)`` array;
+        ``ids`` a length-``m`` list aligned with its rows, or ``None``.
+    :rtype: tuple
+    """
+    if not hasattr(cdd_mod, "copy_generators_with_ids"):
+        return _extract_vertices(cdd_mod, poly), None
+    try:
+        gens, gen_ids = cdd_mod.copy_generators_with_ids(poly)
+    except ValueError:
+        return _extract_vertices(cdd_mod, poly), None
+    verts = []
+    ids = []
+    for row, gid in zip(gens.array, gen_ids):
+        if round(row[0]) == 1:
+            verts.append([float(x) for x in row[1:]])
+            ids.append(gid)
+    return np.array(verts), ids
+
+
+def cdd_vertices_of(outer_halfspaces: list[Halfspace], backend: CddBackend = "float") -> np.ndarray:
+    """Ground-truth V-representation of the outer polytope defined by
+    ``outer_halfspaces``, via a fresh cdd double description computation
+    from scratch (all-at-once, not incremental).
+
+    Used independently of any :class:`CddMethod` instance's own
+    incremental state -- e.g. by
+    :meth:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod.resync` as a
+    from-scratch cross-check, where reusing incremental state would defeat
+    the point.
+
+    :param outer_halfspaces: ``(direction, point)`` pairs, each defining a
+        supporting hyperplane of the outer polytope.
+    :param backend: ``'float'`` (default) or ``'gmp'`` -- see module
+        docstring.
+    :returns: The polytope's vertices, as an ``(m, k)`` array.
+    :rtype: numpy.ndarray
+    """
+    cdd_mod = _cdd_module(backend)
+    rows = [_halfspace_row(direction, point, backend) for direction, point in outer_halfspaces]
+    mat = cdd_mod.matrix_from_array(rows, rep_type=cdd_mod.RepType.INEQUALITY)
+    poly = cdd_mod.polyhedron_from_matrix(mat)
+    return _extract_vertices(cdd_mod, poly)
 
 
 class CddMethod(Method):
@@ -64,29 +195,42 @@ class CddMethod(Method):
     :type norm: str
     :param executor: Used to run the independent per-vertex
         ``closest_point_on_hull`` solves concurrently after each
-        recomputation. A fresh ``ThreadPoolExecutor`` is created if none is
+        refresh. A fresh ``ThreadPoolExecutor`` is created if none is
         given.
     :type executor: concurrent.futures.Executor, optional
+    :param backend: ``'float'`` (default) or ``'gmp'`` -- see module
+        docstring.
+    :type backend: str
     """
 
-    def __init__(self, k: int, norm: Norm, executor: Executor | None = None) -> None:
+    def __init__(
+        self, k: int, norm: Norm, executor: Executor | None = None, backend: CddBackend = "float",
+    ) -> None:
         check_norm(norm)
+        check_cdd_backend(backend)
         super().__init__(k, norm)
         if executor is None:
             from concurrent.futures import ThreadPoolExecutor
             executor = ThreadPoolExecutor(max_workers=8)
         self.executor = executor
+        self.backend = backend
 
         self.inner_vertices = None
         self.outer_halfspaces = []
+        self._poly = None  # persistent cdd.Polyhedron, folded into incrementally by add_cut; None until first built
+        self._pending_rows = []  # halfspace rows from add_cut not yet folded into self._poly
         self._outer_vertices = None
+        self._vertex_ids = None  # generator ids aligned with self._outer_vertices, or None if unsupported
         self._closest_points = None
+        self._closest_normals = None  # aligned with self._outer_vertices; None whenever self._vertex_ids is None
         self._gap = None
         self._dirty = True
 
     def bootstrap(self, initial_points: list[np.ndarray], initial_halfspaces: list[Halfspace]) -> None:
         self.inner_vertices = np.array(initial_points, dtype=float)
         self.outer_halfspaces = list(initial_halfspaces)
+        self._poly = None
+        self._pending_rows = []
         self._dirty = True
 
     def add_point(self, point: np.ndarray) -> bool:
@@ -94,14 +238,97 @@ class CddMethod(Method):
         is_new = np.linalg.norm(self.inner_vertices - point, axis=1).min() > 1e-6
         if is_new:
             self.inner_vertices = np.vstack([self.inner_vertices, point])
+            if self._closest_normals is not None:
+                self._refresh_stale_closest_points(point)
             self._dirty = True
         return is_new
+
+    def _refresh_stale_closest_points(self, new_inner_vertex: np.ndarray) -> None:
+        """After the inner approximation grows, some cached closest-point/
+        normal pairs (keyed by generator id -- see :meth:`_refresh`) may no
+        longer be optimal -- exactly those whose cached separating
+        hyperplane ``new_inner_vertex`` violates. Recompute only those
+        (cheap ``O(outer_vertices)`` check first). Mirrors
+        :meth:`~mga_surveyor.methods.vertex_enum.VertexEnumMethod._refresh_stale_closest_points`
+        exactly; only called when ``self._closest_normals`` is populated,
+        i.e. the last refresh actually had id-tracked caching to keep
+        valid -- with no such cache, the next :meth:`_refresh` recomputes
+        every vertex unconditionally anyway, so doing this check would be
+        pure waste.
+
+        :param new_inner_vertex: The newly added inner vertex.
+        """
+        if self._outer_vertices is None or len(self._outer_vertices) == 0:
+            return
+        rhs = new_inner_vertex[None, :] - self._closest_points
+        still_valid = np.einsum("ij,ij->i", self._closest_normals, rhs) <= 1e-9
+        stale_positions = np.where(~still_valid)[0]
+        if len(stale_positions) == 0:
+            return
+        stale_points = list(self._outer_vertices[stale_positions])
+        results = list(self.executor.map(
+            lambda p: closest_point_on_hull(p, self.inner_vertices, norm=self.norm), stale_points
+        ))
+        for pos, (c, n) in zip(stale_positions.tolist(), results):
+            self._closest_points[pos] = c
+            self._closest_normals[pos] = n
 
     def add_cut(self, direction: np.ndarray, point: np.ndarray) -> None:
         direction = np.asarray(direction, dtype=float)
         point = np.asarray(point, dtype=float)
         self.outer_halfspaces = self.outer_halfspaces + [(direction, point)]
+        self._pending_rows.append(_halfspace_row(direction, point, self.backend))
         self._dirty = True
+
+    def _vertices_with_ids(self) -> tuple[np.ndarray, list[int] | None, bool]:
+        """The outer polytope's current vertex set, with each vertex's
+        persistent generator id when available.
+
+        Appends whatever :meth:`add_cut` has queued in
+        ``self._pending_rows`` onto the persistent ``self._poly`` via
+        ``polyhedron_append_halfspaces`` (resuming cddlib's Double
+        Description computation) when that function is available and
+        succeeds; rebuilds ``self._poly`` from the complete
+        ``self.outer_halfspaces`` from scratch otherwise -- on the first
+        call, when the installed cdd module predates the
+        incremental-append patch, or when the append itself raised (its
+        own restrictions -- see its docstring -- weren't met for this
+        polytope). Either path leaves ``self._poly`` holding the correct,
+        fully up to date polyhedron.
+
+        :returns: ``(vertices, ids, is_fresh_build)``. ``is_fresh_build``
+            is ``True`` whenever a rebuild ran this call -- cddlib restarts
+            its id numbering from scratch on every fresh
+            ``dd_DDMatrix2Poly``, so ``ids`` (if not ``None``) are NOT
+            comparable to whatever :class:`CddMethod` cached from a
+            previous call in that case; the caller must treat every vertex
+            as new rather than attempt id-based reuse.
+        :rtype: tuple
+        """
+        cdd_mod = _cdd_module(self.backend)
+
+        def full_rebuild() -> tuple[np.ndarray, list[int] | None]:
+            rows = [_halfspace_row(d, p, self.backend) for d, p in self.outer_halfspaces]
+            mat = cdd_mod.matrix_from_array(rows, rep_type=cdd_mod.RepType.INEQUALITY)
+            self._poly = cdd_mod.polyhedron_from_matrix(mat)
+            self._pending_rows = []
+            return _extract_vertices_with_ids(cdd_mod, self._poly)
+
+        if self._poly is None or not hasattr(cdd_mod, "polyhedron_append_halfspaces"):
+            verts, ids = full_rebuild()
+            return verts, ids, True
+
+        if self._pending_rows:
+            mat = cdd_mod.matrix_from_array(self._pending_rows, rep_type=cdd_mod.RepType.INEQUALITY)
+            try:
+                cdd_mod.polyhedron_append_halfspaces(self._poly, mat)
+            except RuntimeError:
+                verts, ids = full_rebuild()
+                return verts, ids, True
+            self._pending_rows = []
+
+        verts, ids = _extract_vertices_with_ids(cdd_mod, self._poly)
+        return verts, ids, False
 
     def _refresh(self) -> None:
         """Recompute the cached outer vertex set, per-vertex closest inner
@@ -112,19 +339,51 @@ class CddMethod(Method):
         to either (with no state change in between) reuse this same cached
         `_gap` array instead of recomputing it from `_outer_vertices`/
         `_closest_points` each time.
+
+        Solves ``closest_point_on_hull`` only for vertices whose generator
+        id is new since the last refresh -- see :meth:`_vertices_with_ids`
+        and the module docstring -- reusing the cached closest
+        point/normal for every id that survived unchanged. Falls back to
+        solving every vertex (the pre-caching behavior) whenever ids
+        aren't available at all, or this call's vertex set came from a
+        fresh rebuild whose ids aren't comparable to what was cached.
         """
         if not self._dirty and self._outer_vertices is not None:
             return
-        verts = cdd_vertices_of(self.outer_halfspaces)
-        if len(verts):
+        verts, ids, is_fresh = self._vertices_with_ids()
+
+        can_reuse = ids is not None and not is_fresh and self._vertex_ids is not None
+        if can_reuse:
+            old_index_of_id = {vid: i for i, vid in enumerate(self._vertex_ids)}
+            closest = np.zeros((len(verts), self.k))
+            normals = np.zeros((len(verts), self.k))
+            to_solve = [i for i, vid in enumerate(ids) if vid not in old_index_of_id]
+            for i, vid in enumerate(ids):
+                old_i = old_index_of_id.get(vid)
+                if old_i is not None:
+                    closest[i] = self._closest_points[old_i]
+                    normals[i] = self._closest_normals[old_i]
+            if to_solve:
+                results = list(self.executor.map(
+                    lambda i: closest_point_on_hull(verts[i], self.inner_vertices, norm=self.norm), to_solve
+                ))
+                for i, (c, n) in zip(to_solve, results):
+                    closest[i] = c
+                    normals[i] = n
+        elif len(verts):
             results = list(self.executor.map(
                 lambda v: closest_point_on_hull(v, self.inner_vertices, norm=self.norm), verts
             ))
             closest = np.array([r[0] for r in results])
+            normals = np.array([r[1] for r in results]) if ids is not None else None
         else:
             closest = np.zeros((0, self.k))
+            normals = np.zeros((0, self.k)) if ids is not None else None
+
         self._outer_vertices = verts
+        self._vertex_ids = ids
         self._closest_points = closest
+        self._closest_normals = normals
         self._gap = gaps(verts, closest, norm=self.norm)
         self._dirty = False
 
