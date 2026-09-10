@@ -156,15 +156,19 @@ def drive(
         if use_pool:
             trial_points, trial_gaps = method.find_pool_trial_points(pool_num, tol, min_angle_deg)
             trial_point_time = time.perf_counter() - trial_point_start
-            last_gap = float(trial_gaps[0]) if len(trial_gaps) else 0.0
             if len(trial_points) == 0:
+                # No gap to report here -- find_pool_trial_points only
+                # returns candidates still above tol, so an empty result
+                # doesn't tell us the actual (necessarily below-tol) gap,
+                # unlike find_trial_point's own always-computed one below.
                 if verbose:
                     logger.info(
-                        "[drive] converged at iter %d: gap=%.4f%s (find_pool_trial_points: %.3fs)",
-                        it, last_gap * gap_scale, gap_unit, trial_point_time,
+                        "[drive] converged at iter %d (find_pool_trial_points: %.3fs)",
+                        it, trial_point_time,
                     )
                 break
 
+            last_gap = float(trial_gaps[0])
             if verbose:
                 logger.info(
                     "[drive] iter %4d: gap=%.4f%s pool_size=%d -- solving (find_pool_trial_points: %.3fs)",
