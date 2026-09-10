@@ -58,7 +58,6 @@ import hashlib
 import json
 import logging
 import pickle
-import time
 import weakref
 from multiprocessing import get_context
 from pathlib import Path
@@ -868,7 +867,6 @@ def _build_closest_point_solver(
     def solve_one(
         target_row: np.ndarray, log_path: Path | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Network]:
-        solve_start = time.perf_counter()
         call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
@@ -877,7 +875,6 @@ def _build_closest_point_solver(
         if status != "ok":
             msg = f"Closest-point solve for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
-        _log_solve(m, status, condition, "closest-point")
 
         point = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
         _append_coordinates_to_log(log_path, keys, point)
@@ -892,7 +889,6 @@ def _build_closest_point_solver(
         normal = np.array([float(resid_constrs[key].dual) for key in keys]) / _dual_scale
 
         if not resolve_main_objective:
-            logger.info("closest-point solve time: %.3fs", time.perf_counter() - solve_start)
             return point, normal, None, n
 
         pin_scales = {}
@@ -907,7 +903,6 @@ def _build_closest_point_solver(
         if status != "ok":
             msg = f"Re-solve at pinned coordinates for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
-        _log_solve(m, status, condition, "closest-point (pinned duals)")
         duals = np.array([_read_pinned_coord_dual(m, key, pin_scales[key]) for key in keys])
 
         # Undo this call's own additions so the model is ready for the next call.
@@ -916,7 +911,6 @@ def _build_closest_point_solver(
         add_budget_constraint()
         m.objective = residual_obj
 
-        logger.info("closest-point solve time: %.3fs", time.perf_counter() - solve_start)
         return point, normal, duals, n
 
     return solve_one
@@ -1150,8 +1144,6 @@ def make_closest_point_fn(
             t = target_2d[0]
             key = encode_cache_key(t) if output_dir is not None else None
             log_path = Path(output_dir) / f"mga_closest_result_{key}.log" if output_dir is not None else None
-            if log_path is not None:
-                logger.info("closest-point target given: solving, log at %s", log_path.name)
             point, normal, duals, n_result = solve_one(t, log_path)
             if output_dir is not None or on_solve is not None:
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
