@@ -1,9 +1,7 @@
 """CddMethod.find_trial_points_above_tol / find_pool_trial_points -- the
 batched candidate-selection building blocks for solving several
 closest-point targets in parallel per drive() iteration instead of just
-one (see explore.drive's own docstring for the full picture, and
-common.select_by_min_angle's own tests for the angle-selection logic these
-build on).
+one (see explore.drive's own docstring for the full picture).
 """
 import numpy as np
 import pytest
@@ -87,46 +85,32 @@ def test_find_pool_trial_points_matches_find_trial_point_at_index_0():
     method = _asymmetric_method()
     trial_point, gap = method.find_trial_point()
 
-    points, gaps = method.find_pool_trial_points(pool_num=4, tol=0.0)
+    points, gaps = method.find_pool_trial_points(max_parallel=4, tol=0.0)
 
     np.testing.assert_allclose(points[0], trial_point)
     assert gaps[0] == pytest.approx(gap)
 
 
-def test_find_pool_trial_points_caps_at_pool_num():
+def test_find_pool_trial_points_caps_at_max_parallel():
     method = _asymmetric_method()
-    points, gaps = method.find_pool_trial_points(pool_num=2, tol=0.0)
+    points, gaps = method.find_pool_trial_points(max_parallel=2, tol=0.0)
     assert len(points) <= 2
     assert len(gaps) == len(points)
 
 
-def test_find_pool_trial_points_applies_tol_before_angle_selection():
+def test_find_pool_trial_points_applies_tol():
     method = _asymmetric_method()
     _points, all_gaps = method.find_trial_points_above_tol(tol=0.0)
     threshold = float(all_gaps[len(all_gaps) // 2])
 
-    points, gaps = method.find_pool_trial_points(pool_num=10, tol=threshold + 1e-9, min_angle_deg=0.0)
+    points, gaps = method.find_pool_trial_points(max_parallel=10, tol=threshold + 1e-9)
 
     assert all(g >= threshold for g in gaps)
 
 
-def test_find_pool_trial_points_applies_min_angle_deg():
-    """With every outer vertex allowed through (tol=0) but a large angle
-    threshold, a 2D box's diagonally-opposite vertices (180 degrees apart)
-    should still both survive, while a vertex too close in direction to
-    one already picked should not."""
-    method = _asymmetric_method()
-    points, gaps = method.find_pool_trial_points(pool_num=4, tol=0.0, min_angle_deg=170.0)
-    # A box vertex and its own diagonal opposite are the only pair
-    # 180 degrees apart -- a 170-degree floor should leave at most 2 of
-    # the 4 box vertices standing (greedy walk from the top of the
-    # gap-sorted list).
-    assert len(points) <= 2
-
-
-def test_find_pool_trial_points_requires_pool_num_and_tol():
+def test_find_pool_trial_points_requires_max_parallel_and_tol():
     method = _asymmetric_method()
     with pytest.raises(TypeError):
-        method.find_pool_trial_points(pool_num=2)
+        method.find_pool_trial_points(max_parallel=2)
     with pytest.raises(TypeError):
         method.find_pool_trial_points(tol=0.0)

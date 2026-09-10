@@ -49,10 +49,9 @@ def box_directions(k: int) -> np.ndarray:
 
 def drive(
     method: Method, furthest_point: FurthestPointFn, closest_point: ClosestPointFn, optimal_fn: OptimalPointFn,
-    max_iter: int | None, tol: float, verbose: bool = True,
+    max_iter: int | None, tol: float, max_parallel: int, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
     gap_scale: float = 1.0, gap_unit: str = "",
-    pool_num: int = 1, min_angle_deg: float = 0.0,
 ) -> list[dict]:
     """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
     point, and `extra_points`/`extra_halfspaces` if given -- all together
@@ -87,7 +86,7 @@ def drive(
     `tol` (e.g. as a percentage) instead of `drive`'s own internal units.
 
     Returns a history list of dicts, one per POINT processed (see
-    `pool_num` below for when that can be more than one per loop
+    `max_parallel` below for when that can be more than one per loop
     iteration), with keys "iter", "gap", "trial_point", "new_point",
     "cut_added", "trial_point_time" (seconds spent inside this iteration's
     own worst-point search -- the one part of each iteration whose cost
@@ -101,18 +100,19 @@ def drive(
     `history[-1]["gap"]` against `tol`, or the caller's own
     `method.max_gap()`, to detect it programmatically).
 
-    `pool_num`/`min_angle_deg` (default `1`/`0.0`, i.e. today's exact
-    single-target behavior -- nothing changes for an existing caller that
-    doesn't pass these): when `pool_num > 1` AND `method` actually
-    supports it (checked via `hasattr` -- currently only
+    `max_parallel`: no default -- every caller must decide, same reasoning
+    as `max_iter`/`tol` above. When `max_parallel > 1` AND `method`
+    actually supports it (checked via `hasattr` -- currently only
     `CddMethod.find_pool_trial_points`; anything else, `BilevelMethod`
     included, silently keeps the original single-target path), each
-    iteration finds up to `pool_num` diverse, still-unconverged candidate
-    trial points at once instead of just the single worst one, and solves
-    all of them in one batched `closest_point` call -- exploiting
-    `closest_point`'s own existing batch/parallel support (see
-    `pypsa_ext.make_closest_point_fn`) instead of the strictly
-    one-at-a-time solves the sequential path is limited to.
+    iteration finds up to `max_parallel` of the worst, still-unconverged
+    candidate trial points at once instead of just the single worst one,
+    and solves all of them in one batched `closest_point` call --
+    exploiting `closest_point`'s own existing batch/parallel support (see
+    `pypsa_ext.make_closest_point_fn`, whose own worker-pool size this
+    same `max_parallel` also controls) instead of the strictly
+    one-at-a-time solves the sequential path is limited to. Pass `1` for
+    today's original single-target behavior.
 
     No extra reconciliation is needed when several candidates land in one
     round: each one's own `(point, normal)` is an independently valid
@@ -125,11 +125,7 @@ def drive(
     a time would have been. It just isn't necessarily as efficient: a
     later candidate in the round might not still have been the worst
     point had the earlier ones already been folded in first -- an
-    exploration-strategy tradeoff, not a correctness one. `min_angle_deg`
-    (passed straight to `find_pool_trial_points`) is the main lever
-    against that: keeping a round's candidates spread apart in direction
-    makes one candidate's cut unlikely to make another one in the same
-    round redundant.
+    exploration-strategy tradeoff, not a correctness one.
     """
     if verbose:
         logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
@@ -139,11 +135,11 @@ def drive(
     initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
     method.bootstrap(initial_points, initial_halfspaces)
 
-    use_pool = pool_num > 1 and hasattr(method, "find_pool_trial_points")
-    if pool_num > 1 and not use_pool and verbose:
+    use_pool = max_parallel > 1 and hasattr(method, "find_pool_trial_points")
+    if max_parallel > 1 and not use_pool and verbose:
         logger.info(
-            "[drive] pool_num=%d requested, but %s has no find_pool_trial_points -- "
-            "falling back to the single-target path", pool_num, type(method).__name__,
+            "[drive] max_parallel=%d requested, but %s has no find_pool_trial_points -- "
+            "falling back to the single-target path", max_parallel, type(method).__name__,
         )
 
     history = []
@@ -154,7 +150,7 @@ def drive(
     for it in iters:
         trial_point_start = time.perf_counter()
         if use_pool:
-            trial_points, trial_gaps = method.find_pool_trial_points(pool_num, tol, min_angle_deg)
+            trial_points, trial_gaps = method.find_pool_trial_points(max_parallel, tol)
             trial_point_time = time.perf_counter() - trial_point_start
             if len(trial_points) == 0:
                 # No gap to report here -- find_pool_trial_points only

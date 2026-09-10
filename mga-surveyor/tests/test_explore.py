@@ -49,7 +49,10 @@ def test_drive_bootstraps_from_box_directions_and_optimal_point():
     2k box points plus optimal_fn's point."""
     method = _RecordingMethod(k=2, norm="linf")
 
-    drive(method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn, max_iter=None, tol=1e-6, verbose=False)
+    drive(
+        method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn,
+        max_iter=None, tol=1e-6, max_parallel=1, verbose=False,
+    )
 
     assert [c[0] for c in method.calls] == ["bootstrap", "find_trial_point"]
     _, points, halfspaces = method.calls[0]
@@ -69,7 +72,7 @@ def test_drive_folds_extra_points_and_halfspaces_into_the_one_bootstrap_call():
 
     drive(
         method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn, max_iter=None, tol=1e-6,
-        extra_points=extra_points, extra_halfspaces=extra_halfspaces, verbose=False,
+        max_parallel=1, extra_points=extra_points, extra_halfspaces=extra_halfspaces, verbose=False,
     )
 
     assert [c[0] for c in method.calls] == ["bootstrap", "find_trial_point"]
@@ -90,8 +93,8 @@ class _RecordingPoolMethod(_RecordingMethod):
         super().__init__(k, norm)
         self._pool_rounds = list(pool_rounds)
 
-    def find_pool_trial_points(self, pool_num, tol, min_angle_deg):
-        self.calls.append(("find_pool_trial_points", pool_num, tol, min_angle_deg))
+    def find_pool_trial_points(self, max_parallel, tol):
+        self.calls.append(("find_pool_trial_points", max_parallel, tol))
         return self._pool_rounds.pop(0)
 
 
@@ -111,13 +114,13 @@ def test_drive_uses_find_pool_trial_points_when_method_supports_it():
 
     history = drive(
         method, _stub_furthest_point, _stub_batch_closest_point, _stub_optimal_fn,
-        max_iter=5, tol=1e-6, verbose=False, pool_num=2, min_angle_deg=10.0,
+        max_iter=5, tol=1e-6, verbose=False, max_parallel=2,
     )
 
     call_names = [c[0] for c in method.calls]
     pool_calls = [c for c in method.calls if c[0] == "find_pool_trial_points"]
     assert call_names.count("find_pool_trial_points") == 2  # one per round, including the converging one
-    assert pool_calls == [("find_pool_trial_points", 2, 1e-6, 10.0)] * 2
+    assert pool_calls == [("find_pool_trial_points", 2, 1e-6)] * 2
     # find_trial_point (the single-target path) must never be called once
     # the batched path is in use.
     assert "find_trial_point" not in call_names
@@ -130,7 +133,7 @@ def test_drive_folds_every_point_of_a_batched_round_into_history_and_the_method(
 
     history = drive(
         method, _stub_furthest_point, _stub_batch_closest_point, _stub_optimal_fn,
-        max_iter=5, tol=1e-6, verbose=False, pool_num=2, min_angle_deg=10.0,
+        max_iter=5, tol=1e-6, verbose=False, max_parallel=2,
     )
 
     assert len(history) == 2  # one dict per point in the one productive round
@@ -149,14 +152,14 @@ def test_drive_folds_every_point_of_a_batched_round_into_history_and_the_method(
 
 
 def test_drive_falls_back_to_find_trial_point_when_method_lacks_pool_support():
-    """pool_num > 1 against a Method with no find_pool_trial_points (e.g.
+    """max_parallel > 1 against a Method with no find_pool_trial_points (e.g.
     BilevelMethod) must silently keep the original single-target path,
     not raise AttributeError."""
     method = _RecordingMethod(k=2, norm="linf")
 
     drive(
         method, _stub_furthest_point, _stub_closest_point, _stub_optimal_fn,
-        max_iter=None, tol=1e-6, verbose=False, pool_num=4,
+        max_iter=None, tol=1e-6, verbose=False, max_parallel=4,
     )
 
     assert [c[0] for c in method.calls] == ["bootstrap", "find_trial_point"]

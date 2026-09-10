@@ -60,7 +60,7 @@ def test_vertex_id_stability_on_truncated_icosahedron(backend):
         point, _normal = closest_point_in_region(np.zeros(k), A_ub_true, b_ub_true, norm=method.norm)
         return point
 
-    drive(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-6, max_iter=None, verbose=False)
+    drive(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-6, max_iter=None, max_parallel=1, verbose=False)
 
     assert len(id_to_vertex) > 5, "test observed too few tracked vertex ids to prove anything"
     assert not mismatches, (

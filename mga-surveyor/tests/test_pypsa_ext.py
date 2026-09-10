@@ -370,7 +370,7 @@ def test_make_closest_point_fn_end_to_end_with_explore_drive(tmp_path):
 
     method = CddMethod(k=k, norm="linf", projection_backend="highs")
     history = mga_surveyor_drive(
-        method, furthest_point, closest_point, solve_optimal, tol=1e-3, max_iter=30, verbose=False,
+        method, furthest_point, closest_point, solve_optimal, tol=1e-3, max_iter=30, max_parallel=1, verbose=False,
     )
 
     assert len(history) > 0
@@ -514,13 +514,13 @@ def test_generate_mga_files_rejects_mismatched_tol_or_max_iter_length(tmp_path):
     with pytest.raises(ValueError, match="tol"):
         generate_mga_files(
             n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.02, 0.05], solver_name="highs",
-            max_iter=10, tol=[1e-2],  # only 1 entry for 2 slack levels
+            max_iter=10, tol=[1e-2], max_parallel=1,  # only 1 entry for 2 slack levels
         )
 
     with pytest.raises(ValueError, match="max_iter"):
         generate_mga_files(
             n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.02, 0.05], solver_name="highs",
-            max_iter=[5, 5, 5], tol=1e-2,  # 3 entries for 2 slack levels
+            max_iter=[5, 5, 5], tol=1e-2, max_parallel=1,  # 3 entries for 2 slack levels
         )
 
 

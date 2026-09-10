@@ -52,7 +52,7 @@ from typing import Literal, Protocol
 
 import numpy as np
 
-from ..common import Halfspace, Norm, gaps, check_norm, select_by_min_angle
+from ..common import Halfspace, Norm, gaps, check_norm
 from ..gurobi_projection import closest_point_on_hull
 from .base import Method
 
@@ -477,49 +477,29 @@ class CddMethod(Method):
         return self._outer_vertices[idx], self._gap[idx]
 
     def find_pool_trial_points(
-        self, pool_num: int, tol: float, min_angle_deg: float = 0.0,
+        self, max_parallel: int, tol: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Batched stand-in for :meth:`find_trial_point`: up to `pool_num`
-        diverse, above-`tol` candidate trial points to solve in parallel
-        instead of just the single worst one. Pipes
-        :meth:`find_trial_points_above_tol` through
-        :func:`~mga_surveyor.common.select_by_min_angle`, which greedily
-        keeps up to `pool_num` of them, skipping any candidate whose angle
-        to an already-selected one is too small (`min_angle_deg`) -- so a
-        batch doesn't cluster in nearly the same direction.
+        """Batched stand-in for :meth:`find_trial_point`: up to
+        `max_parallel` above-`tol` candidate trial points to solve in
+        parallel instead of just the single worst one -- the `max_parallel`
+        worst ones, since :meth:`find_trial_points_above_tol` already
+        returns them sorted by gap descending.
 
         Not (yet) wired into `explore.drive` -- that still only ever calls
         `find_trial_point`. This exists so an experimental batched driving
         loop has something to call; the sequential-by-construction
         original is untouched.
 
-        :param pool_num: Upper bound on how many points are returned --
-            meant to match however many parallel workers will actually
+        :param max_parallel: Upper bound on how many points are returned
+            -- meant to match however many parallel workers will actually
             solve them.
         :param tol: Passed straight to `find_trial_points_above_tol`. No
             default, for the same reason it has none there.
-        :param min_angle_deg: Passed straight to `select_by_min_angle`
-            (default `0.0`: that step keeps everything, since any two
-            distinct directions have an angle greater than 0).
-        :returns: `(points, gaps)`, gaps aligned with the selected points,
-            both empty if `find_trial_points_above_tol` itself returns
-            nothing.
+        :returns: `(points, gaps)`, capped at `max_parallel`, both empty
+            if `find_trial_points_above_tol` itself returns nothing.
         """
         above_tol_points, above_tol_gaps = self.find_trial_points_above_tol(tol)
-        if len(above_tol_gaps) == 0:
-            return above_tol_points, above_tol_gaps
-
-        selected_points = select_by_min_angle(above_tol_points, pool_num, min_angle_deg)
-
-        # select_by_min_angle only returns points, not their gaps -- recover them
-        # by exact match against above_tol_points/above_tol_gaps. Safe: every
-        # selected point is a row copied verbatim from above_tol_points (no
-        # arithmetic performed on it), so this is an exact bit-for-bit match,
-        # not an approximate lookup.
-        gap_by_point = {tuple(p): g for p, g in zip(above_tol_points, above_tol_gaps)}
-        selected_gaps = np.array([gap_by_point[tuple(p)] for p in selected_points])
-
-        return selected_points, selected_gaps
+        return above_tol_points[:max_parallel], above_tol_gaps[:max_parallel]
 
     def max_gap(self) -> float:
         self._refresh()

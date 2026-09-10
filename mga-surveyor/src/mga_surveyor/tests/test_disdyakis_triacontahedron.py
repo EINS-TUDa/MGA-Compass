@@ -80,6 +80,9 @@ def test_converges_to_disdyakis_triacontahedron(true_region, method_name, norm):
         point, _normal = closest_point_in_region(np.zeros(K), A_ub_true, b_ub_true, norm=method.norm)
         return point
 
-    drive(method, furthest_point_fn, closest_point, optimal_fn, tol=GAP_TOL, max_iter=MAX_ITER, verbose=False)
+    drive(
+        method, furthest_point_fn, closest_point, optimal_fn,
+        tol=GAP_TOL, max_iter=MAX_ITER, max_parallel=1, verbose=False,
+    )
 
     assert method.max_gap() < GAP_TOL

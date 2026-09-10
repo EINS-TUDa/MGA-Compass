@@ -89,7 +89,10 @@ def main():
         return point
 
     t0 = time.time()
-    history = drive(method, furthest_point_fn, closest_point, optimal_fn, tol=1e-3, max_iter=n_iters, verbose=True)
+    history = drive(
+        method, furthest_point_fn, closest_point, optimal_fn,
+        tol=1e-3, max_iter=n_iters, max_parallel=1, verbose=True,
+    )
     elapsed = time.time() - t0
 
     print(f"\nfinished {len(history)} iterations in {elapsed:.2f}s, "

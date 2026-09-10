@@ -131,16 +131,15 @@ class RunConfig:
     slack_levels: list[float]
     max_iter: int
     tol: float
+    max_parallel: int
     normalize: bool = True
     use_objective_cuts: bool = True
     output_dir: Path = Path(__file__).parent / "output"
-    max_parallel: int = 4
-    pool_num: int = 1
-    min_angle_deg: float = 0.0
 
 
 RUN_CONFIG = RunConfig(
     *_detect_solver(), norm="linf", obj_label="TOTEX", slack_levels=[0.02, 0.05, 0.08], max_iter=120, tol=1e-3,
+    max_parallel=4,
 )
 
 
@@ -238,7 +237,6 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
         solver_name=config.solver_name, tol=config.tol, normalize=config.normalize, max_iter=config.max_iter,
         max_parallel=config.max_parallel, solver_options=config.solver_options,
         use_objective_cuts=config.use_objective_cuts,
-        pool_num=config.pool_num, min_angle_deg=config.min_angle_deg,
     )
     points_df, duals_df, nc_files = consolidate_mga_results(config.output_dir, config.obj_label)
     logging.info(f"Total points: {len(points_df)}")
@@ -288,16 +286,12 @@ def parse_args() -> argparse.Namespace:
              "No default -- must be chosen explicitly for every run.",
     )
     parser.add_argument(
-        "--pool-num", type=int, default=RUN_CONFIG.pool_num,
-        help="Solve up to this many diverse candidate closest-points per drive() iteration instead of "
-             "just the single worst one, spread across --max-parallel workers (default 1: today's "
-             "single-target behavior, unchanged) -- see mga_surveyor.explore.drive's own docstring.",
-    )
-    parser.add_argument(
-        "--min-angle-deg", type=float, default=RUN_CONFIG.min_angle_deg,
-        help="With --pool-num > 1, only keep candidates whose direction is at least this many degrees "
-             "apart from every other one already kept in the same round (default 0: no filtering) -- "
-             "see mga_surveyor.common.select_by_min_angle's own docstring.",
+        "--max-parallel", type=int, required=True,
+        help="Worker processes to spread furthest_point/closest_point solves across. Also doubles as "
+             "how many of the worst candidate closest-points drive() solves per iteration instead of "
+             "just the single worst one (pass 1 for today's original single-target behavior) -- see "
+             "mga_surveyor.explore.drive's own docstring. No default -- must be chosen explicitly for "
+             "every run.",
     )
     return parser.parse_args()
 
@@ -307,6 +301,6 @@ if __name__ == "__main__":
     config = replace(
         RUN_CONFIG, output_dir=args.output_dir, tol=args.tol, normalize=args.normalize,
         use_objective_cuts=args.use_objective_cuts, max_iter=args.max_iter,
-        pool_num=args.pool_num, min_angle_deg=args.min_angle_deg,
+        max_parallel=args.max_parallel,
     )
     main(config=config)
