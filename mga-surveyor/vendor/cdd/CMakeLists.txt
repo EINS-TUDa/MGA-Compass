@@ -8,6 +8,14 @@
 cmake_minimum_required(VERSION 3.21)
 project(cddlib_vendor C)
 
+# Both libraries below get linked into pycddlib's own shared object
+# (cdd/__init__*.so) afterward, not just used as static archives on their
+# own -- on Linux/gcc that fails at link time ("relocation R_X86_64_TPOFF32
+# ... local-exec is incompatible with -shared") unless they're themselves
+# built as position-independent code. No-op on MSVC (which has no such
+# distinction), so safe to set unconditionally.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(CDDLIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/cddlib)
