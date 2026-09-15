@@ -98,6 +98,24 @@ def _halfspace_row(direction: np.ndarray, point: np.ndarray, backend: CddBackend
     """One row of cdd's ``[b | A]`` H-representation for the halfspace
     ``{x : direction@x <= direction@point}``.
 
+    ``direction`` is unit-normalized (divided by its own Euclidean norm)
+    before the row is built -- scaling a halfspace's defining vector by any
+    positive constant doesn't change the halfspace itself (``a@x<=b`` and
+    ``(a/|a|)@x<=(b/|a|)`` are the same set), so this is free geometrically.
+    It matters because cddlib's float-mode sign tests compare against one
+    fixed ABSOLUTE tolerance (``dd_zero``, cddlib's own ``dd_almostzero``)
+    -- if different cuts' rows come out at very different natural
+    magnitudes (which they do here: `normal_to_normalized`'s per-dimension
+    rescaling and this network's genuinely different-scale dimensions
+    easily produce that), the same fixed tolerance is effectively far
+    looser for large-magnitude rows and far tighter for small ones. Putting
+    every row on the same (unit) scale removes that per-cut inconsistency.
+    Confirmed empirically to bring float-mode's outer polytope into close
+    agreement with gmp on this project's real network, where un-normalized
+    float mode was badly wrong. A no-op for correctness under ``gmp``
+    (exact arithmetic has no tolerance to be inconsistent about), so
+    applying it unconditionally to both backends is safe.
+
     Under ``backend='gmp'``, every entry is converted to an exact
     ``Fraction`` -- required by ``cdd.gmp`` (it rejects plain ``float``
     input outright, since silently rounding would defeat the point of
@@ -105,7 +123,9 @@ def _halfspace_row(direction: np.ndarray, point: np.ndarray, backend: CddBackend
     ``x`` is the exact rational value of that float's own binary
     representation, not a new approximation of it.
     """
-    b = float(np.asarray(direction) @ np.asarray(point))
+    direction = np.asarray(direction, dtype=float)
+    direction = direction / np.linalg.norm(direction)
+    b = float(direction @ np.asarray(point))
     row = [b] + [-float(c) for c in direction]
     if backend == "gmp":
         return [Fraction(x) for x in row]
