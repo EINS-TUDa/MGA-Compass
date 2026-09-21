@@ -124,7 +124,14 @@ def _halfspace_row(direction: np.ndarray, point: np.ndarray, backend: CddBackend
     representation, not a new approximation of it.
     """
     direction = np.asarray(direction, dtype=float)
-    direction = direction / np.linalg.norm(direction)
+    direction_norm = np.linalg.norm(direction)
+    if direction_norm > 0:
+        # A zero direction is a degenerate/vacuous halfspace (0@x<=0@point,
+        # trivially true everywhere) -- dividing by its own (zero) norm
+        # would just turn it into a row of NaNs, which cddlib's linearity
+        # detection can't handle at all (worse than the harmless all-zero
+        # row this preserves instead).
+        direction = direction / direction_norm
     b = float(direction @ np.asarray(point))
     row = [b] + [-float(c) for c in direction]
     if backend == "gmp":
