@@ -45,6 +45,7 @@
   ``copy_generators_with_ids`` isn't available, every vertex is solved
   every refresh, exactly as before this caching existed.
 """
+import time
 from concurrent.futures import Executor
 from fractions import Fraction
 from types import ModuleType
@@ -295,6 +296,79 @@ class CddMethod(Method):
         self._closest_normals = None  # aligned with self._outer_vertices; None whenever self._vertex_ids is None
         self._gap = None
         self._dirty = True
+        self.stats: dict[str, float | int | None] = {}
+        self.reset_stats()
+
+    def reset_stats(self) -> None:
+        """Zero the instrumentation counters in :attr:`stats` -- purely
+        additive bookkeeping, no effect on any other method's behavior or
+        return value. :meth:`_refresh`/:meth:`_refresh_stale_closest_points`
+        ACCUMULATE into these on every call (so several ``add_cut``s folded
+        into one refresh, or a stale-point check plus a refresh, both add
+        up rather than overwrite); call this to scope the running totals to
+        whatever the caller considers one logical "iteration" (e.g. one
+        `add_point` + its `add_cut`(s) + one `max_gap()`), then read
+        :attr:`stats` after that iteration's calls are done.
+
+        - ``cdd_time``/``projection_time``: seconds spent inside cdd's own
+          append/rebuild call, and inside ``self.projection_fn`` solves,
+          respectively (the latter summed across both
+          :meth:`_refresh_stale_closest_points` and :meth:`_refresh`'s own
+          solve step).
+        - ``n_total``: the outer vertex count as of the last
+          :meth:`_refresh` (a snapshot, not a delta -- last write wins even
+          across several refreshes since the last reset).
+        - ``n_new``/``n_removed``: vertices whose generator id appeared/
+          disappeared since the previous refresh's id set. ``None``
+          instead of an int whenever id tracking itself isn't available at
+          all for this cdd install (see module docstring) -- distinct from
+          ``0``, which means id tracking IS available and nothing actually
+          changed. A full-rebuild fallback (id numbering restarts, so no
+          previous id is comparable) counts as every previous vertex
+          removed and every current one new, not a bug.
+        - ``n_stale_checked``/``n_stale_failed``: from
+          :meth:`_refresh_stale_closest_points`'s own cache-validity check
+          -- how many previously-cached closest-point/normal pairs were
+          checked against a newly added inner point, and how many of those
+          failed (needed re-solving).
+        - ``n_stale_failed_improved``: of the ones that failed and got
+          re-solved, how many landed on a STRICTLY smaller gap than their
+          stale cached value (rather than an equal one, e.g. a tie at the
+          solver's own tolerance).
+        - ``is_fresh_rebuild``: whether any :meth:`_refresh` call since the
+          last reset did a full from-scratch rebuild rather than an
+          incremental append (see :meth:`_vertices_with_ids`'s own
+          ``is_fresh_build`` return value) -- for ANY reason, not just an
+          append failure (``n_append_failures`` below is specifically the
+          failure subset of this). Also true, routinely and not a
+          problem, on the very first ever refresh (no ``self._poly`` yet)
+          or when the installed cdd predates the incremental-append
+          patch.
+        - ``n_append_failures``/``last_append_error``: how many times
+          :meth:`_vertices_with_ids`'s ``polyhedron_append_halfspaces``
+          call itself raised ``RuntimeError`` (its own restrictions --
+          see its docstring -- weren't met for this polytope), forcing a
+          full from-scratch rebuild instead of an incremental append --
+          i.e. cdd actually failing and restarting, not just the routine
+          "first ever build" or "installed cdd predates the append patch"
+          cases that also produce a fresh build (see
+          :meth:`_vertices_with_ids`'s own return value docs) but aren't
+          failures. ``last_append_error`` is the most recent such
+          exception's message, ``None`` if ``n_append_failures`` is 0.
+        """
+        self.stats = {
+            "cdd_time": 0.0,
+            "projection_time": 0.0,
+            "n_total": 0,
+            "n_new": 0,
+            "n_removed": 0,
+            "n_stale_checked": 0,
+            "n_stale_failed": 0,
+            "n_stale_failed_improved": 0,
+            "is_fresh_rebuild": False,
+            "n_append_failures": 0,
+            "last_append_error": None,
+        }
 
     def bootstrap(self, initial_points: list[np.ndarray], initial_halfspaces: list[Halfspace]) -> None:
         self.inner_vertices = np.array(initial_points, dtype=float)
@@ -331,12 +405,21 @@ class CddMethod(Method):
         rhs = new_inner_vertex[None, :] - self._closest_points
         still_valid = np.einsum("ij,ij->i", self._closest_normals, rhs) <= 1e-9
         stale_positions = np.where(~still_valid)[0]
+        self.stats["n_stale_checked"] += len(still_valid)
+        self.stats["n_stale_failed"] += len(stale_positions)
         if len(stale_positions) == 0:
             return
-        stale_points = list(self._outer_vertices[stale_positions])
+        stale_points = self._outer_vertices[stale_positions]
+        old_closest = self._closest_points[stale_positions].copy()
+        t0 = time.perf_counter()
         results = list(self.executor.map(
             lambda p: self.projection_fn(p, self.inner_vertices, norm=self.norm), stale_points
         ))
+        self.stats["projection_time"] += time.perf_counter() - t0
+        new_closest = np.array([c for c, _ in results])
+        old_gap = gaps(stale_points, old_closest, norm=self.norm)
+        new_gap = gaps(stale_points, new_closest, norm=self.norm)
+        self.stats["n_stale_failed_improved"] += int(np.sum(new_gap < old_gap - 1e-12))
         for pos, (c, n) in zip(stale_positions.tolist(), results):
             self._closest_points[pos] = c
             self._closest_normals[pos] = n
@@ -390,7 +473,9 @@ class CddMethod(Method):
             mat = cdd_mod.matrix_from_array(self._pending_rows, rep_type=cdd_mod.RepType.INEQUALITY)
             try:
                 cdd_mod.polyhedron_append_halfspaces(self._poly, mat)
-            except RuntimeError:
+            except RuntimeError as e:
+                self.stats["n_append_failures"] += 1
+                self.stats["last_append_error"] = str(e)
                 verts, ids = full_rebuild()
                 return verts, ids, True
             self._pending_rows = []
@@ -415,14 +500,23 @@ class CddMethod(Method):
         solving every vertex (the pre-caching behavior) whenever ids
         aren't available at all, or this call's vertex set came from a
         fresh rebuild whose ids aren't comparable to what was cached.
+
+        Also accumulates into :attr:`stats` -- see :meth:`reset_stats`.
         """
         if not self._dirty and self._outer_vertices is not None:
             return
+        prev_ids = self._vertex_ids
+        t0 = time.perf_counter()
         verts, ids, is_fresh = self._vertices_with_ids()
+        self.stats["cdd_time"] += time.perf_counter() - t0
+        self.stats["is_fresh_rebuild"] = self.stats["is_fresh_rebuild"] or is_fresh
 
-        can_reuse = ids is not None and not is_fresh and self._vertex_ids is not None
+        can_reuse = ids is not None and not is_fresh and prev_ids is not None
         if can_reuse:
-            old_index_of_id = {vid: i for i, vid in enumerate(self._vertex_ids)}
+            old_index_of_id = {vid: i for i, vid in enumerate(prev_ids)}
+            new_id_set = set(ids)
+            self.stats["n_new"] += sum(1 for vid in new_id_set if vid not in old_index_of_id)
+            self.stats["n_removed"] += sum(1 for vid in prev_ids if vid not in new_id_set)
             closest = np.zeros((len(verts), self.k))
             normals = np.zeros((len(verts), self.k))
             to_solve = [i for i, vid in enumerate(ids) if vid not in old_index_of_id]
@@ -432,22 +526,41 @@ class CddMethod(Method):
                     closest[i] = self._closest_points[old_i]
                     normals[i] = self._closest_normals[old_i]
             if to_solve:
+                t1 = time.perf_counter()
                 results = list(self.executor.map(
                     lambda i: self.projection_fn(verts[i], self.inner_vertices, norm=self.norm), to_solve
                 ))
+                self.stats["projection_time"] += time.perf_counter() - t1
                 for i, (c, n) in zip(to_solve, results):
                     closest[i] = c
                     normals[i] = n
         elif len(verts):
+            if ids is not None:
+                # A fresh rebuild's ids aren't comparable to prev_ids at all
+                # (cddlib restarts id numbering) -- every current vertex
+                # counts as new, every previous one as removed.
+                self.stats["n_new"] += len(verts)
+                self.stats["n_removed"] += len(prev_ids) if prev_ids is not None else 0
+            else:
+                self.stats["n_new"] = None
+                self.stats["n_removed"] = None
+            t1 = time.perf_counter()
             results = list(self.executor.map(
                 lambda v: self.projection_fn(v, self.inner_vertices, norm=self.norm), verts
             ))
+            self.stats["projection_time"] += time.perf_counter() - t1
             closest = np.array([r[0] for r in results])
             normals = np.array([r[1] for r in results]) if ids is not None else None
         else:
+            if ids is not None:
+                self.stats["n_removed"] += len(prev_ids) if prev_ids is not None else 0
+            else:
+                self.stats["n_new"] = None
+                self.stats["n_removed"] = None
             closest = np.zeros((0, self.k))
             normals = np.zeros((0, self.k)) if ids is not None else None
 
+        self.stats["n_total"] = len(verts)
         self._outer_vertices = verts
         self._vertex_ids = ids
         self._closest_points = closest
