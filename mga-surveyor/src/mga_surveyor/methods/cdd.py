@@ -335,26 +335,6 @@ class CddMethod(Method):
           re-solved, how many landed on a STRICTLY smaller gap than their
           stale cached value (rather than an equal one, e.g. a tie at the
           solver's own tolerance).
-        - ``is_fresh_rebuild``: whether any :meth:`_refresh` call since the
-          last reset did a full from-scratch rebuild rather than an
-          incremental append (see :meth:`_vertices_with_ids`'s own
-          ``is_fresh_build`` return value) -- for ANY reason, not just an
-          append failure (``n_append_failures`` below is specifically the
-          failure subset of this). Also true, routinely and not a
-          problem, on the very first ever refresh (no ``self._poly`` yet)
-          or when the installed cdd predates the incremental-append
-          patch.
-        - ``n_append_failures``/``last_append_error``: how many times
-          :meth:`_vertices_with_ids`'s ``polyhedron_append_halfspaces``
-          call itself raised ``RuntimeError`` (its own restrictions --
-          see its docstring -- weren't met for this polytope), forcing a
-          full from-scratch rebuild instead of an incremental append --
-          i.e. cdd actually failing and restarting, not just the routine
-          "first ever build" or "installed cdd predates the append patch"
-          cases that also produce a fresh build (see
-          :meth:`_vertices_with_ids`'s own return value docs) but aren't
-          failures. ``last_append_error`` is the most recent such
-          exception's message, ``None`` if ``n_append_failures`` is 0.
         """
         self.stats = {
             "cdd_time": 0.0,
@@ -365,9 +345,6 @@ class CddMethod(Method):
             "n_stale_checked": 0,
             "n_stale_failed": 0,
             "n_stale_failed_improved": 0,
-            "is_fresh_rebuild": False,
-            "n_append_failures": 0,
-            "last_append_error": None,
         }
 
     def bootstrap(self, initial_points: list[np.ndarray], initial_halfspaces: list[Halfspace]) -> None:
@@ -473,9 +450,7 @@ class CddMethod(Method):
             mat = cdd_mod.matrix_from_array(self._pending_rows, rep_type=cdd_mod.RepType.INEQUALITY)
             try:
                 cdd_mod.polyhedron_append_halfspaces(self._poly, mat)
-            except RuntimeError as e:
-                self.stats["n_append_failures"] += 1
-                self.stats["last_append_error"] = str(e)
+            except RuntimeError:
                 verts, ids = full_rebuild()
                 return verts, ids, True
             self._pending_rows = []
@@ -509,7 +484,6 @@ class CddMethod(Method):
         t0 = time.perf_counter()
         verts, ids, is_fresh = self._vertices_with_ids()
         self.stats["cdd_time"] += time.perf_counter() - t0
-        self.stats["is_fresh_rebuild"] = self.stats["is_fresh_rebuild"] or is_fresh
 
         can_reuse = ids is not None and not is_fresh and prev_ids is not None
         if can_reuse:
