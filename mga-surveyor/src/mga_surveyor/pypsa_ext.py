@@ -1317,7 +1317,13 @@ def _read_existing_closest_points(
     """
     points = []
     halfspaces = []
-    for nc_path in sorted(slack_dir.glob("mga_closest_result_*.nc")):
+    # Chronological (mtime), not alphabetical-by-hash: replaying cuts in
+    # the order they were actually derived, rather than an arbitrary hash
+    # order, is what lets CddMethod's incremental append avoid the
+    # "Numerical inconsistency" crash a large from-scratch build in float
+    # mode is prone to on this network -- see generate_mga_files's own
+    # incremental_bootstrap usage below.
+    for nc_path in sorted(slack_dir.glob("mga_closest_result_*.nc"), key=lambda p: p.stat().st_mtime):
         meta = _read_meta(nc_path)
         point = np.array([meta["point"][k] for k in keys])
         normal = np.array([meta["normal"][k] for k in keys])
@@ -1660,7 +1666,7 @@ def generate_mga_files(
         if verbose and extra_points:
             logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
 
-        method = CddMethod(k=k, norm=norm, backend="gmp", projection_backend=solver_name)
+        method = CddMethod(k=k, norm=norm, backend="float", projection_backend=solver_name)
         if verbose:
             logger.info(
                 "slack=%s: running CddMethod (tol=%.4f%s, max_iter=%s)",
@@ -1671,7 +1677,7 @@ def generate_mga_files(
             tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
             extra_points=extra_points, extra_halfspaces=extra_halfspaces,
             gap_scale=gap_scale, gap_unit=gap_unit,
-            max_parallel=max_parallel,
+            max_parallel=max_parallel, incremental_bootstrap=True,
         )
         final_gap = method.max_gap()
         if final_gap > slack_tol:

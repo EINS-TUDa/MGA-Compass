@@ -51,7 +51,7 @@ def drive(
     method: Method, furthest_point: FurthestPointFn, closest_point: ClosestPointFn, optimal_fn: OptimalPointFn,
     max_iter: int | None, tol: float, max_parallel: int, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
-    gap_scale: float = 1.0, gap_unit: str = "",
+    gap_scale: float = 1.0, gap_unit: str = "", incremental_bootstrap: bool = False,
 ) -> list[dict]:
     """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
     point, and `extra_points`/`extra_halfspaces` if given -- all together
@@ -70,7 +70,27 @@ def drive(
     - `optimal_fn() -> point`: called once, before bootstrapping.
     - `extra_points`/`extra_halfspaces`: points/cuts already known from
       elsewhere (e.g. an earlier, interrupted run), folded into the same
-      bootstrap call as the box directions and `optimal_fn`'s point.
+      bootstrap call as the box directions and `optimal_fn`'s point --
+      unless `incremental_bootstrap` is set, see below.
+
+    `incremental_bootstrap` (default `False`, preserving the single-batch
+    behavior above for every existing caller): if `True`, `method.bootstrap`
+    is instead called with ONLY the box directions + `optimal_fn`'s point,
+    and `extra_points`/`extra_halfspaces` are folded in afterward one at a
+    time (`add_point`/`add_cut`, each halfspace immediately followed by a
+    forced `method.max_gap()` refresh) instead of batched into that same
+    call. Exists because `CddMethod`'s single-batch from-scratch build
+    (`cdd.polyhedron_from_matrix` over the WHOLE initial set at once) is
+    far more prone to float mode's "Numerical inconsistency" failure than
+    the same halfspaces appended one at a time -- confirmed against this
+    project's real network: an alphabetically-ordered ~650-halfspace
+    restart-reload crashed from-scratch but never once crashed when
+    replayed incrementally (see `pypsa_ext.generate_mga_files`, the only
+    caller that currently opts into this). Costs one extra `max_gap()` per
+    extra halfspace, so only worth it for a method where that's cheap
+    relative to a single huge from-scratch build -- true for `CddMethod`,
+    almost certainly not for e.g. `BilevelMethod`, whose `max_gap()` solves
+    a full MILP each time, so this is opt-in rather than the default.
 
     See `mga_surveyor.tests.lp_region`/`mga_surveyor.tests.synthetic_ball`
     for example implementations, or `pypsa_ext` for PyPSA-backed ones.
@@ -131,9 +151,17 @@ def drive(
         logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
     box_points, box_normals = furthest_point(box_directions(method.k))
     box_points = np.asarray(box_points, dtype=float)
-    initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float), *(extra_points or [])]
-    initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
-    method.bootstrap(initial_points, initial_halfspaces)
+    if incremental_bootstrap:
+        method.bootstrap([*box_points, np.asarray(optimal_fn(), dtype=float)], list(zip(box_normals, box_points)))
+        for point in extra_points or []:
+            method.add_point(point)
+        for direction, point in extra_halfspaces or []:
+            method.add_cut(direction, point)
+            method.max_gap()  # forces this cut's own incremental append now, one at a time
+    else:
+        initial_points = [*box_points, np.asarray(optimal_fn(), dtype=float), *(extra_points or [])]
+        initial_halfspaces = [*zip(box_normals, box_points), *(extra_halfspaces or [])]
+        method.bootstrap(initial_points, initial_halfspaces)
 
     use_pool = max_parallel > 1 and hasattr(method, "find_pool_trial_points")
     if max_parallel > 1 and not use_pool and verbose:
