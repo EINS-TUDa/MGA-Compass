@@ -59,6 +59,7 @@ import json
 import logging
 import pickle
 import weakref
+from datetime import datetime, timezone
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -276,6 +277,7 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
         n.meta["obj"] = float(obj)
         n.meta["dimensions"] = dimensions
+        n.meta["created_at"] = datetime.now(timezone.utc).isoformat()
 
         optimal_fn.parent.mkdir(parents=True, exist_ok=True)
         n.export_to_netcdf(str(optimal_fn))
@@ -513,6 +515,7 @@ def _cache_furthest_point_result(
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
     n.meta["obj"] = float(obj)
     n.meta["normal"] = {k: float(v) for k, v in zip(keys, direction)}
+    n.meta["created_at"] = datetime.now(timezone.utc).isoformat()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     out_fn = output_dir / f"mga_furthest_result_{key}.nc"
@@ -992,6 +995,7 @@ def _cache_closest_point_result(
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
     n.meta["obj"] = float(obj)
     n.meta["target"] = {k: float(v) for k, v in zip(keys, target)}
+    n.meta["created_at"] = datetime.now(timezone.utc).isoformat()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     out_fn = output_dir / f"mga_closest_result_{key}.nc"
@@ -1317,14 +1321,26 @@ def _read_existing_closest_points(
     """
     points = []
     halfspaces = []
-    # Chronological (mtime), not alphabetical-by-hash: replaying cuts in
-    # the order they were actually derived, rather than an arbitrary hash
-    # order, is what lets CddMethod's incremental append avoid the
-    # "Numerical inconsistency" crash a large from-scratch build in float
-    # mode is prone to on this network -- see generate_mga_files's own
-    # incremental_bootstrap usage below.
-    for nc_path in sorted(slack_dir.glob("mga_closest_result_*.nc"), key=lambda p: p.stat().st_mtime):
-        meta = _read_meta(nc_path)
+    # Chronological, not alphabetical-by-hash: replaying cuts in the order
+    # they were actually derived, rather than an arbitrary hash order, is
+    # what lets CddMethod's incremental append avoid the "Numerical
+    # inconsistency" crash a large from-scratch build in float mode is
+    # prone to on this network -- see generate_mga_files's own
+    # incremental_bootstrap usage below. Uses each file's own
+    # meta["created_at"] (stamped at export time, see
+    # _cache_closest_point_result) rather than filesystem mtime -- mtime
+    # is only a proxy for creation order and can be clobbered by anything
+    # that touches the file afterward (a copy, an rsync, a backup
+    # restore). Every file under slack_dir is expected to have this key;
+    # older files predating it need a one-time backfill (mtime-derived)
+    # before this function can read them.
+    metas = {nc_path: _read_meta(nc_path) for nc_path in slack_dir.glob("mga_closest_result_*.nc")}
+
+    def _creation_time(nc_path: Path) -> float:
+        return datetime.fromisoformat(metas[nc_path]["created_at"]).timestamp()
+
+    for nc_path in sorted(metas, key=_creation_time):
+        meta = metas[nc_path]
         point = np.array([meta["point"][k] for k in keys])
         normal = np.array([meta["normal"][k] for k in keys])
         points.append(point)
