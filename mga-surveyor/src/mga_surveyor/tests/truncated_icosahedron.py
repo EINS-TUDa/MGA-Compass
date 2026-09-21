@@ -85,7 +85,7 @@ def n_unique_facets(hull, decimals=6):
 
 def build_method(name, k, norm, executor=None):
     if name == "bilevel":
-        return BilevelMethod(k, norm="linf")  # only norm this method supports
+        return BilevelMethod(k, norm="linf", time_limit=None)  # unbounded/exact; only norm this method supports
     if name == "cdd":
         return CddMethod(k, norm=norm, executor=executor)
     raise ValueError(f"unknown method {name!r}")
