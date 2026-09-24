@@ -23,6 +23,14 @@ dependencies = [
     "numpy",
     "xarray",
     "pydantic",
+    # Free, license-free solver -- the one Settings.solver_name defaults to
+    # (see app/backend/mgaserver/config.py) and the only one
+    # solvers.default_solver_options knows special-case options for, so
+    # navigate/interpolate need it importable to work out of the box.
+    # Gurobi (see the scripts extra below) is only for
+    # scripts/generate_dataset.py's own dataset-generation use, not this
+    # package's core solve path.
+    "highspy>=1.15.1",
 ]
 
 [project.optional-dependencies]
