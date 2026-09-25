@@ -1,4 +1,4 @@
-name: Deploy Presentation to GitHub Pages
+name: Deploy Presentations to GitHub Pages
 
 on:
   push:
@@ -33,15 +33,33 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: docs/presentation/package-lock.json
+          cache-dependency-path: |
+            docs/presentation/Trondheim/package-lock.json
+            docs/presentation/Freiburg/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
-        working-directory: docs/presentation
+      - name: Build Trondheim
+        run: |
+          npm ci
+          npm run build
+        working-directory: docs/presentation/Trondheim
 
-      - name: Build
-        run: npm run build
-        working-directory: docs/presentation
+      - name: Build Freiburg
+        run: |
+          npm ci
+          npm run build
+        working-directory: docs/presentation/Freiburg
+
+      # Each presentation is its own self-contained reveal.js checkout (its
+      # own index.html/dist/plugin/etc at its own root, built in place by
+      # gulp above) -- assembled here into one Pages site so each is served
+      # at its own top-level path (/Trondheim, /Freiburg) regardless of
+      # where they live in the repo. node_modules is excluded: it's only
+      # needed to build, never served.
+      - name: Assemble Pages site
+        run: |
+          mkdir -p _site/Trondheim _site/Freiburg
+          rsync -a --exclude node_modules docs/presentation/Trondheim/ _site/Trondheim/
+          rsync -a --exclude node_modules docs/presentation/Freiburg/ _site/Freiburg/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -49,7 +67,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/presentation
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
