@@ -60,6 +60,7 @@ jobs:
           mkdir -p _site/Trondheim _site/Freiburg
           rsync -a --exclude node_modules docs/presentation/Trondheim/ _site/Trondheim/
           rsync -a --exclude node_modules docs/presentation/Freiburg/ _site/Freiburg/
+          cp docs/presentation/index.html _site/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
