@@ -198,6 +198,11 @@ def main() -> None:
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--obj-label", type=str, default="system_cost")
     parser.add_argument(
+        "--method", choices=["cdd", "bb"], default="cdd",
+        help="Vertex enumeration of the outer polytope: cddlib (CddMethod, default) or Qhull's "
+             "polar dual (BBMethod).",
+    )
+    parser.add_argument(
         "--quiet-solver", action="store_true", default=False,
         help="HiGHS fallback only -- suppresses its console progress log. No effect on Gurobi: its "
              "console output is always off (see _GUROBI_TUNING's LogToConsole=0); full solver detail "
@@ -227,7 +232,7 @@ def main() -> None:
     generate_mga_files(
         n, dimensions, args.output_dir, norm=args.norm, slack_levels=slack_levels,
         solver_name=solver_name, tol=args.tol, normalize=args.normalize, max_iter=args.max_iter,
-        max_parallel=args.max_parallel, solver_options=solver_options,
+        max_parallel=args.max_parallel, solver_options=solver_options, vertex_method=args.method,
     )
     points_df, duals_df, _nc_files = consolidate_mga_results(args.output_dir, args.obj_label)
 

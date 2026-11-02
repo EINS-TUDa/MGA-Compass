@@ -72,7 +72,7 @@ from pypsa.optimization.mga import _worker_init
 
 from .common import Halfspace, Norm, gaps, linearized_objective_cut
 from .explore import ClosestPointFn, drive
-from .methods import CddMethod
+from .methods import BBMethod, CddMethod
 from .normalize import AffineMap, normalize_oracle_fns
 
 if TYPE_CHECKING:
@@ -122,6 +122,23 @@ def _solver_kwargs_with_log(kwargs: dict, log_path: Path | None) -> dict:
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     solver_options = {**kwargs.get("solver_options", {}), "LogFile": str(log_path)}
     return {**kwargs, "solver_options": solver_options}
+
+
+def _solve_with_homogeneous_fallback(n: Network, call_kwargs: dict, what: str) -> tuple[str, str]:
+    """`n.optimize.solve_model(**call_kwargs)`, retried once with Gurobi's homogeneous barrier
+    (`BarHomogeneous=1`) if the first attempt doesn't come back `ok`. The plain barrier can stop
+    with "Numerical trouble encountered" on a closest-point solve whose target sits just outside
+    the feasible range (seen in a BB-driven run, where Gurobi itself suggested this parameter);
+    the homogeneous algorithm is the one built for such borderline problems. Gurobi only -- for
+    any other solver the first result is returned as is."""
+    status, condition = n.optimize.solve_model(**call_kwargs)
+    if status == "ok" or call_kwargs.get("solver_name") != "gurobi":
+        return status, condition
+    logger.warning("%s failed (status=%s, condition=%s) -- retrying with BarHomogeneous=1", what, status, condition)
+    solver_options = {**call_kwargs.get("solver_options", {}), "BarHomogeneous": 1}
+    status, condition = n.optimize.solve_model(**{**call_kwargs, "solver_options": solver_options})
+    logger.info("%s with BarHomogeneous=1: status=%s, condition=%s", what, status, condition)
+    return status, condition
 
 
 def _append_coordinates_to_log(log_path: Path | None, keys: list, point: np.ndarray) -> None:
@@ -874,7 +891,7 @@ def _build_closest_point_solver(
         for key, target_value in zip(keys, target_row):
             resid_constrs[key].update(rhs=float(target_value))
 
-        status, condition = n.optimize.solve_model(**call_kwargs)
+        status, condition = _solve_with_homogeneous_fallback(n, call_kwargs, "closest-point solve")
         if status != "ok":
             msg = f"Closest-point solve for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
@@ -902,7 +919,7 @@ def _build_closest_point_solver(
             _add_pinned_coord_band(m, n, dimensions, key, value, scale)
         m.remove_constraints("budget")
         m.objective = main_obj
-        status, condition = n.optimize.solve_model(**call_kwargs)
+        status, condition = _solve_with_homogeneous_fallback(n, call_kwargs, "closest-point (pinned duals)")
         if status != "ok":
             msg = f"Re-solve at pinned coordinates for target {dict(zip(keys, target_row.tolist()))} failed: status={status}, condition={condition}"
             raise RuntimeError(msg)
@@ -1376,6 +1393,7 @@ def generate_mga_files(
     verbose: bool = True,
     normalize: bool = True,
     use_objective_cuts: bool = True,
+    vertex_method: str = "cdd",
     **kwargs: Any,
 ) -> None:
     """Run a `CddMethod` (exact `'gmp'` arithmetic) per slack level (`explore.drive`, up to
@@ -1682,11 +1700,15 @@ def generate_mga_files(
         if verbose and extra_points:
             logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
 
-        method = CddMethod(k=k, norm=norm, backend="float", projection_backend=solver_name)
+        # vertex_method="bb" swaps cddlib for Qhull's polar-dual vertex enumeration (BBMethod); same interface.
+        if vertex_method == "bb":
+            method = BBMethod(k=k, norm=norm, projection_backend=solver_name)
+        else:
+            method = CddMethod(k=k, norm=norm, backend="float", projection_backend=solver_name)
         if verbose:
             logger.info(
-                "slack=%s: running CddMethod (tol=%.4f%s, max_iter=%s)",
-                slack, slack_tol * gap_scale, gap_unit, slack_max_iter,
+                "slack=%s: running %s (tol=%.4f%s, max_iter=%s)",
+                slack, type(method).__name__, slack_tol * gap_scale, gap_unit, slack_max_iter,
             )
         drive(
             method, furthest_point, closest_point, optimal_fn,
