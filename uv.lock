@@ -942,6 +942,7 @@ name = "mga-compass"
 version = "0.1.0"
 source = { editable = "mga-compass" }
 dependencies = [
+    { name = "highspy" },
     { name = "linopy" },
     { name = "numpy" },
     { name = "pandas" },
@@ -964,6 +965,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "gurobipy", marker = "extra == 'scripts'", specifier = ">=13.0.2" },
+    { name = "highspy", specifier = ">=1.15.1" },
     { name = "linopy", specifier = ">=0.6.7" },
     { name = "mga-surveyor", marker = "extra == 'scripts'", editable = "mga-surveyor" },
     { name = "netcdf4", marker = "extra == 'scripts'" },

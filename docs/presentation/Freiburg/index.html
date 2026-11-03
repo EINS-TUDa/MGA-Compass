@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>A Platform for Interactive Exploration of Near-Optimal Solutions of Linear Energy Planning Models - Sina Hajikazemi</title>
+
+		<link rel="icon" href="images/mga_logo.svg">
+
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+		<link rel="stylesheet" href="dist/theme/white.css">
+
+		<!-- Theme used for syntax highlighted code -->
+		<link rel="stylesheet" href="plugin/highlight/monokai.css">
+
+		<style>
+			.reveal .slides .tu-logo {
+				position: absolute;
+				top: 20px;
+				right: 0;
+				height: 80px;
+				margin: 0;
+				z-index: 1000;
+			}
+
+			/* Custom Navigator at the bottom */
+			.custom-nav {
+				position: fixed;
+				bottom: 50px;
+				left: 50%;
+				transform: translateX(-50%);
+				z-index: 1000;
+				display: flex;
+				gap: 30px;
+				font-family: Arial, sans-serif;
+				font-size: 0.65em;
+				color: #000; /* Fully black for maximum readability */
+			}
+
+			.nav-group {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 5px;
+			}
+
+			.nav-dots {
+				display: flex;
+				gap: 6px;
+			}
+
+			.nav-dot {
+				width: 8px;
+				height: 8px;
+				border-radius: 50%;
+				background: #eee;
+				border: 1px solid #ccc;
+				cursor: pointer;
+			}
+
+			.nav-dot.active {
+				background: #008522;
+				border-color: #008522;
+			}
+
+			.nav-label {
+				letter-spacing: 1px;
+				cursor: pointer;
+			}
+
+			/* Align content slides to top-left with reduced margins */
+			.reveal .slides section:not(.title-slide) {
+				text-align: left;
+				padding-left: 0 !important;
+				font-size: 0.8em;
+				margin-top: 20px !important; /* Reduced top margin */
+			}
+
+			.reveal .slides section:not(.title-slide) h3 {
+				margin-top: 0;
+				margin-left: 20px;
+				font-size: 1.25em;
+			}
+
+			.reveal .slides section:not(.title-slide) h4 {
+				margin-top: -10px;
+				margin-bottom: 0;
+				margin-left: 20px;
+				font-size: 0.8em; /* Slightly larger than content (0.7em) but smaller than title (1.25em) */
+				font-weight: normal;
+			}
+
+			.reveal .slides section:not(.title-slide) hr {
+				margin-top: 15px;
+				margin-bottom: 40px;
+			}
+
+			/* Decrease font size of content below the horizontal line */
+			.reveal .slides section:not(.title-slide) hr ~ * {
+				font-size: 0.7em;
+			}
+
+			.plot-wrap {
+				display: flex;
+				justify-content: center;
+				margin-top: 10px;
+			}
+
+			.columns {
+				display: flex;
+				align-items: center;
+				gap: 40px;
+			}
+
+			.columns .col-list {
+				flex: 1;
+				align-self: flex-start;
+				margin-left: 40px;
+			}
+
+			.columns .plot-wrap {
+				flex: 1;
+				align-self: flex-start;
+				margin-top: 0;
+			}
+
+			.challenge-columns {
+				display: flex;
+				align-items: stretch;
+				width: 100%;
+				margin-top: 20px;
+				font-size: 1.142857em;
+			}
+
+			.challenge-column {
+				flex: 1;
+				min-width: 0;
+				padding: 0 30px;
+				box-sizing: border-box;
+			}
+
+			.challenge-column + .challenge-column {
+				border-left: 2px solid #777;
+			}
+
+			.reveal .slides .challenge-column h4 {
+				margin: 0 0 20px;
+				text-align: center;
+				font-size: 0.8em;
+				font-weight: normal;
+			}
+
+			/* Match the slide subtitle size: .challenge-columns already resolves
+			   to 0.8 of the slide font (0.7em * 1.142857em), so 1em here equals
+			   the subtitle's 0.8em. Needs this specificity to beat the generic
+			   section h4 rule. */
+			.reveal .slides section:not(.title-slide) .challenge-column h4 {
+				font-size: 1em;
+			}
+
+			/* Body text in the challenge columns: .challenge-columns resolves to
+			   0.8 of the slide font, so 0.875em gives the usual 0.7 body size. */
+			/* .reveal p prefix is needed to beat the theme's .reveal p margins. */
+			.reveal .challenge-text {
+				font-size: 0.875em;
+			}
+
+			.reveal p.challenge-text {
+				margin: 10px 0 0;
+			}
+
+			.reveal ul.challenge-text {
+				margin-top: 5px;
+			}
+
+			.runtime-plot {
+				position: relative;
+				width: 76%;
+				margin: 5px auto 0;
+			}
+
+			.reveal .runtime-plot img {
+				display: block;
+				width: 100%;
+				max-width: none;
+				max-height: none;
+				margin: 0;
+			}
+
+			.reveal .runtime-plot .runtime-overlay {
+				position: absolute;
+				top: 0;
+				left: 0;
+				width: 100%;
+				height: 100%;
+			}
+
+			.discover-row {
+				display: flex;
+				align-items: center;
+				gap: 20px;
+			}
+
+			/* bullets take only their own width; the figure is centred in the rest */
+			.reveal .discover-row ul {
+				flex: 0 0 auto;
+				margin: 0 0 0 1em;
+			}
+
+			.discover-row .plot-wrap {
+				flex: 1;
+				justify-content: center;
+			}
+
+			.challenge-column .plot-wrap {
+				margin-top: 0;
+			}
+
+			.info-box {
+				border-left: 4px solid #008522;
+				padding-left: 15px;
+			}
+
+			.info-box + .info-box {
+				margin-top: 40px;
+			}
+
+			.info-label {
+				color: #008522;
+				font-weight: bold;
+				text-transform: uppercase;
+				letter-spacing: 1px;
+				margin-bottom: 5px;
+			}
+
+			.info-text {
+				font-size: 1em;
+				font-weight: 300;
+				line-height: 1.4;
+			}
+
+			.info-box p.info-text:has(+ ul) {
+				margin-bottom: 5px;
+			}
+
+			.dots-fragment.visible {
+				display: none;
+			}
+
+			.info-text .var {
+				color: #2a76dd;
+				font-style: italic;
+			}
+
+			.info-box--blue {
+				border-left-color: #2a76dd;
+			}
+
+			.info-box--blue .info-label {
+				color: #2a76dd;
+			}
+
+			.info-box--red {
+				border-left-color: #cc0000;
+			}
+
+			.info-box--red .info-label {
+				color: #cc0000;
+			}
+
+			.info-box--yellow {
+				border-left-color: #cc9900;
+			}
+
+			.info-box--yellow .info-label {
+				color: #cc9900;
+			}
+
+			.info-box--green {
+				border-left-color: #008522;
+			}
+
+			.info-box--green .info-label {
+				color: #008522;
+			}
+
+			.reveal .slides section.section-with-footnote {
+				height: calc(100% - 20px);
+			}
+
+			.footnote-box {
+				position: absolute;
+				left: 0;
+				right: 0;
+				bottom: 10px;
+				margin-left: 20px;
+			}
+
+			.footnote-rule {
+				border: 0;
+				border-top: 1px solid #000;
+				margin: 0 0 8px -20px;
+				width: calc(100% + 20px);
+			}
+
+			.reveal .slides section:not(.title-slide) hr ~ .footnote-box .footnote {
+				font-size: 0.5em;
+				color: #777;
+				margin: 0;
+			}
+
+			.reveal .slides section:not(.title-slide) hr ~ .footnote-box .footnote + .footnote {
+				margin-top: 2px;
+			}
+
+			/* Keep title slide centered. Uses inset + margin: auto rather than
+			   transform: translate(...), since reveal's print/pdf stylesheet
+			   forces transform: none !important on every slide, which would
+			   otherwise break this centering when exporting to PDF. */
+			.reveal .slides section.title-slide {
+				text-align: center;
+				top: 0 !important;
+				left: 0 !important;
+				right: 0 !important;
+				bottom: 0 !important;
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* reveal's print/pdf stylesheet scopes its own overrides under
+			   html.reveal-print with a more specific selector (forcing
+			   margin: 0 !important among others), which otherwise beats the
+			   rule above and collapses this centering. Match that specificity
+			   here so our centering wins in the exported PDF too. */
+			html.reveal-print .reveal .slides section.title-slide {
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* Keep the title slide heading away from the slide edges */
+			.reveal .slides section.title-slide h3,
+			.reveal .slides section.title-slide h4 {
+				max-width: 85%;
+				margin-left: auto;
+				margin-right: auto;
+			}
+
+
+			/* Center the closing slide on the page. See the section.title-slide
+			   rule above for why this avoids transform: translate(...). */
+			.reveal .slides section.centered-slide {
+				text-align: center;
+				top: 0 !important;
+				left: 0 !important;
+				right: 0 !important;
+				bottom: 0 !important;
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* See the equivalent html.reveal-print override for .title-slide above. */
+			html.reveal-print .reveal .slides section.centered-slide {
+				margin: auto !important;
+				height: fit-content !important;
+			}
+
+			/* TU Darmstadt Green for horizontal lines */
+			hr {
+				border: 0;
+				height: 2px;
+				background: #008522; /* TU Darmstadt Corporate Color Green */
+			}
+
+			/* Disable all-caps for titles */
+			.reveal h1, .reveal h2, .reveal h3, .reveal h4, .reveal h5, .reveal h6 {
+				text-transform: none;
+			}
+
+			li.bullet-green::marker { color: #008522; }
+			li.bullet-red::marker   { color: #cc0000; }
+
+			/* On the full-screen iframe slide, hide everything but the background */
+			.reveal.fullscreen-slide .tu-logo,
+			.reveal.fullscreen-slide .slide-number {
+				display: none;
+			}
+
+			/* Fake QR codes for the thank-you slide */
+			.qr-row {
+				display: flex;
+				justify-content: center;
+				gap: 130px;
+				margin-top: 60px;
+			}
+
+			.qr-item {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 15px;
+			}
+
+			.qr-code {
+				width: 180px;
+				height: 180px;
+			}
+
+			.qr-caption {
+				font-weight: bold;
+				font-size: 1em;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+				<section data-nav="Home" class="title-slide">
+					<h3 style="color: #008522;">MGA Compass</h3>
+					<h4>Package for Discovery and Interactive Exploration of Near-Optimal Solutions</h4>
+					<hr>
+					<div style="position: relative; top: 25px;">
+						<p><strong>Sina Hajikazemi</strong></p>
+						<p><strong>Prof. Florian Steinke</strong></p>
+						<p><small>Technical University of Darmstadt</small></p>
+						<p><small>28.09.2026</small></p>
+						<p style="position: relative; top: 15px;"><small>OpenMod Workshop, Freiburg, 28-29 September 2026</small></p>
+					</div>
+				</section>
+				
+				<!-- Section 1 -->
+				<section data-nav="Solutions" class="section-with-footnote">
+					<h3>Near Optimal Solutions</h3>
+					<h4>Geometry</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box info-box--blue fragment" data-fragment-index="0">
+								<p class="info-label">Objective</p>
+								<p class="info-text">Determine the optimal <span style="color: #2a76dd;">capacity</span> and <span style="color: #2a76dd;">operational</span> schedule of these facilities at the <span style="color: #cc0000;">minimum cost</span>.</p>
+							</div>
+							<div class="info-box info-box--green fragment" data-fragment-index="1" style="margin-top: 12px;">
+								<p class="info-label">Question?</p>
+								<p class="info-text">What are the other options if we allow the solution to be &#949;-suboptimal?</p>
+							</div>
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 440px;" role="img" aria-label="Schematic of the PyPSA model.energy single-node network: an electricity bus connected to solar, wind and load-shedding generators, a battery storage unit and the electricity demand, plus a hydrogen bus connected via electrolysis and turbine links to a hydrogen store">
+								<defs>
+									<marker id="arrow-model" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Electricity bus -->
+								<line x1="30" y1="115" x2="490" y2="115" stroke="#2a76dd" stroke-width="5"/>
+								<text x="485" y="105" text-anchor="end" font-size="18" font-weight="bold" fill="#2a76dd">Electricity</text>
+
+								<!-- Hydrogen bus -->
+								<line x1="30" y1="265" x2="490" y2="265" stroke="#008522" stroke-width="5"/>
+								<text x="485" y="257" text-anchor="end" font-size="18" font-weight="bold" fill="#008522">Hydrogen (H&#8322;)</text>
+
+								<!-- Solar PV generator -->
+								<line x1="100" y1="115" x2="100" y2="73" stroke="#333" stroke-width="2"/>
+								<rect x="80" y="38" width="40" height="35" fill="none" stroke="#333" stroke-width="2"/>
+								<line x1="100" y1="38" x2="100" y2="73" stroke="#333" stroke-width="1.5"/>
+								<line x1="80" y1="55.5" x2="120" y2="55.5" stroke="#333" stroke-width="1.5"/>
+								<text x="100" y="26" text-anchor="middle" font-size="16" fill="#333">Solar PV</text>
+
+								<!-- Wind generator -->
+								<line x1="220" y1="115" x2="220" y2="78" stroke="#333" stroke-width="2"/>
+								<line x1="220" y1="78" x2="220" y2="55" stroke="#333" stroke-width="2"/>
+								<circle cx="220" cy="53" r="3" fill="#333"/>
+								<line x1="220" y1="53" x2="220" y2="34" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="53" x2="236" y2="63" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<line x1="220" y1="53" x2="204" y2="63" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<text x="220" y="27" text-anchor="middle" font-size="16" fill="#333">Wind</text>
+
+								<!-- Load shedding generator -->
+								<line x1="340" y1="115" x2="340" y2="75" stroke="#333" stroke-width="2"/>
+								<path d="M340,40 L325,72 L355,72 Z" fill="none" stroke="#333" stroke-width="2" stroke-dasharray="4,3"/>
+								<line x1="340" y1="50" x2="340" y2="62" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+								<circle cx="340" cy="67" r="1.5" fill="#333"/>
+								<text x="340" y="26" text-anchor="middle" font-size="16" fill="#333">Load Shedding</text>
+
+								<!-- Demand -->
+								<line x1="440" y1="115" x2="440" y2="150" stroke="#333" stroke-width="2"/>
+								<path d="M420,165 L440,150 L460,165 Z" fill="none" stroke="#333" stroke-width="2"/>
+								<rect x="425" y="165" width="30" height="30" fill="none" stroke="#333" stroke-width="2"/>
+								<text x="440" y="222" text-anchor="middle" font-size="16" fill="#333">Demand</text>
+
+								<!-- Battery storage -->
+								<line x1="150" y1="115" x2="150" y2="148" stroke="#333" stroke-width="2"/>
+								<rect x="142" y="148" width="16" height="8" fill="none" stroke="#333" stroke-width="2"/>
+								<rect x="132" y="156" width="36" height="44" rx="6" ry="6" fill="none" stroke="#333" stroke-width="2"/>
+								<path d="M156,160 L140,182 L148,182 L144,196 L160,174 L152,174 Z" fill="#333"/>
+								<text x="150" y="222" text-anchor="middle" font-size="16" fill="#333">Battery Storage</text>
+
+								<!-- Electrolysis link: electricity -> hydrogen -->
+								<line x1="270" y1="118" x2="270" y2="260" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
+								<text x="255" y="190" text-anchor="middle" font-size="15" fill="#333" transform="rotate(-90 255 190)">Electrolysis</text>
+
+								<!-- Turbine link: hydrogen -> electricity -->
+								<line x1="300" y1="262" x2="300" y2="120" stroke="#333" stroke-width="2" marker-end="url(#arrow-model)"/>
+								<text x="315" y="190" text-anchor="middle" font-size="15" fill="#333" transform="rotate(-90 315 190)">Turbine</text>
+
+								<!-- Hydrogen storage -->
+								<line x1="150" y1="265" x2="150" y2="295" stroke="#333" stroke-width="2"/>
+								<ellipse cx="150" cy="301" rx="20" ry="6" fill="none" stroke="#333" stroke-width="2"/>
+								<line x1="130" y1="301" x2="130" y2="335" stroke="#333" stroke-width="2"/>
+								<line x1="170" y1="301" x2="170" y2="335" stroke="#333" stroke-width="2"/>
+								<path d="M130,335 A20,6 0 0 0 170,335" fill="none" stroke="#333" stroke-width="2"/>
+								<text x="150" y="353" text-anchor="middle" font-size="16" fill="#333">H&#8322; Storage</text>
+							</svg>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible solutions, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-geom" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-geom)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-geom)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Feasible solutions (unconstrained, extends further NE): corners (1,1) (2,1) (3.5,2.5) (2.5,3.5) (1,2) -->
+								<polygon points="165,275 260,275 402.5,132.5 307.5,37.5 165,180" fill="#008522" fill-opacity="0.15" class="fragment fade-out" data-fragment-index="2"/>
+								<g stroke="#008522" stroke-width="1.5" class="fragment fade-out" data-fragment-index="2">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="402.5" y2="132.5"/>
+									<line x1="307.5" y1="37.5" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+
+								<!-- Near-optimal feasible solutions: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15" class="fragment" data-fragment-index="2"/>
+								<g stroke="#008522" stroke-width="1.5" class="fragment" data-fragment-index="2">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="228" y="180" font-size="15" fill="#006619" class="fragment fade-out" data-fragment-index="2">Feasible solutions</text>
+								<text x="209" y="190" font-size="15" fill="#006619" class="fragment" data-fragment-index="2">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible solutions</tspan>
+								</text>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5" class="fragment" data-fragment-index="2"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)" class="fragment" data-fragment-index="2">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round" class="fragment" data-fragment-index="0">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Objective gradient direction -c -->
+								<line x1="165" y1="275" x2="141" y2="299" stroke="#333" stroke-width="1.5" opacity="0.5" marker-end="url(#arrow-geom)" class="fragment" data-fragment-index="0"/>
+								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333" class="fragment" data-fragment-index="0">-c</text>
+							</svg>
+						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote">Network schematic based on PyPSA's <a href="https://docs.pypsa.org/v1.0.3/examples/capacity-expansion-planning-single-node/" target="_blank" rel="noopener">single-node capacity expansion example</a>.</p>
+					</div>
+				</section>
+				<section data-nav="Solutions" class="section-with-footnote">
+					<h3>Near Optimal Solutions</h3>
+					<h4>Motivation</h4>
+					<hr>
+					<div class="columns">
+						<div class="col-list">
+							<div class="info-box info-box--blue">
+								<p class="info-label">Use cases</p>
+								<ul class="info-text">
+									<li class="fragment" data-fragment-index="0"><span style="color: #2a76dd;">Preferable alternatives</span> in political, social, or environmental terms.<sup>[1]</sup></li>
+									<li class="fragment" data-fragment-index="1"><span style="color: #2a76dd;">Robust</span> solutions to weather variability<sup>[2]</sup> and cost uncertainty<sup>[3]</sup>.</li>
+									<li class="fragment" data-fragment-index="2"><span style="color: #2a76dd;">Participatory</span> modeling that lets stakeholders explore trade-offs near the optimum.<sup>[4]</sup></li>
+								</ul>
+							</div>
+						</div>
+						<div class="plot-wrap">
+							<svg viewBox="0 0 520 400" width="100%" style="max-width: 560px;" role="img" aria-label="Plot of PV versus Wind Turbine capacity showing the near-optimal feasible solutions, the slack constraint and the optimal solution at (1,1)">
+								<defs>
+									<marker id="arrow-why" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+										<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+									</marker>
+								</defs>
+
+								<!-- Axes -->
+								<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="2" marker-end="url(#arrow-why)"/>
+								<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="2" marker-end="url(#arrow-why)"/>
+								<text x="421" y="378" font-size="16" fill="#333">PV Capacity</text>
+								<text x="78" y="22" font-size="16" fill="#333">
+									<tspan x="78">Wind Turbine</tspan>
+									<tspan x="78" dy="18">Capacity</tspan>
+								</text>
+
+								<!-- Near-optimal feasible solutions: corners (1,1) (2,1) (3,2) (2,3) (1,2) -->
+								<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15"/>
+								<g stroke="#008522" stroke-width="1.5">
+									<line x1="165" y1="275" x2="260" y2="275"/>
+									<line x1="260" y1="275" x2="355" y2="180"/>
+									<line x1="260" y1="85" x2="165" y2="180"/>
+									<line x1="165" y1="180" x2="165" y2="275"/>
+								</g>
+								<text x="209" y="190" font-size="15" fill="#006619">
+									<tspan x="209">Near-optimal</tspan>
+									<tspan x="209" dy="18">feasible solutions</tspan>
+								</text>
+
+								<!-- Slack constraint boundary: (3,2) to (2,3), extended both ways -->
+								<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="2" stroke-dasharray="8,5"/>
+								<text x="307" y="125" text-anchor="middle" font-size="13" fill="#333" transform="rotate(45 307 125)">cost &#8804; (1+&#949;) cost*</text>
+
+								<!-- Optimal solution at (1,1) -->
+								<g stroke="#cc0000" stroke-width="2" stroke-linecap="round">
+									<line x1="159" y1="269" x2="171" y2="281"/>
+									<line x1="171" y1="269" x2="159" y2="281"/>
+								</g>
+
+								<!-- Objective gradient direction -c -->
+								<line x1="165" y1="275" x2="141" y2="299" stroke="#333" stroke-width="1.5" opacity="0.5" marker-end="url(#arrow-why)"/>
+								<text x="132" y="309" text-anchor="middle" font-size="15" fill="#333">-c</text>
+							</svg>
+						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote fragment" data-fragment-index="0">[1] Neumann, Fabian, and Tom Brown. "The near-optimal feasible space of a renewable power system model." Electric Power Systems Research 190 (2021): 106690.</p>
+						<p class="footnote fragment" data-fragment-index="1">[2] Grochowicz, Aleksander, et al. "Intersecting near-optimal spaces: European power systems with more resilience to weather variability." Energy Economics 118 (2023): 106496.</p>
+						<p class="footnote fragment" data-fragment-index="1">[3] Neumann, Fabian, and Tom Brown. "Broad ranges of investment configurations for renewable power systems, robust to cost uncertainty and near-optimality." iScience 26.5 (2023).</p>
+						<p class="footnote fragment" data-fragment-index="2">[4] Vågerö, Oskar, et al. "Exploring near-optimal energy systems with stakeholders: a novel approach for participatory modelling." arXiv preprint arXiv:2501.05280 (2025).</p>
+					</div>
+				</section>
+
+				<section data-nav="Exploration" class="section-with-footnote">
+					<h3>Challenges</h3>
+					<h4>&nbsp;</h4>
+					<hr>
+					<div class="challenge-columns">
+						<div class="challenge-column">
+							<h4>Discover</h4>
+						<!-- bullets to the left of the figure -->
+						<div class="discover-row">
+							<ul class="info-text challenge-text">
+								<li>Unknown &#x1D4B5;</li>
+								<li class="fragment" data-fragment-index="2"><span style="color: #008522;">Inner approximation &#x2110;</span></li>
+								<li class="fragment" data-fragment-index="3"><span style="color: #2a76dd;">Outer approximation &#x1D4AA;</span></li>
+							</ul>
+							<div class="plot-wrap">
+								<svg viewBox="0 0 440 440" width="165" style="overflow: visible; margin: 15px 0 30px;" role="img" aria-label="One ORACLE iteration: the near-optimal space Z as a dashed hexagon, inner approximation I and outer approximation O (bounding box); the vertex z_O of O farthest from I, the point z_I of Z nearest to z_O, and the update that adds z_I to I and cuts O with the supporting line through z_I">
+									<defs>
+										<marker id="arrow-discover" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+											<path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+										</marker>
+									</defs>
+	
+									<!-- Geometry follows the poster's ORACLE figure (Steps 1-4).
+									     Extreme points of Z: top (211.3,40), right (400,185.2),
+									     bottom (272.3,400), left (40,159). Box O spans 40..400 in both axes.
+									     z_O = (40,400), farthest vertex of O from I (d = 167.3).
+									     z_I = (107.7,348.7), point of Z nearest to z_O (distance 84.9).
+									     Cut through z_I with normal z_O - z_I meets O at (40,259.4) and (146.6,400). -->
+	
+									<!-- Outer approximation fill: full box (fragment 3), replaced by the cut box (fragment 7) -->
+									<g class="fragment" data-fragment-index="3">
+										<rect x="40" y="40" width="360" height="360" fill="#2a76dd" fill-opacity="0.12" class="fragment fade-out" data-fragment-index="7"/>
+									</g>
+									<polygon points="40,40 400,40 400,400 146.6,400 40,259.4" fill="#2a76dd" fill-opacity="0.12" class="fragment" data-fragment-index="7"/>
+	
+									<!-- Inner approximation fill: initial quadrilateral (fragment 2), replaced by the pentagon including z_I (fragment 6) -->
+									<g class="fragment" data-fragment-index="2">
+										<polygon points="211.3,40 400,185.2 272.3,400 40,159" fill="#008522" fill-opacity="0.15" class="fragment fade-out" data-fragment-index="6"/>
+									</g>
+									<polygon points="211.3,40 400,185.2 272.3,400 107.7,348.7 40,159" fill="#008522" fill-opacity="0.15" class="fragment" data-fragment-index="6"/>
+	
+									<!-- Near-optimal space Z -->
+									<polygon points="211.3,40 332.3,65.2 400,185.2 272.3,400 107.7,348.7 40,159" fill="none" stroke="#777" stroke-width="2" stroke-dasharray="7,5"/>
+									<line x1="344.8" y1="322.6" x2="334.5" y2="296" stroke="#333" stroke-width="1.5" marker-end="url(#arrow-discover)"/>
+									<text x="356" y="356" text-anchor="middle" font-size="48" font-style="italic" fill="#333">&#x1D4B5;</text>
+	
+									<!-- Outer approximation lines -->
+									<g stroke="#2a76dd" stroke-width="2.5">
+										<!-- top and right sides never change -->
+										<g class="fragment" data-fragment-index="3">
+											<line x1="400" y1="15" x2="400" y2="425"/>
+											<line x1="15" y1="40" x2="425" y2="40"/>
+										</g>
+										<!-- full left and bottom sides, trimmed by the cut in fragment 7 -->
+										<g class="fragment" data-fragment-index="3">
+											<g class="fragment fade-out" data-fragment-index="7">
+												<line x1="40" y1="15" x2="40" y2="425"/>
+												<line x1="15" y1="400" x2="425" y2="400"/>
+											</g>
+										</g>
+										<g class="fragment" data-fragment-index="7">
+											<line x1="40" y1="15" x2="40" y2="259.4"/>
+											<line x1="146.6" y1="400" x2="425" y2="400"/>
+											<line x1="24.9" y1="239.5" x2="161.7" y2="419.9"/>
+										</g>
+									</g>
+									<text x="128" y="84" text-anchor="middle" font-size="48" font-style="italic" fill="#2a76dd" class="fragment" data-fragment-index="3">&#x1D4AA;</text>
+	
+									<!-- Inner approximation vertices (min / max of each coordinate) and label -->
+									<g class="fragment" data-fragment-index="2">
+										<g fill="#008522">
+											<circle cx="211.3" cy="40" r="8"/>
+											<circle cx="400" cy="185.2" r="8"/>
+											<circle cx="272.3" cy="400" r="8"/>
+											<circle cx="40" cy="159" r="8"/>
+										</g>
+										<text x="226" y="206" text-anchor="middle" font-size="48" font-style="italic" fill="#008522">&#x2110;</text>
+									</g>
+	
+									<!-- Poster Step 2 (fragment 4): distance d from z_O to I, arc of radius d around z_O -->
+									<g class="fragment" data-fragment-index="4">
+										<g class="fragment fade-out" data-fragment-index="5">
+											<path d="M187.7,321.5 A167.3,167.3 0 0 0 123.6,255.2" fill="none" stroke="#777" stroke-width="2"/>
+											<line x1="40" y1="400" x2="160.4" y2="283.9" stroke="#333" stroke-width="3"/>
+											<text x="86" y="330" text-anchor="middle" font-size="48" fill="#333" transform="rotate(-44 86 330)">&#x1D451;</text>
+											<circle cx="160.4" cy="283.9" r="8" fill="#cc0000"/>
+										</g>
+									</g>
+	
+									<!-- Poster Step 3 (fragment 5): nearest point z_I of Z to z_O, arc of radius |z_O - z_I|; kept while I expands, removed with the cut (fragment 7) -->
+									<g class="fragment" data-fragment-index="5">
+										<g class="fragment fade-out" data-fragment-index="7">
+											<path d="M119.2,369.3 A84.9,84.9 0 0 0 90.9,332" fill="none" stroke="#777" stroke-width="2"/>
+											<line x1="40" y1="400" x2="107.7" y2="348.7" stroke="#333" stroke-width="3"/>
+											<circle cx="107.7" cy="348.7" r="8" fill="#e67e00"/>
+											<text x="116" y="392" font-size="48" fill="#333"><tspan font-style="italic">z</tspan><tspan font-size="34" dy="8">I</tspan></text>
+										</g>
+									</g>
+	
+									<!-- z_O stays until its corner of O is cut off (fragment 7) -->
+									<g class="fragment" data-fragment-index="4">
+										<g class="fragment fade-out" data-fragment-index="7">
+											<circle cx="40" cy="400" r="8" fill="#cc0000"/>
+											<text x="24" y="436" text-anchor="end" font-size="48" fill="#333"><tspan font-style="italic">z</tspan><tspan font-size="34" dy="8">O</tspan></text>
+										</g>
+									</g>
+	
+									<!-- Poster Step 4, part 1 (fragment 6): z_I becomes a vertex of I.
+			     Part 2 (fragment 7) is the cut of O above. -->
+									<circle cx="107.7" cy="348.7" r="8" fill="#008522" class="fragment" data-fragment-index="6"/>
+	
+									<!-- Second iteration (fragment 8): vertex z_O of the cut O farthest from the expanded I
+									     (top-right corner, d = 115.1), its nearest point on I (329.8,131.2), arc of radius d -->
+									<g class="fragment" data-fragment-index="8">
+										<g class="fragment fade-out" data-fragment-index="12">
+											<path d="M357.6,147 A115.1,115.1 0 0 1 307.4,108.3" fill="none" stroke="#777" stroke-width="2"/>
+											<line x1="400" y1="40" x2="329.8" y2="131.2" stroke="#333" stroke-width="3"/>
+											<text x="384" y="104" text-anchor="middle" font-size="48" fill="#333" transform="rotate(-52.4 384 104)">&#x1D451;</text>
+											<g fill="#cc0000">
+												<circle cx="400" cy="40" r="8"/>
+												<circle cx="329.8" cy="131.2" r="8"/>
+											</g>
+											<text x="410" y="22" font-size="48" fill="#333"><tspan font-style="italic">z</tspan><tspan font-size="34" dy="8">O</tspan></text>
+										</g>
+									</g>
+	
+									<!-- Fragment 9: stopping criterion, written below the figure (overflow: visible);
+									     removed in fragment 12 together with z_O -->
+									<g class="fragment" data-fragment-index="9">
+										<text x="220" y="505" text-anchor="middle" font-size="48" fill="#333" class="fragment fade-out" data-fragment-index="12">&#x1D451; &#8804; &#x1D6FF; ? terminate</text>
+									</g>
+	
+									<!-- Fragment 12 (G-ORACLE): the bilevel optimum is always a vertex of O, so mark every vertex -->
+									<g fill="#cc0000" class="fragment" data-fragment-index="12">
+										<rect x="28" y="28" width="24" height="24"/>
+										<rect x="388" y="28" width="24" height="24"/>
+										<rect x="388" y="388" width="24" height="24"/>
+										<rect x="134.6" y="388" width="24" height="24"/>
+										<rect x="28" y="247.4" width="24" height="24"/>
+									</g>
+									<!-- Fragment 13: from every vertex of O, the segment to its nearest point on I
+									     (one cheap projection per vertex instead of the bilevel problem) -->
+									<g class="fragment" data-fragment-index="13">
+										<g stroke="#333" stroke-width="3">
+											<line x1="40" y1="40" x2="95.8" y2="120.3"/>  <!-- d = 97.7 -->
+											<line x1="400" y1="40" x2="329.8" y2="131.2"/>  <!-- d = 115.1 -->
+											<line x1="400" y1="400" x2="305.6" y2="343.9"/>  <!-- d = 109.8 -->
+											<line x1="146.6" y1="400" x2="157.7" y2="364.3"/>  <!-- d = 37.4 -->
+											<line x1="40" y1="259.4" x2="71.8" y2="248.1"/>  <!-- d = 33.7 -->
+										</g>
+										<g fill="#cc0000">
+											<circle cx="95.8" cy="120.3" r="7"/>
+											<circle cx="329.8" cy="131.2" r="7"/>
+											<circle cx="305.6" cy="343.9" r="7"/>
+											<circle cx="157.7" cy="364.3" r="7"/>
+											<circle cx="71.8" cy="248.1" r="7"/>
+										</g>
+									</g>
+								</svg>
+							</div>
+						</div>
+						<p class="info-text challenge-text fragment" data-fragment-index="1">Our method builds on <strong>ORACLE</strong><sup>[1]</sup> that approximates &#x1D4B5; with two polytopes.</p>
+						<p class="info-text challenge-text fragment" data-fragment-index="10">However, it solves a <span style="color: #cc0000;">costly bilevel problem</span> to find &#x1D451;.</p>
+						<p class="info-text challenge-text fragment" data-fragment-index="12">We propose <strong style="color: #008522;">G-ORACLE</strong> that replaces the <span style="color: #cc0000;">bilevel problem</span> with a <span style="color: #008522;">geometric solution</span>.</p>
+						<!-- Runtime per iteration (from the poster). Base image has only the ORACLE curve;
+						     the G-ORACLE curve and legend entry are a transparent overlay on top. -->
+						<div class="runtime-plot fragment" data-fragment-index="10">
+							<img src="images/runtime_oracle.png" alt="Runtime per iteration on a log scale: ORACLE rises to about 300 seconds within 50 iterations">
+							<!-- Axis labels redrawn larger over the small originals in the image (2000 x 693 grid).
+							     y ticks: 10^3..10^-1 at y = 38.5, 159, 280, 400, 521; x ticks every 50 at x = 162 + 5.43 * it. -->
+							<svg class="runtime-overlay" viewBox="0 0 2000 693" preserveAspectRatio="none" aria-hidden="true" style="overflow: visible;">
+								<!-- cover the original tick labels and axis titles -->
+								<g fill="#fff">
+									<rect x="40" y="18" width="112" height="530"/>
+									<rect x="140" y="621" width="1720" height="72"/>
+							<rect x="1640" y="26" width="245" height="104"/>  <!-- legend -->
+								</g>
+								<g font-family="serif" font-size="64" fill="#333">
+									<text x="148" y="60.5" text-anchor="end">10<tspan font-size="44" dy="-26">3</tspan></text>
+									<text x="148" y="181" text-anchor="end">10<tspan font-size="44" dy="-26">2</tspan></text>
+									<text x="148" y="302" text-anchor="end">10<tspan font-size="44" dy="-26">1</tspan></text>
+									<text x="148" y="422" text-anchor="end">10<tspan font-size="44" dy="-26">0</tspan></text>
+									<text x="148" y="543" text-anchor="end">10<tspan font-size="44" dy="-26">&#8722;1</tspan></text>
+									<text x="162" y="676" text-anchor="middle">0</text>
+									<text x="433" y="676" text-anchor="middle">50</text>
+									<text x="705" y="676" text-anchor="middle">100</text>
+									<text x="977" y="676" text-anchor="middle">150</text>
+									<text x="1248" y="676" text-anchor="middle">200</text>
+									<text x="1520" y="676" text-anchor="middle">250</text>
+									<text x="1791" y="676" text-anchor="middle">300</text>
+								</g>
+								<!-- axis titles centred on their axes (plot area x = 162..1889, y = 22..611) -->
+								<text x="1025.5" y="752" text-anchor="middle" font-size="70" fill="#333">iteration</text>
+								<!-- legend redrawn larger -->
+								<text x="1870" y="88" text-anchor="end" font-size="66" font-weight="bold" fill="#c0392b">ORACLE</text>
+								<text x="20" y="370" text-anchor="middle" font-size="70" fill="#333" transform="rotate(-90 20 370)">time (s)</text>
+							</svg>
+							<!-- 300 s reference line, in the image's own pixel grid (2000 x 693):
+							     10^2 s at y=159, 10^3 s at y=38.5, so 300 s at y=101.5; plot area x = 162..1889.
+							     ORACLE reaches it at about iteration 46 (x = 413). -->
+							<svg class="runtime-overlay fragment" data-fragment-index="11" viewBox="0 0 2000 693" preserveAspectRatio="none" aria-hidden="true" style="overflow: visible;">
+								<!-- shown on fragment 11, removed when G-ORACLE appears (fragment 12) -->
+								<g class="fragment fade-out" data-fragment-index="12">
+									<g stroke="#333" stroke-width="6" stroke-dasharray="24,14">
+										<!-- 300 s: from just left of the y axis to iteration 50 -->
+										<line x1="-140" y1="101.5" x2="433" y2="101.5"/>
+										<!-- iteration 50 is at x = 433; the x axis is at y = 611 -->
+										<line x1="433" y1="611" x2="433" y2="101.5"/>
+									</g>
+									<!-- label outside the plot, left of the axis (svg overflow: visible) -->
+									<text x="-152" y="125" text-anchor="end" font-size="70" fill="#333">300 s</text>
+								</g>
+							</svg>
+							<img class="runtime-overlay fragment" data-fragment-index="12" src="images/runtime_goracle.png" alt="G-ORACLE stays below about 30 seconds per iteration through more than 300 iterations">
+							<svg class="runtime-overlay fragment" data-fragment-index="12" viewBox="0 0 2000 693" preserveAspectRatio="none" aria-hidden="true" style="overflow: visible;">
+								<text x="1870" y="162" text-anchor="end" font-size="66" font-weight="bold" fill="#008522">G-ORACLE</text>
+							</svg>
+							<!-- Fragment 14: G-ORACLE reference lines. 10^1 s at y=280, 10^2 s at y=159,
+							     so 30 s at y=222.3; iteration 300 at x=1791. -->
+							<svg class="runtime-overlay fragment" data-fragment-index="14" viewBox="0 0 2000 693" preserveAspectRatio="none" aria-hidden="true" style="overflow: visible;">
+								<g stroke="#333" stroke-width="6" stroke-dasharray="24,14">
+									<line x1="-140" y1="222.3" x2="1791" y2="222.3"/>
+									<line x1="1791" y1="611" x2="1791" y2="222.3"/>
+								</g>
+								<text x="-152" y="246" text-anchor="end" font-size="70" fill="#333">30 s</text>
+							</svg>
+						</div>
+											</div>
+						<div class="challenge-column">
+							<!-- Explore: figure and exploration-phase steps from the Real-Time Approach slide.
+							     Fragment k there maps to k + 8 here (the Discover column ends at fragment 14). -->
+							<div class="fragment" data-fragment-index="15">
+								<h4>Explore</h4>
+								<div class="plot-wrap">
+									<svg viewBox="0 0 520 400" width="80%" style="max-width: 432px; overflow: visible; margin: 35px 0 20px;" role="img" aria-label="Near-optimal space in PV and Wind Turbine capacity with its corner points and the optimum; the user sets lower bounds X and Y, the Navigation problem returns a point, and the solution is traversed along a straight path, twice">
+										<defs>
+											<marker id="arrow-explore" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto" markerUnits="strokeWidth">
+												<path d="M0,0 L0,4 L6,2 z" fill="#333"/>
+											</marker>
+											<marker id="arrow-explore-blue" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto" markerUnits="strokeWidth">
+												<path d="M0,0 L0,4 L6,2 z" fill="#2a76dd"/>
+											</marker>
+										</defs>
+
+										<!-- Axes -->
+										<line x1="70" y1="370" x2="412" y2="370" stroke="#333" stroke-width="3" marker-end="url(#arrow-explore)"/>
+										<line x1="70" y1="370" x2="70" y2="28" stroke="#333" stroke-width="3" marker-end="url(#arrow-explore)"/>
+										<text x="421" y="378" font-size="21.5" fill="#333">PV Capacity</text>
+										<text x="92" y="22" font-size="21.5" fill="#333"><tspan x="92">Wind Turbine</tspan><tspan x="92" dy="26">Capacity</tspan></text>
+
+										<!-- State after the corner search: convex hull of the corner points -->
+										<polygon points="165,275 260,275 355,180 260,85 165,180" fill="#008522" fill-opacity="0.15"/>
+										<g stroke="#008522" stroke-width="2.5">
+											<line x1="165" y1="275" x2="260" y2="275"/>
+											<line x1="260" y1="275" x2="355" y2="180"/>
+											<line x1="260" y1="85" x2="165" y2="180"/>
+											<line x1="165" y1="180" x2="165" y2="275"/>
+										</g>
+										<!-- Slack constraint boundary -->
+										<line x1="405" y1="230" x2="210" y2="35" stroke="#333" stroke-width="3" stroke-dasharray="10,6"/>
+										<text x="325" y="115" text-anchor="middle" font-size="21.5" fill="#333" transform="rotate(45 325 115)">cost &#8804; (1+&#949;) cost*</text>
+										<g fill="#008522">
+											<circle cx="165" cy="275" r="5"/>  <!-- initial point (optimum), also a vertex -->
+											<circle cx="260" cy="275" r="5"/>
+											<circle cx="355" cy="180" r="5"/>
+											<circle cx="260" cy="85" r="5"/>
+											<circle cx="165" cy="180" r="5"/>
+										</g>
+
+										<!-- Optimal solution (removed at fragment 23) -->
+										<g stroke="#cc0000" stroke-width="3" stroke-linecap="round" class="fragment fade-out" data-fragment-index="23"><line x1="159" y1="269" x2="171" y2="281"/><line x1="171" y1="269" x2="159" y2="281"/></g>
+
+										<!-- Fragment 17: constraints PV >= X, Wind >= Y (removed at 19) -->
+										<g class="fragment" data-fragment-index="17">
+											<g class="fragment fade-out" data-fragment-index="19">
+												<g stroke="#2a76dd" stroke-width="3" stroke-dasharray="8,5">
+													<line x1="212.5" y1="55" x2="212.5" y2="370"/>
+													<line x1="70" y1="227.5" x2="385" y2="227.5"/>
+												</g>
+												<text x="212.5" y="412" text-anchor="middle" font-size="21.5" font-style="italic" fill="#2a76dd">X</text>
+												<text x="40" y="242" text-anchor="middle" font-size="21.5" font-style="italic" fill="#2a76dd">Y</text>
+												<g stroke="#2a76dd" stroke-width="3" marker-end="url(#arrow-explore-blue)">
+													<line x1="212.5" y1="330" x2="247.5" y2="330"/>
+													<line x1="130" y1="227.5" x2="130" y2="192.5"/>
+												</g>
+											</g>
+										</g>
+
+										<!-- Fragment 18: point returned by the Navigation problem (removed at 23) -->
+										<g class="fragment" data-fragment-index="18">
+											<g stroke="#cc0000" stroke-width="3" stroke-linecap="round" class="fragment fade-out" data-fragment-index="23"><line x1="206.5" y1="221.5" x2="218.5" y2="233.5"/><line x1="218.5" y1="221.5" x2="206.5" y2="233.5"/></g>
+										</g>
+
+										<!-- Fragment 19: traversal from the optimum to that point (removed at 23) -->
+										<g class="fragment" data-fragment-index="19">
+											<line x1="165" y1="275" x2="212.5" y2="227.5" stroke="#cc0000" stroke-width="3" stroke-dasharray="8,5" class="fragment fade-out" data-fragment-index="23"/>
+										</g>
+
+										<!-- Fragment 20: second cycle, the user stops partway along the first traversal -->
+										<g stroke="#cc0000" stroke-width="3" stroke-linecap="round" class="fragment" data-fragment-index="20"><line x1="182.75" y1="245.25" x2="194.75" y2="257.25"/><line x1="194.75" y1="245.25" x2="182.75" y2="257.25"/></g>
+
+										<!-- Fragment 21: new constraints from the new current point (removed at 23) -->
+										<g class="fragment" data-fragment-index="21">
+											<g class="fragment fade-out" data-fragment-index="23">
+												<g stroke="#2a76dd" stroke-width="3" stroke-dasharray="8,5">
+													<line x1="235" y1="55" x2="235" y2="370"/>
+													<line x1="70" y1="150" x2="385" y2="150"/>
+												</g>
+												<text x="235" y="412" text-anchor="middle" font-size="21.5" font-style="italic" fill="#2a76dd">X</text>
+												<text x="40" y="165" text-anchor="middle" font-size="21.5" font-style="italic" fill="#2a76dd">Y</text>
+												<g stroke="#2a76dd" stroke-width="3" marker-end="url(#arrow-explore-blue)">
+													<line x1="235" y1="330" x2="270" y2="330"/>
+													<line x1="130" y1="150" x2="130" y2="115"/>
+												</g>
+											</g>
+										</g>
+
+										<!-- Fragment 22: new point from solving the Navigation problem again -->
+										<g stroke="#cc0000" stroke-width="3" stroke-linecap="round" class="fragment" data-fragment-index="22"><line x1="229" y1="144" x2="241" y2="156"/><line x1="241" y1="144" x2="229" y2="156"/></g>
+
+										<!-- Fragment 23: second traversal -->
+										<line x1="188.75" y1="251.25" x2="235" y2="150" stroke="#cc0000" stroke-width="3" stroke-dasharray="8,5" class="fragment" data-fragment-index="23"/>
+									</svg>
+								</div>
+							</div>
+							<p class="info-text challenge-text fragment" data-fragment-index="16">We propose <strong style="color: #008522;">MGA-Compass</strong><sup>[2]</sup>, an <span style="color: #2a76dd;">interactive</span> <span style="color: #2a76dd;">real-time</span> platform:</p>
+							<ul class="info-text challenge-text">
+								<li class="fragment" data-fragment-index="17">User defines a question</li>
+								<li class="fragment" data-fragment-index="18">Platform solves the <span style="color: #2a76dd;">Navigation</span> problem (<span style="color: #008522;">&asymp;&nbsp;2&nbsp;s</span>)</li>
+								<li class="fragment" data-fragment-index="19">User <span style="color: #2a76dd;">traverses</span> between the endpoints (<span style="color: #008522;">instantaneous</span>)</li>
+							</ul>
+						</div>
+					</div>
+					<div class="footnote-box">
+						<div class="footnote-rule"></div>
+						<p class="footnote fragment" data-fragment-index="1">[1] Turan, Evren Mert, Stefano Moret, and André Bardow. "ORACLE: A rigorous metric and method to explore all near-optimal designs for energy systems." Computers &amp; Chemical Engineering 210 (2026): 109630.</p>
+						<p class="footnote fragment" data-fragment-index="16">[2] Hajikazemi, Sina, and Florian Steinke. "Interactive exploration of near-optimal solutions of energy planning models." 22nd International Conference on the European Energy Market (EEM) (2026): 1&ndash;6.</p>
+					</div>
+				</section>
+
+				<!-- Section 4 -->
+				<section data-nav="Conclusion" data-background-iframe="https://enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app/" data-background-interactive>
+				</section>
+
+				<section data-nav="Conclusion" data-background-image="images/MGA-compass.png" data-background-size="contain">
+				</section>
+
+				<section data-nav="Conclusion" class="centered-slide">
+					<h3 style="color: #008522;">Thank You For Your Attention!</h3>
+					<div class="qr-row">
+						<div class="qr-item">
+							<img class="qr-code" src="images/Github.svg" alt="QR code linking to the code repository">
+							<p class="qr-caption">Code</p>
+						</div>
+						<div class="qr-item">
+							<img class="qr-code" src="images/LiveDemo.svg" alt="QR code linking to the live demo">
+							<p class="qr-caption">Live Demo</p>
+						</div>
+					</div>
+				</section>
+				<img class="tu-logo" src="images/TU_Darmstadt_Logo.svg" alt="TU Darmstadt Logo">
+			</div>
+		</div>
+
+		<!-- <div class="custom-nav" id="custom-nav"></div> -->
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script>
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+			Reveal.initialize({
+				hash: true,
+				showHiddenSlides: true,
+				center: false,
+				width: 1200,
+				height: 800,
+				margin: 0,
+
+				slideNumber: 'c/t',
+
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+			});
+
+			// Custom Navigation Logic
+			// const navContainer = document.getElementById('custom-nav');
+			const slides = Array.from(document.querySelectorAll('.slides > section'));
+
+			// Define sections and their slides
+			// const navStructure = [
+			// 	{ label: 'Near Optimal Solutions', slides: [1, 2] },
+			// 	{ label: 'How to Explore', slides: [3, 4] },
+			// 	{ label: 'How to Solve', slides: [5] },
+			// 	{ label: 'Conclusion', slides: [6] }
+			// ];
+
+			function updateNav() {
+				const currentSlideIndex = Reveal.getIndices().h;
+				const currentSlide = slides[currentSlideIndex];
+
+				// On slides with a full background (iframe/image) or the final slide, show only the background
+				const isFullscreenSlide = currentSlideIndex === slides.length - 1
+					|| currentSlide.hasAttribute('data-background-iframe')
+					|| currentSlide.hasAttribute('data-background-image');
+				document.querySelector('.reveal').classList.toggle('fullscreen-slide', isFullscreenSlide);
+
+				/* Navigation bar disabled
+				// Hide navigation on landing page and the final full-screen slide
+				if (currentSlideIndex === 0 || currentSlideIndex === slides.length - 1) {
+					navContainer.style.display = 'none';
+					return;
+				} else {
+					navContainer.style.display = 'flex';
+				}
+
+				navContainer.innerHTML = '';
+
+				navStructure.forEach(group => {
+					const groupDiv = document.createElement('div');
+					groupDiv.className = 'nav-group';
+
+					const dotsDiv = document.createElement('div');
+					dotsDiv.className = 'nav-dots';
+
+					group.slides.forEach(slideIdx => {
+						const dot = document.createElement('div');
+						dot.className = 'nav-dot' + (slideIdx === currentSlideIndex ? ' active' : '');
+						dot.onclick = (e) => {
+							e.stopPropagation();
+							Reveal.slide(slideIdx);
+						};
+						dotsDiv.appendChild(dot);
+					});
+
+					const label = document.createElement('div');
+					label.className = 'nav-label';
+					label.innerText = group.label;
+					label.onclick = (e) => {
+						e.stopPropagation();
+						Reveal.slide(group.slides[0]);
+					};
+
+					groupDiv.appendChild(label);
+					groupDiv.appendChild(dotsDiv);
+					navContainer.appendChild(groupDiv);
+				});
+				*/
+			}
+
+			Reveal.on('slidechanged', updateNav);
+			Reveal.on('ready', updateNav);
+		</script>
+	</body>
+</html>
