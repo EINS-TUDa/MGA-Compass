@@ -1,12 +1,15 @@
-import os
-os.environ.setdefault("DATA_DIR", "tests")
+import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
 import pandas as pd
-from mga_compass import Constraints
+import xarray as xr
+from mga_compass import Constraints, finalize_bundle, write_dataarray, write_frame
 
 from mgaserver.config import load_manifest, settings, Manifest
+
+MANIFEST_TEMPLATE = Path(__file__).parent / "manifest.json"
 
 
 @pytest.fixture(scope="session")
@@ -26,7 +29,28 @@ def dimensions(points_df):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def manifest() -> Manifest:
+def dataset_dir(tmp_path_factory, points_df) -> Path:
+    """A small, real dataset bundle (see mga_compass.dataset), loaded by the app
+    through its normal startup path -- settings.data_dir points at it."""
+    bundle = tmp_path_factory.mktemp("dataset")
+    shutil.copy(MANIFEST_TEMPLATE, bundle / "manifest.json")
+    write_frame(points_df, bundle / "points.parquet")
+    write_frame(points_df.drop(columns="TOTEX") * 0.0, bundle / "duals.parquet")
+    index, techs = points_df.index.tolist(), ["gas", "coal"]
+    write_dataarray(xr.DataArray(np.ones((len(index), 2)), dims=["index", "technology"],
+                                 coords={"index": index, "technology": techs}),
+                    bundle / "installed_capacity.parquet")
+    snapshots = pd.date_range("2030-01-01", periods=3, freq="h")
+    write_dataarray(xr.DataArray(np.ones((len(index), 3, 2)), dims=["index", "snapshot", "technology"],
+                                 coords={"index": index, "snapshot": snapshots, "technology": techs}),
+                    bundle / "generation_over_snapshots.parquet")
+    finalize_bundle(bundle)
+    settings.data_dir = bundle
+    return bundle
+
+
+@pytest.fixture(scope="session")
+def manifest(dataset_dir) -> Manifest:
     return load_manifest(settings.manifest_path)
 
 

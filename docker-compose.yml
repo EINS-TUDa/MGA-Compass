@@ -7,6 +7,9 @@ services:
       - "8000:8000"
     environment:
       - ALLOWED_ORIGINS=["http://localhost"]
+      # Dataset bundle to download at startup (a GitHub release of
+      # scripts/publish_dataset.py's output); override with your own tag.
+      - DATASET_URL=${DATASET_URL:-https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-v1}
 
   frontend:
     build: ./app/frontend

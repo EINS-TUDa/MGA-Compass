@@ -14,6 +14,17 @@ from .core import (
     upper_envelope,
 )
 from .manifest import OutputDimension, OutputDataset, Plot, Manifest, load_manifest
+from .dataset import (
+    fetch_bundle,
+    finalize_bundle,
+    load_bundle,
+    read_dataarray,
+    read_frame,
+    verify_bundle,
+    write_dataarray,
+    write_frame,
+    write_manifest,
+)
 from .schemes import (
     Constraints,
     ConstraintsIndexError,
@@ -53,6 +64,15 @@ __all__ = [
     "Plot",
     "Manifest",
     "load_manifest",
+    "fetch_bundle",
+    "finalize_bundle",
+    "load_bundle",
+    "read_dataarray",
+    "read_frame",
+    "verify_bundle",
+    "write_dataarray",
+    "write_frame",
+    "write_manifest",
     "Constraints",
     "ConstraintsIndexError",
     "ConstraintsColumnsError",

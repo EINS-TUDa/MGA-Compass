@@ -29,8 +29,15 @@ class Manifest(BaseModel):
     obj_label: str
     dimension_info: dict[str, str] = {}
     dimension_unit: dict[str, str] = {}
+    # File names inside the dataset bundle (see mga_compass.dataset); output
+    # dataset paths are relative to the bundle too.
+    points: str = "points.parquet"
+    duals: str | None = "duals.parquet"
     output_datasets: dict[str, OutputDataset] = {}
     plots: dict[str, Plot] = {}
+    # sha256 of every file in the bundle except the manifest itself, written by
+    # mga_compass.dataset.finalize_bundle and checked before the server loads it.
+    files: dict[str, str] = {}
 
 
 def load_manifest(path: Path) -> Manifest:

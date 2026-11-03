@@ -947,6 +947,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pandera" },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "xarray" },
 ]
@@ -972,6 +973,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pandera", specifier = ">=0.31.1" },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pypsa", marker = "extra == 'scripts'", specifier = ">=1.2.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },

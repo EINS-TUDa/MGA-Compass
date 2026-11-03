@@ -1,3 +1,6 @@
 # MSVC build artifacts (cddlib compilation)
 *.obj
 *.pdb
+
+# Dataset bundle the backend downloads at startup (see mga_compass.dataset)
+app/backend/data/

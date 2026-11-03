@@ -16,12 +16,19 @@
   },
   "output_datasets": {
     "capacity": {
-      "path": "data/installed_capacity.pkl",
-      "dims": ["index", "technology"]
+      "path": "installed_capacity.parquet",
+      "dims": [
+        "index",
+        "technology"
+      ]
     },
     "generation": {
-      "path": "data/generation_over_snapshots.pkl",
-      "dims": ["index", "snapshot", "technology"]
+      "path": "generation_over_snapshots.parquet",
+      "dims": [
+        "index",
+        "snapshot",
+        "technology"
+      ]
     }
   },
   "plots": {

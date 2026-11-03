@@ -12,25 +12,10 @@ from mgaserver.main import app
 
 
 @pytest.fixture(scope="module")
-def client(points_df, duals_df, outer_approximation_df):
-    from mgaserver.config import settings
-    _fake_da = xr.DataArray(
-        np.ones((4, 2)),
-        dims=["index", "technology"],
-        coords={"index": [0, 1, 2, 3], "technology": ["gas", "coal"]},
-    )
-    _pickle_map = {
-        Path(settings.data_path): points_df,
-        Path(settings.duals_path): duals_df,
-        Path(settings.outer_approximation_path): outer_approximation_df,
-    }
-    def _read_pickle(path):
-        return _pickle_map[Path(path)]
-    with patch("mgaserver.main.pd.read_pickle", side_effect=_read_pickle):
-        with patch("mgaserver.main.pickle.loads", return_value=_fake_da):
-            with patch("pathlib.Path.read_bytes", return_value=b""):
-                with TestClient(app) as c:
-                    yield c
+def client(dataset_dir):
+    # The app loads conftest's dataset bundle through its normal startup path.
+    with TestClient(app) as c:
+        yield c
 
 
 class TestInitEndpoint:

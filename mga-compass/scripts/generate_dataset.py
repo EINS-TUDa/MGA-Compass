@@ -4,9 +4,11 @@ Solves a PyPSA example network, then hands it to
 mga_surveyor.generate_mga_files (which drives a CddMethod per
 sub-optimality (slack) level to discover near-optimal points, writing
 result .nc files), reads the result back via
-mga_surveyor.consolidate_mga_results, and writes the production-ready
-files consumed by the server (points.pkl, duals.pkl,
-installed_capacity.pkl, generation_over_snapshots.pkl) from that.
+mga_surveyor.consolidate_mga_results, and writes the data files of a
+dataset bundle (points.parquet, duals.parquet, installed_capacity.parquet,
+generation_over_snapshots.parquet; see mga_compass.dataset) from that.
+scripts/publish_dataset.py then adds the manifest and checksums and uploads
+the bundle for the server to download.
 
 Requires the "scripts" extra (`uv sync --extra scripts`) for mga-surveyor/pypsa/netCDF4/gurobipy.
 
@@ -25,6 +27,7 @@ import pypsa
 import xarray as xr
 from netCDF4 import Dataset
 
+from mga_compass import write_dataarray, write_frame
 from mga_surveyor import consolidate_mga_results, generate_mga_files
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -241,14 +244,14 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
     points_df, duals_df, nc_files = consolidate_mga_results(config.output_dir, config.obj_label)
     logging.info(f"Total points: {len(points_df)}")
 
-    points_df.to_pickle(config.output_dir / "points.pkl")
-    duals_df.to_pickle(config.output_dir / "duals.pkl")
+    write_frame(points_df, config.output_dir / "points.parquet")
+    write_frame(duals_df, config.output_dir / "duals.parquet")
 
     generation, installed_capacity = extract_generation_and_capacity(
         nc_files, points_df.index, pd.DatetimeIndex(n.snapshots), network.capacity_vars
     )
-    pd.to_pickle(generation, config.output_dir / "generation_over_snapshots.pkl")
-    pd.to_pickle(installed_capacity, config.output_dir / "installed_capacity.pkl")
+    write_dataarray(generation, config.output_dir / "generation_over_snapshots.parquet")
+    write_dataarray(installed_capacity, config.output_dir / "installed_capacity.parquet")
 
     logging.info(f"Saved generation {generation.shape} (index x snapshot x technology)")
     logging.info(f"Saved installed_capacity {installed_capacity.shape} (index x technology)")

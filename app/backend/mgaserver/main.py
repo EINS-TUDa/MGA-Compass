@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 import logging
-import pickle
 
 import pandas as pd
 import xarray as xr
@@ -10,10 +9,11 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from mga_compass import fetch_bundle, load_bundle
 from mga_compass import Constraints, Alpha, Breakpoint, navigate, interpolate, get_plot_data, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
 
 from .api_models import ConstraintRow, ConstraintsPayload, BreakpointResult, NavigateResponse, ConstraintChangeItem, DimensionRange, DimensionEntry, InitResponse, InitPlotResponse, PlotRequest, PlotResponse, LowerBoundRequest, LowerBoundResponse, LowerBoundPointResult
-from .config import settings, load_manifest, Manifest
+from .config import settings, Manifest
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -21,45 +21,32 @@ logger = logging.getLogger(__name__)
 configure_solver_logging(settings.solver_log_path)
 
 points: pd.DataFrame = pd.DataFrame()
+# Empty, as before the switch to dataset bundles: /lower_bound passes it to
+# linear_lower_bounds, but loading it (from manifest.duals) has stayed disabled.
 duals: pd.DataFrame = pd.DataFrame()
-outer_approximation: pd.DataFrame
 output_datasets: dict[str, xr.DataArray]
 manifest: Manifest
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global points, duals, outer_approximation, output_datasets, manifest
-    manifest = load_manifest(settings.manifest_path)
+    global points, output_datasets, manifest
+    if settings.dataset_url:
+        logger.info("fetching dataset bundle %s into %s", settings.dataset_url, settings.data_dir)
+        fetch_bundle(settings.dataset_url, settings.data_dir)
+    # Verified against the manifest's checksums before anything is read.
+    manifest, points, output_datasets = load_bundle(settings.data_dir)
 
-
-    # points pickle: DataFrame, one row per MGA solution point.
+    # points: DataFrame, one row per MGA solution point.
     #   Index  : integer (0-based)
     #   Columns: one per decision variable (e.g. wind, solar, …) + objective (e.g. TOTEX)
     #   Example:
     #     wind  solar  hydrogen  battery  TOTEX
     #     10    20     45        25       35
-    points = pd.read_pickle(settings.data_path)
-
-    # duals pickle: DataFrame, one row per point (same integer index as points).
-    #   Columns: one per non-objective decision variable containing the dual value
-    #            (shadow price) of the capacity constraint at that solution point.
-    #   Example:
-    #     wind   solar  hydrogen  battery
-    #     0.12   0.08   0.05      0.03
-    # duals = pd.read_pickle(settings.duals_path)
-
-    # outer_approximation pickle: DataFrame, one row per linear constraint.
-    #   Columns: one per decision variable (coefficient) + "direction" + "RHS".
-    #   "direction": str, one of ">=", "<=", "=="
-    #   "RHS"      : float, right-hand side value
-    #   Example:
-    #     wind  solar  TOTEX  direction  RHS
-    #     1.0   0.5    0.0    >=         10.0
-    #     0.0   1.0   -1.0    <=          0.0
-    # outer_approximation = pd.read_pickle(settings.outer_approximation_path)
-
-    output_datasets = {name: pickle.loads(ds.path.read_bytes()) for name, ds in manifest.output_datasets.items()}
+    # output_datasets: one xr.DataArray per manifest.output_datasets entry, its
+    #   dims as listed there (e.g. index x snapshot x technology).
+    # The bundle also carries duals (manifest.duals; one row per point, one column
+    # per non-objective dimension); not loaded -- see `duals` above.
     yield
 
 

@@ -24,8 +24,8 @@ RUN uv sync --frozen --no-dev --package mgaserver
 COPY app/backend/mgaserver/ ./app/backend/mgaserver/
 RUN uv sync --frozen --no-dev --package mgaserver
 
-# Copy data files
-COPY app/backend/data/ ./app/backend/data/
+# No data in the image: at startup the server downloads the dataset bundle at
+# $DATASET_URL into data/ (see mgaserver/config.py and mga_compass.dataset).
 
 WORKDIR /repo/app/backend
 

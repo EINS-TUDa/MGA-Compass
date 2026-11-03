@@ -31,6 +31,8 @@ dependencies = [
     # scripts/generate_dataset.py's own dataset-generation use, not this
     # package's core solve path.
     "highspy>=1.15.1",
+    # Parquet I/O for dataset bundles (mga_compass.dataset).
+    "pyarrow",
 ]
 
 [project.optional-dependencies]
