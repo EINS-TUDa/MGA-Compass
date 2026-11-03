@@ -417,7 +417,12 @@ def _build_furthest_point_solver(
 
     def solve_one(
         direction_row: np.ndarray, log_path: Path | None = None,
-    ) -> tuple[np.ndarray, np.ndarray | None, Network, str]:
+    ) -> tuple[np.ndarray, np.ndarray | None, Network, str, np.ndarray]:
+        # Returns (point, duals, n, condition, resolved): `point` is the
+        # furthest point itself (the support point the search uses);
+        # `resolved` is the pinned re-solve's own point -- same queried
+        # coordinate(s), every other one at minimum cost -- the one `obj`/
+        # `duals` describe. `resolved` is `point` when there's no re-solve.
         call_kwargs = _solver_kwargs_with_log(kwargs, log_path)
         m.objective = -sum(
             direction_row[i] * n.optimize.build_linexpr_from_weights(dimensions[key], model=m)
@@ -436,7 +441,7 @@ def _build_furthest_point_solver(
         _append_coordinates_to_log(log_path, keys, point)
 
         if not resolve_main_objective:
-            return point, None, n, condition
+            return point, None, n, condition, point
 
         pinned_keys = [key for i, key in enumerate(keys) if direction_row[i] != 0]
         pin_scales = {}
@@ -457,6 +462,7 @@ def _build_furthest_point_solver(
         _log_solve(m, status, condition, "furthest-point (pinned duals)")
         duals_by_key = {key: _read_pinned_coord_dual(m, key, pin_scales[key]) for key in pinned_keys}
         duals = np.array([duals_by_key.get(key, 0.0) for key in keys])
+        resolved = n.optimize.project_solved(dimensions).loc[keys].to_numpy(dtype=float)
 
         # Undo this call's own additions so the model is ready for the next call.
         if pinned_keys:
@@ -464,7 +470,7 @@ def _build_furthest_point_solver(
             m.remove_constraints([f"coord_{key}_ub" for key in pinned_keys])
         add_budget_constraint()
 
-        return point, duals, n, condition
+        return point, duals, n, condition, resolved
 
     return solve_one
 
@@ -472,7 +478,7 @@ def _build_furthest_point_solver(
 #: This worker's own furthest-point solver, built once by
 #: _init_furthest_point_worker and reused by _solve_furthest_point_direction
 #: for every task this worker process handles.
-_worker_furthest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray | None, Network, str]] | None = None
+_worker_furthest_point_solver: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray | None, Network, str, np.ndarray]] | None = None
 
 
 def _init_furthest_point_worker(
@@ -498,7 +504,7 @@ def _init_furthest_point_worker(
 
 def _solve_furthest_point_direction(
     item: tuple[int, np.ndarray, Path | None],
-) -> tuple[int, np.ndarray, np.ndarray | None, Network, str]:
+) -> tuple[int, np.ndarray, np.ndarray | None, Network, str, np.ndarray]:
     """One `pool.imap_unordered` task: solve a single direction against
     this worker's already-built solver (see `_init_furthest_point_worker`).
     Carries `i` (its position in this batch's own todo-list) through so
@@ -509,15 +515,23 @@ def _solve_furthest_point_direction(
     `_solver_kwargs_with_log`).
     """
     i, direction, log_path = item
-    point, duals, n, condition = _worker_furthest_point_solver(direction, log_path)
-    return i, point, duals, n, condition
+    point, duals, n, condition, resolved = _worker_furthest_point_solver(direction, log_path)
+    return i, point, duals, n, condition, resolved
+
+
+def _cached_support_point(meta: dict, keys: list) -> np.ndarray:
+    """The furthest point a cached `mga_furthest_result_*.nc` was solved
+    for -- `support_point`, or `coordinates` in files written before
+    `support_point` existed (see `_cache_furthest_point_result`)."""
+    source = meta.get("support_point", meta["coordinates"])
+    return np.array([source[k] for k in keys])
 
 
 def _cache_furthest_point_result(
     n: Network, output_dir: str | Path, key: str, keys: list,
-    point: np.ndarray, duals: np.ndarray | None, obj: float, direction: np.ndarray,
+    point: np.ndarray, duals: np.ndarray | None, obj: float, direction: np.ndarray, resolved: np.ndarray,
 ) -> None:
-    """Stash `coordinates`/`obj`/`normal` into `n.meta` and export to
+    """Stash `coordinates`/`support_point`/`obj`/`normal` into `n.meta` and export to
     `output_dir/mga_furthest_result_{key}.nc`. `normal` is the query `direction`
     itself -- already a valid separating-hyperplane normal at the point it
     maximizes, same concept `_cache_closest_point_result`'s own `normal`
@@ -526,8 +540,20 @@ def _cache_furthest_point_result(
     when not `None` -- i.e. when `resolve_main_objective` actually computed
     it; otherwise `n.meta` has no `"duals"` key at all, rather than a
     placeholder.
+
+    `coordinates` is `resolved`, the point `obj`/`duals` describe (the
+    pinned re-solve's: the queried coordinate at its extreme, every other
+    one at minimum cost); `support_point` is `point`, the furthest point
+    itself, which the search uses as its box point (inner point, box
+    halfspace anchor and normalization). They differ only with
+    `resolve_main_objective=True`: the re-solve pins within
+    `_PIN_TOLERANCE`, so its queried coordinate can sit just inside the
+    true extreme, and a box halfspace anchored there would cut off a sliver
+    of the region. Files written before `support_point` existed have only
+    `coordinates`, the furthest point itself.
     """
-    n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, point)}
+    n.meta["coordinates"] = {k: float(v) for k, v in zip(keys, resolved)}
+    n.meta["support_point"] = {k: float(v) for k, v in zip(keys, point)}
     if duals is not None:
         n.meta["duals"] = {k: float(v) for k, v in zip(keys, duals)}
     n.meta["obj"] = float(obj)
@@ -565,10 +591,13 @@ def make_furthest_point_fn(
     the query direction itself, echoed back (free -- no extra solve).
 
     `resolve_main_objective=True` (default) additionally pins each found
-    point's coordinates and re-solves the original cost objective for real
-    per-dimension duals and that point's own capex+opex cost -- cached
-    alongside the point in `n.meta["duals"]`/`n.meta["obj"]`, but NOT part
-    of the return value (kept fixed at `(points, normals)` either way, so
+    point's queried coordinate(s) (the direction's nonzero entries) and
+    re-solves the original cost objective -- the cheapest system with that
+    extreme coordinate. Its point is cached as `n.meta["coordinates"]`,
+    with its capex+opex cost in `n.meta["obj"]` and the pins' duals in
+    `n.meta["duals"]` (0 for every unpinned dimension); the furthest point
+    itself goes to `n.meta["support_point"]` (see
+    `_cache_furthest_point_result`). Neither is part of the return value (kept fixed at `(points, normals)` either way, so
     callers -- e.g. `explore.drive` -- don't need to know which was used).
     Pass `False` to skip that extra solve.
 
@@ -584,8 +613,10 @@ def make_furthest_point_fn(
 
     `on_solve(point, normal, obj, duals)` (default `None`): called once per
     direction actually reported here -- fresh solve or cache hit alike --
-    with data that's otherwise discarded from the return value (`obj`,
-    `duals`; `duals` is `None` when that direction's own
+    with data that's otherwise discarded from the return value: `point` is
+    the cached `coordinates` (the point `obj`/`duals` describe, not
+    necessarily the returned support point), plus `obj` and `duals`
+    (`duals` is `None` when that direction's own
     `resolve_main_objective` was `False`, cached or not). Lets a caller
     (e.g. one wanting objective cuts from these points -- not
     `generate_mga_files`, which deliberately excludes box-point objective
@@ -630,22 +661,23 @@ def make_furthest_point_fn(
                 if cached_fn.exists():
                     cached_meta = _read_meta(cached_fn)
                     cached = (
-                        np.array([cached_meta["coordinates"][k] for k in keys]),
+                        _cached_support_point(cached_meta, keys),
                         np.array([cached_meta["normal"][k] for k in keys]),
                     )
                     if on_solve is not None:
                         cached_duals = np.array([cached_meta["duals"][k] for k in keys]) if "duals" in cached_meta else None
-                        on_solve(cached[0], cached[1], cached_meta["obj"], cached_duals)
+                        on_solve(np.array([cached_meta["coordinates"][k] for k in keys]), cached[1],
+                                 cached_meta["obj"], cached_duals)
             if cached is not None:
                 results = [cached]
             else:
                 log_path = Path(output_dir) / f"mga_furthest_result_{key}.log" if output_dir is not None else None
-                point, duals, n_result, _condition = solve_one(d, log_path)
+                point, duals, n_result, _condition, resolved = solve_one(d, log_path)
                 obj = n_result.statistics.capex().sum() + n_result.statistics.opex().sum()
                 if output_dir is not None:
-                    _cache_furthest_point_result(n_result, output_dir, key, keys, point, duals, obj, d)
+                    _cache_furthest_point_result(n_result, output_dir, key, keys, point, duals, obj, d, resolved)
                 if on_solve is not None:
-                    on_solve(point, d, obj, duals)
+                    on_solve(resolved, d, obj, duals)
                 results = [(point, d)]
         else:
             # Passes pristine_n, not n's current state -- n may already be
@@ -663,12 +695,13 @@ def make_furthest_point_fn(
                         continue
                     cached_meta = _read_meta(cached_fn)
                     results[i] = (
-                        np.array([cached_meta["coordinates"][k] for k in keys]),
+                        _cached_support_point(cached_meta, keys),
                         np.array([cached_meta["normal"][k] for k in keys]),
                     )
                     if on_solve is not None:
                         cached_duals = np.array([cached_meta["duals"][k] for k in keys]) if "duals" in cached_meta else None
-                        on_solve(results[i][0], results[i][1], cached_meta["obj"], cached_duals)
+                        on_solve(np.array([cached_meta["coordinates"][k] for k in keys]), results[i][1],
+                                 cached_meta["obj"], cached_duals)
                 skipped = len(directions) - len(todo_idx)
                 if skipped:
                     logger.info("Skipping %s already-cached direction(s)", skipped)
@@ -700,7 +733,7 @@ def make_furthest_point_fn(
                         # direction in this batch is done (which could hide a
                         # long-running run's progress for the entire batch's
                         # duration otherwise).
-                        for pos, point, duals, n_result, _condition in pool.imap_unordered(
+                        for pos, point, duals, n_result, _condition, resolved in pool.imap_unordered(
                             _solve_furthest_point_direction, tasks,
                         ):
                             i = todo_idx[pos]
@@ -708,9 +741,10 @@ def make_furthest_point_fn(
                             if output_dir is not None:
                                 _cache_furthest_point_result(
                                     n_result, output_dir, cache_keys[i], keys, point, duals, obj, directions[i],
+                                    resolved,
                                 )
                             if on_solve is not None:
-                                on_solve(point, directions[i], obj, duals)
+                                on_solve(resolved, directions[i], obj, duals)
                             results[i] = (point, directions[i])
                     except Exception:
                         pool.terminate()

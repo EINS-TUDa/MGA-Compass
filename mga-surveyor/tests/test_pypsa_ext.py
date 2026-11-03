@@ -186,12 +186,12 @@ def test_make_furthest_point_fn_reads_cache_instead_of_resolving(tmp_path):
     cached_fn = cache_dir / f"mga_furthest_result_{key}.nc"
     assert cached_fn.exists()
 
-    # Tamper with the cached result's stashed coordinates -- a value no
-    # genuine solve of this direction could ever produce -- so getting it
-    # back on the next call proves the cache was actually read, not
-    # silently re-solved underneath.
+    # Tamper with the cached result's stashed support point (what the call
+    # returns) -- a value no genuine solve of this direction could ever
+    # produce -- so getting it back on the next call proves the cache was
+    # actually read, not silently re-solved underneath.
     cached_n = pypsa.Network(cached_fn)
-    cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.meta["support_point"] = {"wind": 999.0, "solar": 999.0}
     cached_n.export_to_netcdf(cached_fn)
 
     second, _second_normals = furthest_point(direction)
@@ -215,7 +215,7 @@ def test_make_furthest_point_fn_caches_alongside_new_directions(tmp_path):
     # unambiguously distinguishable, same trick as the test above.
     cached_fn0 = cache_dir / f"mga_furthest_result_{keys[0]}.nc"
     cached_n = pypsa.Network(cached_fn0)
-    cached_n.meta["coordinates"] = {"wind": 999.0, "solar": 999.0}
+    cached_n.meta["support_point"] = {"wind": 999.0, "solar": 999.0}
     cached_n.export_to_netcdf(cached_fn0)
 
     # direction 0 repeats (should read the tampered cache); [1.0, 0.0] is new
