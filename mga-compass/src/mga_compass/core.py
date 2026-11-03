@@ -160,7 +160,11 @@ def alpha_2_point(alpha: Alpha, points: Points) -> Point:
 
 def aggregate_by_alpha(da: xr.DataArray, alpha: Alpha) -> xr.DataArray:
     weights = xr.DataArray(alpha, dims=["index"])
-    return (da * weights).sum("index")
+    # xr.dot aligns on "index" like (da * weights).sum("index") does, but contracts
+    # without a da-sized temporary -- on a large output dataset that product was
+    # several times the dataset's own memory. Weights in da's dtype so a float32
+    # dataset isn't upcast (and copied) to float64 first.
+    return xr.dot(da, weights.astype(da.dtype), dim="index")
 
 
 def xr_to_series(da: xr.DataArray, plot: Plot) -> dict | list:

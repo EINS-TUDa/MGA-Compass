@@ -32,13 +32,23 @@ def test_bundle_round_trip_keeps_values_and_coordinate_order(tmp_path):
     assert set(manifest.files) == {"points.parquet", "duals.parquet", "capacity.parquet"}
 
 
-def test_read_dataarray_keeps_datetime_coordinates(tmp_path):
+def test_read_dataarray_keeps_datetime_coordinates_and_float32(tmp_path):
     snapshots = pd.date_range("2030-01-01", periods=3, freq="h")
-    da = xr.DataArray(np.ones((2, 3)), dims=["index", "snapshot"], coords={"index": [0, 1], "snapshot": snapshots})
-    write_dataarray(da, tmp_path / "g.parquet")
-    back = read_dataarray(tmp_path / "g.parquet", ["index", "snapshot"])
+    da = xr.DataArray(np.arange(12.0).reshape(2, 3, 2), dims=["index", "snapshot", "technology"],
+                      coords={"index": [5, 1], "snapshot": snapshots, "technology": ["solar", "coal"]})
+    write_dataarray(da, tmp_path / "g.parquet", float32=True)
+    back = read_dataarray(tmp_path / "g.parquet", ["index", "snapshot", "technology"])
     assert back["snapshot"].dtype.kind == "M"
+    assert back.dtype == np.float32
+    assert list(back["index"].values) == [5, 1]  # written order, not sorted
     np.testing.assert_array_equal(back.values, da.values)
+
+
+def test_write_dataarray_needs_string_last_dim(tmp_path):
+    da = xr.DataArray(np.ones((2, 3)), dims=["index", "snapshot"],
+                      coords={"index": [0, 1], "snapshot": pd.date_range("2030-01-01", periods=3, freq="h")})
+    with pytest.raises(ValueError, match="string coordinates"):
+        write_dataarray(da, tmp_path / "g.parquet")
 
 
 def test_verify_rejects_a_corrupted_or_missing_file(tmp_path):
