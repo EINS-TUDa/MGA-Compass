@@ -26,9 +26,14 @@ FeasibilityTol=1e-9 -- important for iteration-by-iteration agreement with
 the Gurobi backend over long runs, where looser tolerances would let small
 per-call differences accumulate.
 
-`highspy` is imported lazily, on first call to `closest_point_on_hull`,
-not at module import time -- so `import mga_surveyor` (and picking
-`backend='gurobi'` throughout) never requires highspy to be installed.
+`highspy` is imported at module import time but optionally (`highspy =
+None` if it isn't installed, raising only on first use) -- so `import
+mga_surveyor` (and picking `projection_backend='gurobi'` throughout) never
+requires highspy to be installed.
+
+As in `gurobi_projection`, the persistent per-(thread, norm) model assumes
+every call from one thread passes the same growing `points` array (new rows
+only appended), as one Method's own executor does.
 """
 import threading
 from typing import Literal
@@ -49,8 +54,8 @@ _thread_local = threading.local()
 def _require_highspy():
     if highspy is None:
         raise ImportError(
-            "backend='highs' requires the `highspy` package, which is not "
-            "installed here (pip install highspy). Use backend='gurobi' "
+            "projection_backend='highs' requires the `highspy` package, which is not "
+            "installed here (pip install highspy). Use projection_backend='gurobi' "
             "instead if you have a Gurobi license (see gurobi_projection."
             "closest_point_on_hull), or install highspy for a free, "
             "open-source alternative -- norm in ('l1', 'linf') only."
@@ -137,8 +142,11 @@ def closest_point_on_hull(point: np.ndarray, points: np.ndarray, norm: NormHighs
         model.changeRowBounds(lower_rows[j], float(point[j]), highspy.kHighsInf)
 
     status = model.run()
-    if status != highspy.HighsStatus.kOk:
-        raise RuntimeError(f"HiGHS solve failed: status {status}")
+    model_status = model.getModelStatus()
+    # run() returns kOk even when it stops at a limit or proves infeasibility,
+    # so also require an optimal model -- the same contract as the Gurobi backend.
+    if status != highspy.HighsStatus.kOk or model_status != highspy.HighsModelStatus.kOptimal:
+        raise RuntimeError(f"HiGHS solve failed: status {status}, model status {model.modelStatusToString(model_status)}")
 
     sol = model.getSolution()
     all_col_values = np.array(sol.col_value)

@@ -3,9 +3,9 @@
 - Uses SciPy's ``ConvexHull`` (Qhull) on the polar dual of the outer
   polytope's halfspaces to compute the outer polytope's vertex set
   (H-to-V enumeration) -- an alternative engine to :class:`~mga_surveyor.
-  methods.cdd.CddMethod`'s cddlib Double Description method. See that
-  module's docstring for the general ``Method`` contract this mirrors;
-  this class implements the same ``bootstrap``/``add_point``/``add_cut``/
+  methods.cdd.CddMethod`'s cddlib Double Description method. See
+  :mod:`mga_surveyor.methods.base` for the general ``Method`` contract this
+  mirrors; this class implements the same ``bootstrap``/``add_point``/``add_cut``/
   ``find_trial_point``/``max_gap`` interface, just backed by a different
   vertex-enumeration algorithm.
 
@@ -75,9 +75,10 @@
   solving ``closest_point_on_hull`` only for the ones that didn't. A
   false-positive hash collision (two geometrically distinct vertices
   rounding to the same tuple) would silently reuse the wrong cached
-  value -- :data:`_VERTEX_HASH_DECIMALS` is chosen with headroom below
-  the projection solver's own ``1e-9`` tolerances precisely to make that
-  not happen in practice; a false negative (a survived vertex hashing
+  value -- :data:`_VERTEX_HASH_DECIMALS` (a ``1e-8`` grid) is chosen
+  coarser than the ``~1e-9`` roundoff a surviving vertex's coordinates can
+  pick up between refreshes, yet far finer than the spacing of genuinely
+  distinct vertices, so that doesn't happen in practice; a false negative (a survived vertex hashing
   differently by tiny roundoff) only costs an avoidable re-solve, never
   correctness. :meth:`add_point` still uses its own, separate,
   non-hash-based reuse for the same reason it always has -- growing the
@@ -166,8 +167,10 @@ class BBMethod(Method):
         centroid-of-``initial_points`` heuristic :meth:`bootstrap` would
         otherwise use. Pick this explicitly whenever a specific point is
         *known* to be strictly interior to every halfspace for the whole
-        run (e.g. the cost-optimal point in :mod:`mga_surveyor.explore`'s
-        own usage) -- the centroid of a caller's initial points is only a
+        run. Neither :mod:`mga_surveyor.explore` nor ``pypsa_ext`` passes
+        one, and the cost-optimal point is not automatically safe (it can
+        sit on a box face, e.g. a capacity at its lower bound, giving
+        ``b = 0``) -- the centroid of a caller's initial points is only a
         heuristic and isn't guaranteed interior, and even when it is,
         staying strictly interior isn't the same as staying *well inside*:
         as cuts accumulate and the true region shrinks around a FIXED
@@ -357,8 +360,21 @@ class BBMethod(Method):
         self._gap = gaps(self._outer_vertices, self._closest_points, norm=self.norm)
         self._dirty = False
 
+    def _check_hull_built(self) -> None:
+        # An empty vertex set is only legitimate before bootstrap: once
+        # halfspaces have been added, no hull means Qhull failed on every
+        # build so far, and returning (None, 0.0) would let drive report
+        # convergence at iteration 0.
+        if self._hull is None and self.outer_halfspaces:
+            msg = (
+                f"BBMethod has {len(self.outer_halfspaces)} halfspace(s) but no dual hull -- the outer "
+                "polytope is unbounded (k or fewer halfspaces) or Qhull failed on every build so far"
+            )
+            raise RuntimeError(msg)
+
     def find_trial_point(self) -> tuple[np.ndarray | None, float]:
         self._refresh()
+        self._check_hull_built()
         if len(self._outer_vertices) == 0:
             return None, 0.0
         i = int(np.argmax(self._gap))
@@ -366,6 +382,7 @@ class BBMethod(Method):
 
     def max_gap(self) -> float:
         self._refresh()
+        self._check_hull_built()
         if len(self._outer_vertices) == 0:
             return 0.0
         return float(self._gap.max())

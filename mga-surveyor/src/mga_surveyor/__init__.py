@@ -1,5 +1,5 @@
 """mga_surveyor: reusable inner/outer polytope approximation for
-near-optimal-space exploration, with two interchangeable worst-point /
+near-optimal-space exploration, with three interchangeable worst-point /
 convergence-metric methods:
 
 - `CddMethod` ("cdd solution"): recomputes the outer polytope's vertex set
@@ -10,12 +10,17 @@ convergence-metric methods:
   the default, or `'gmp'` for exact rational arithmetic) and, separately, a
   choice of solver for its own inner-hull projection (`projection_backend`,
   `'gurobi'` or `'highs'`).
+- `BBMethod` ("beneath-and-beyond"): maintains the outer polytope's
+  vertex set incrementally through Qhull's polar dual (float arithmetic
+  only), with the same choice of `projection_backend`.
 - `BilevelMethod` ("bilevel solution"): the original KKT + Big-M MILP
   reformulation. L_infinity only.
 
-Both share the same `Method` interface (`methods/base.py`) and
+All three share the same `Method` interface (`methods/base.py`) and
 accept `norm` (`'l1'`, `'l2'`, or `'linf'`) as a constructor argument
 (`BilevelMethod` is restricted to `'linf'`; see its docstring for why).
+Only `CddMethod` also has `find_pool_trial_points`, which `drive` uses for
+batched closest-point solves when `max_parallel > 1`.
 
 None of this package depends on any specific test example or system model:
 `add_point`/`add_cut` are pure state updates on whatever point/direction
@@ -42,9 +47,10 @@ solves MGA in a direction at all, whether that's points-only (the
 default) or a one-off/dataset-generation call with duals and each point's
 own cost (`resolve_main_objective=True`; see its docstring).
 `make_closest_point_fn` supplies a `explore.ClosestPointFn` for `drive`'s
-main loop instead -- that one can't be batched the same way (each
-iteration depends on the previous one's result), and currently only
-supports `norm in ('l1', 'linf')`, not `'l2'` (would need a quadratic
+main loop instead -- one target per iteration, or a batch of them when
+`drive`'s `max_parallel > 1` and the method has `find_pool_trial_points`
+(the next batch still depends on the previous one's results) -- and
+currently only supports `norm in ('l1', 'linf')`, not `'l2'` (would need a quadratic
 objective, Gurobi-only).
 
 `normalize` wraps any three `drive` oracle functions so the polytope
@@ -69,9 +75,10 @@ against, and unlike a box-direction point there's no structural reason
 for its gradient to align with any axis), composing with `normalize=True`
 if that's also on. Deliberately NOT derived from any box-direction point,
 even though those also have `duals` sitting unused -- a box-direction
-point's own objective cut, in particular, turns out to be *exactly*
-parallel to its own box halfspace as a direct consequence of the LP's
-structure there, not a coincidence, and nearly-coincident hyperplanes are
+point's own objective cut, in particular, comes out *exactly* parallel
+to its own box halfspace -- not a coincidence: its pinned re-solve pins
+only the queried dimension, so its duals are zero in every other one --
+and nearly-coincident hyperplanes are
 a real degeneracy risk regardless of which method processes them
 (confirmed in practice against the incremental edge-walking construction
 this project used before `CddMethod` became the production method:
@@ -89,10 +96,10 @@ dropped; cddlib's own Double Description construction already discards
 any genuinely duplicate/redundant cut for free, regardless. One remaining
 check before any cut from the main loop
 (or a restart's existing files) is added: skipped if the point it came
-from was already feasible (same test `explore.drive` uses for its own
-geometric cut).
+from was already feasible, i.e. within `sep_tol` of its target (the same
+`common.separates` test `explore.drive` uses for its own geometric cut).
 """
-from .common import VALID_NORMS, gaps, linearized_objective_cut
+from .common import SEP_TOL_FACTOR, VALID_NORMS, gaps, linearized_objective_cut, separates
 from .gurobi_projection import closest_point_on_hull
 # Both backend modules name their projection function `closest_point_on_hull`
 # (module-qualified, e.g. `gurobi_projection.closest_point_on_hull` vs
@@ -102,8 +109,8 @@ from .gurobi_projection import closest_point_on_hull
 # so the highs one needs an alias here to avoid shadowing the gurobi one.
 from .highs_projection import closest_point_on_hull as closest_point_on_hull_highs, VALID_NORMS_HIGHS
 from .methods import (
-    Method, BilevelMethod, solve_farthest_outer_point_milp,
-    CddMethod, cdd_vertices_of,
+    Method, BilevelMethod, solve_farthest_outer_point_milp, compute_safe_big_m,
+    CddMethod, cdd_vertices_of, BBMethod,
 )
 from .explore import drive
 from .normalize import AffineMap, compute_affine_map, normalize_from_box_points, normalize_oracle_fns
@@ -119,10 +126,10 @@ from .pypsa_ext import (
 
 __all__ = [
     "VALID_NORMS", "closest_point_on_hull", "gaps",
-    "linearized_objective_cut",
+    "linearized_objective_cut", "separates", "SEP_TOL_FACTOR",
     "closest_point_on_hull_highs", "VALID_NORMS_HIGHS",
-    "Method", "BilevelMethod", "solve_farthest_outer_point_milp",
-    "CddMethod", "cdd_vertices_of", "drive",
+    "Method", "BilevelMethod", "solve_farthest_outer_point_milp", "compute_safe_big_m",
+    "CddMethod", "cdd_vertices_of", "BBMethod", "drive",
     "AffineMap", "compute_affine_map", "normalize_oracle_fns", "normalize_from_box_points",
     "make_optimality_fn", "make_furthest_point_fn", "make_closest_point_fn", "make_oracle_fns",
     "generate_mga_files", "consolidate_mga_results", "encode_cache_key",

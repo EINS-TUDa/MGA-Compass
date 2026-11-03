@@ -116,9 +116,8 @@ def presolve_box_points(furthest_point: FurthestPointFn, k: int) -> tuple[Furthe
     `FurthestPointFn` that just returns this same already-computed result
     instead of re-solving -- for any caller that needs the box points (or
     needs whatever side effects that one solve has, e.g. an `on_solve`
-    callback baked into `furthest_point` itself -- see
-    `mga_surveyor.pypsa_ext.make_closest_point_fn`'s `use_objective_cuts`
-    caller) before `explore.drive`'s own bootstrap gets to them, without
+    callback baked into `furthest_point` itself, as
+    `mga_surveyor.pypsa_ext.make_furthest_point_fn` supports) before `explore.drive`'s own bootstrap gets to them, without
     `explore.drive` ending up re-solving (and re-triggering those side
     effects) a second time for nothing.
     """

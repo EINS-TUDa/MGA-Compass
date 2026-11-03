@@ -41,8 +41,8 @@ make_oracle_fns builds all three of the above in one call, sharing
 n/dimensions/output_dir -- a convenience for feeding explore.drive's three
 callback parameters directly.
 
-generate_mga_files runs a CddMethod per slack level (via
-explore.drive) against a real network, writing every result to .nc files
+generate_mga_files runs a CddMethod (float) or BBMethod (vertex_method) per
+slack level (via explore.drive) against a real network, writing every result to .nc files
 under output_dir -- resuming from whatever's already there (cached
 optimal/furthest-point solves are read back, and existing closest-point
 results are folded into each slack level's own explore.drive call as its
@@ -70,7 +70,7 @@ from linopy import LinearExpression, QuadraticExpression
 from pypsa._options import options
 from pypsa.optimization.mga import _worker_init
 
-from .common import Halfspace, Norm, gaps, linearized_objective_cut
+from .common import SEP_TOL_FACTOR, Halfspace, Norm, linearized_objective_cut, separates
 from .explore import ClosestPointFn, drive
 from .methods import BBMethod, CddMethod
 from .normalize import AffineMap, normalize_oracle_fns
@@ -587,8 +587,9 @@ def make_furthest_point_fn(
     with data that's otherwise discarded from the return value (`obj`,
     `duals`; `duals` is `None` when that direction's own
     `resolve_main_objective` was `False`, cached or not). Lets a caller
-    (e.g. `generate_mga_files`'s `use_objective_cuts`) tap into the same
-    solve without changing `furthest_points`' own `(points, normals)`
+    (e.g. one wanting objective cuts from these points -- not
+    `generate_mga_files`, which deliberately excludes box-point objective
+    cuts) tap into the same solve without changing `furthest_points`' own `(points, normals)`
     contract. Always called back in this process, never inside a worker --
     the batch path's Pool results are collected here first.
 
@@ -614,7 +615,7 @@ def make_furthest_point_fn(
         A length-1 batch is solved directly against the persistent
         in-process model built above (or read from `output_dir`'s cache);
         a longer batch has its already-cached rows read from disk and every
-        other row dispatched as its own `pool.starmap` task, spread across
+        other row dispatched as its own `pool.imap_unordered` task, spread across
         `min(max_parallel, n_todo)` worker processes each building its own
         solver once.
         """
@@ -997,8 +998,8 @@ def _cache_closest_point_result(
     `target` (the point this solve was actually asked to get closest to,
     i.e. `explore.drive`'s own trial point) is stashed alongside `point`
     so `_read_existing_closest_points` can, on a later restart, replicate
-    `explore.drive`'s own `cut_added = norm(new_point - trial_point) >
-    tol` check before trusting this solve's `normal` as a halfspace --
+    `explore.drive`'s own `cut_added = separates(new_point, trial_point,
+    sep_tol, norm)` check before trusting this solve's `normal` as a halfspace --
     without it, a solve whose closest point came back (near-)equal to its
     own target (nothing separated -- typically a highly degenerate LP,
     every dimension tied near a zero residual at once) would otherwise be
@@ -1288,7 +1289,7 @@ def _broadcast_per_slack(value: Any, n_levels: int, name: str) -> list:
 
 
 def _read_existing_closest_points(
-    slack_dir: Path, keys: list, tol: float, norm: Norm, affine_map: AffineMap | None = None,
+    slack_dir: Path, keys: list, sep_tol: float, norm: Norm, affine_map: AffineMap | None = None,
     obj_optimal: float | None = None, slack: float | None = None,
 ) -> tuple[list[np.ndarray], list[Halfspace]]:
     """Read every already-exported `mga_closest_result_*.nc` file under
@@ -1298,13 +1299,12 @@ def _read_existing_closest_points(
     rediscover them via `closest_point`. Empty (not an error) if
     `slack_dir` doesn't exist yet.
 
-    `tol`/`norm`/`affine_map`: replicates `explore.drive`'s own
-    `cut_added = gaps(...) > tol` check (measured under `norm` -- the
+    `sep_tol`/`norm`/`affine_map`: replicates `explore.drive`'s own
+    `cut_added = separates(...)` check (measured under `norm` -- the
     same metric `Method`'s own convergence gap is measured under, not a
-    hardcoded L2 distance, which would otherwise compare a
-    different-norm quantity against `tol` than the one the convergence
-    check itself uses; in whichever space `tol` is itself expressed --
-    normalized cube if `affine_map` is given, real units if not) before
+    hardcoded L2 distance; in whichever space `sep_tol` is itself
+    expressed -- normalized cube if `affine_map` is given, real units if
+    not) before
     trusting a file's `normal` as a halfspace at all. A solve whose
     closest point came back (near-)equal to its own
     `target` (cached alongside `point`/`normal` -- see
@@ -1367,7 +1367,7 @@ def _read_existing_closest_points(
             target = np.array([meta["target"][k] for k in keys])
             check_point = affine_map.to_normalized(point) if affine_map is not None else point
             check_target = affine_map.to_normalized(target) if affine_map is not None else target
-            separating = float(gaps(check_point[None, :], check_target[None, :], norm=norm)[0]) > tol
+            separating = separates(check_point, check_target, sep_tol, norm)
         if not separating:
             continue
 
@@ -1390,13 +1390,14 @@ def generate_mga_files(
     max_iter: int | None | Sequence[int | None],
     tol: float | Sequence[float],
     max_parallel: int,
+    sep_tol: float | Sequence[float] | None = None,
     verbose: bool = True,
     normalize: bool = True,
     use_objective_cuts: bool = True,
     vertex_method: str = "cdd",
     **kwargs: Any,
 ) -> None:
-    """Run a `CddMethod` (exact `'gmp'` arithmetic) per slack level (`explore.drive`, up to
+    """Run a `CddMethod` (float arithmetic) or `BBMethod` (see `vertex_method`) per slack level (`explore.drive`, up to
     `max_iter` iterations each) against a real, already-solved PyPSA
     network `n`, writing every result to `.nc` files under `output_dir`.
     Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
@@ -1410,7 +1411,9 @@ def generate_mga_files(
     call as its own `max_parallel` -- when greater than `1`, every
     iteration there solves up to that many of the worst candidate
     closest-points at once instead of just the single worst one, spread
-    across the very same worker pool -- see `explore.drive`'s own
+    across the very same worker pool (`CddMethod` only: `BBMethod` has no
+    `find_pool_trial_points`, so `drive` solves one target per iteration
+    with it) -- see `explore.drive`'s own
     docstring for the full picture, including why no extra reconciliation is needed
     across a round's own results.
 
@@ -1419,7 +1422,7 @@ def generate_mga_files(
     length doesn't match).
 
     `normalize` (default `True`): if `True`, each slack level's
-    `CddMethod` explores a `[-1, 1]^k`-normalized cube instead of
+    Method explores a `[-1, 1]^k`-normalized cube instead of
     raw dimension units, via `mga_surveyor.normalize.normalize_oracle_fns`
     -- see that module for why (mixing e.g. MW and MWh dimensions in one
     unweighted polytope means the ones with the larger natural range
@@ -1431,7 +1434,7 @@ def generate_mga_files(
     `normalize.compute_affine_map`. Everything on disk (`.nc` files,
     `consolidate_mga_results`'s output) is completely unaffected -- still
     real units throughout, since the oracle functions themselves are
-    unchanged; only what `explore.drive`/`CddMethod` sees is
+    unchanged; only what `explore.drive`/the Method sees is
     normalized. Pass `False` to explore raw units instead.
 
     **`tol` is interpreted differently depending on `normalize`, on
@@ -1454,6 +1457,14 @@ def generate_mga_files(
 
     Same per-slack-level broadcasting as `max_iter`.
 
+    `sep_tol` (default `None` -> `tol * common.SEP_TOL_FACTOR`): the
+    separation threshold, separate from the convergence `tol` and in the
+    same units (a percentage under `normalize=True`), same per-slack-level
+    broadcasting. A closest-point solve whose point is more than `sep_tol`
+    from its target is separating, and its geometric and objective cuts are
+    added (live and on a restart's read-back); at or below it, only the
+    point is kept (`common.separates`).
+
     `use_objective_cuts` (default `True`; measured ~5x fewer iterations to
     converge at `tol=2%` on `model_energy`, and the degenerate-dual/
     scale-inconsistency bugs that once made this risky are now fixed --
@@ -1462,8 +1473,8 @@ def generate_mga_files(
     main loop finds (`resolve_main_objective=True`, the default) -- both
     live (`method.add_cut`, same as its geometric cut) and for any
     existing `mga_closest_result_*.nc` file read back on a restart
-    (folded into the same `extra_halfspaces` bootstrap call as everything
-    else there, since `Method.bootstrap` isn't called yet at that point).
+    (passed as `extra_halfspaces` with everything else read back there,
+    replayed after bootstrap -- see "Resumable" below).
     Reuses `duals`/`obj` that are already computed for caching and
     otherwise never used again. These are provably valid cuts (see that
     function's docstring: convexity of the achievable-cost-at-x value
@@ -1482,11 +1493,10 @@ def generate_mga_files(
     Deliberately NOT derived from any box-direction point, even though
     those are also solved with `resolve_main_objective=True` and have
     `duals` sitting right there unused -- a box-direction point's own
-    objective cut is, in practice, *always* exactly parallel to its own
-    box halfspace, a direct consequence of the LP's structure at that
-    point (maximizing dimension `i` under the slack budget usually makes
-    the budget itself what limits `i`, and the achievable-cost gradient
-    there works out to be proportional to `e_i`), and nearly-coincident
+    objective cut is *always* exactly parallel to its own box halfspace:
+    its pinned re-solve (`make_furthest_point_fn`) pins only the queried
+    dimension `i`, so its duals are zero in every other dimension and the
+    cut's direction is proportional to `e_i` -- and nearly-coincident
     hyperplanes are a real degeneracy risk regardless of which method
     processes them. Confirmed in practice against the incremental
     edge-walking construction this project used before `CddMethod` became
@@ -1530,23 +1540,38 @@ def generate_mga_files(
     it always solves fresh (see `make_closest_point_fn`) -- but every
     `mga_closest_result_*.nc` already under a slack level's own directory
     (from an earlier, interrupted run) is read back and passed as that
-    slack level's own `drive()` call's `extra_points`/`extra_halfspaces`,
-    folded into its one `Method.bootstrap` call, so those points/cuts
-    don't need to be rediscovered. Assumes those earlier results are
+    slack level's own `drive()` call's `extra_points`/`extra_halfspaces`
+    -- replayed one at a time after bootstrap (`drive`'s
+    `incremental_bootstrap=True`), so those points/cuts don't need to be
+    rediscovered. Assumes those earlier results are
     genuine near-optimal points for `n`/`dimensions`/this slack level --
     a wildly incompatible stray file (e.g. from a different network or
-    corrupted by hand) could otherwise seed `CddMethod.bootstrap` with
+    corrupted by hand) could otherwise seed the Method with
     points/halfspaces that don't describe a coherent region.
 
-    `solver_name` also becomes each slack level's `CddMethod`
-    backend. `**kwargs` (e.g. `solver_options`) is forwarded to every
-    oracle factory.
+    `vertex_method` (default `"cdd"`): `"cdd"` runs `CddMethod` with its
+    float backend, `"bb"` runs `BBMethod` (Qhull's polar dual). Both reach
+    the same gap; see their docstrings for the trade-offs.
 
-    :raises ValueError: If `tol` or `max_iter` is a sequence whose length
-        doesn't match `slack_levels`; or if `normalize=True` and any
+    `solver_name` also becomes each slack level's Method's
+    `projection_backend` (the inner-hull projection solver), so it must
+    be `'gurobi'` or `'highs'`. `**kwargs` (e.g. `solver_options`) is
+    forwarded to every oracle factory.
+
+    :raises ValueError: If `norm` is not `'l1'`/`'linf'` (the closest-point
+        solver supports only those), `vertex_method` is not `'cdd'`/`'bb'`,
+        or any `sep_tol` is not in `[0, tol)`; if `tol`, `max_iter` or
+        `sep_tol` is a sequence whose length doesn't match `slack_levels`; or if `normalize=True` and any
         dimension has no achievable range under some slack level's own
         budget (see `normalize.compute_affine_map`).
     """
+    # Fail before any solve, not after the optimum and the box directions.
+    if norm not in ("l1", "linf"):
+        msg = f"norm must be 'l1' or 'linf' (the closest-point solver supports only those), got {norm!r}"
+        raise ValueError(msg)
+    if vertex_method not in ("cdd", "bb"):
+        msg = f"vertex_method must be 'cdd' or 'bb', got {vertex_method!r}"
+        raise ValueError(msg)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     keys = list(dimensions.keys())
@@ -1557,6 +1582,16 @@ def generate_mga_files(
         # the actual [-1, 1]^k cube stopping distance here, once, so
         # nothing downstream needs to know the difference.
         tols = [t / 100 * 2 for t in tols]
+    # None (as a whole or per slack level) -> tol * SEP_TOL_FACTOR; anything
+    # else gets the same percentage -> cube conversion as tol.
+    sep_tols = [
+        t * SEP_TOL_FACTOR if st is None else (st / 100 * 2 if normalize else st)
+        for t, st in zip(tols, _broadcast_per_slack(sep_tol, len(slack_levels), "sep_tol"))
+    ]
+    for t, st in zip(tols, sep_tols):
+        if not 0 <= st < t:
+            msg = f"sep_tol must satisfy 0 <= sep_tol < tol (in tol's units), got sep_tol={st}, tol={t} (cube units if normalize)"
+            raise ValueError(msg)
     max_iters = _broadcast_per_slack(max_iter, len(slack_levels), "max_iter")
     # Log every gap/tol the same way tol was originally passed in (a
     # percentage under normalize=True, since that's what a cube-space
@@ -1588,7 +1623,7 @@ def generate_mga_files(
         optimal_meta = _read_meta(output_dir / "optimal.nc")
         obj_optimal = optimal_meta["obj"]
 
-    for slack, slack_tol, slack_max_iter in zip(slack_levels, tols, max_iters):
+    for slack, slack_tol, slack_sep_tol, slack_max_iter in zip(slack_levels, tols, sep_tols, max_iters):
         slack_dir = output_dir / f"slack_{slack}"
         method = None  # assigned below -- add_objective_cut_from_closest_point's closure reads it late
 
@@ -1616,12 +1651,12 @@ def generate_mga_files(
             # the objective cut too, not just the geometric one. Measured
             # under norm (not a hardcoded L2 distance -- see explore.py's
             # own cut_added for why that matters), in whichever space
-            # slack_tol is itself in (normalized, if that's the mode),
+            # slack_sep_tol is itself in (normalized, if that's the mode),
             # since point/target here are always real units regardless of
             # normalize.
             check_point = affine_map.to_normalized(point) if affine_map is not None else point
             check_target = affine_map.to_normalized(target) if affine_map is not None else target
-            if float(gaps(check_point[None, :], check_target[None, :], norm=norm)[0]) <= slack_tol:
+            if not separates(check_point, check_target, slack_sep_tol, norm):
                 return
             cut = linearized_objective_cut(point, obj, duals, obj_optimal, slack)
             if cut is None:
@@ -1659,11 +1694,11 @@ def generate_mga_files(
             closest_point = build_closest_point(None)
 
         # Points/cuts already known from an earlier, interrupted run --
-        # folded into drive()'s own bootstrap call below (Method.bootstrap
-        # must be called exactly once, before any add_point/add_cut/
-        # find_trial_point), so the main loop doesn't rediscover them.
-        # Always real units on disk; normalized here too when this slack
-        # level is. tol/affine_map let it replicate explore.drive's own
+        # passed to drive() below, which replays them one at a time right
+        # after bootstrap (incremental_bootstrap=True), so the main loop
+        # doesn't rediscover them. Always real units on disk; normalized
+        # here too when this slack level is. sep_tol/affine_map let it
+        # replicate explore.drive's own
         # cut_added check before trusting a file's geometric normal at
         # all (see its own docstring for the real-network bug this
         # closes). use_objective_cuts also derives each (separating)
@@ -1671,7 +1706,7 @@ def generate_mga_files(
         # duals (no box-derived cuts at all -- see generate_mga_files's
         # own docstring for why those are excluded).
         extra_points, extra_halfspaces = _read_existing_closest_points(
-            slack_dir, keys, tol=slack_tol, norm=norm, affine_map=affine_map,
+            slack_dir, keys, sep_tol=slack_sep_tol, norm=norm, affine_map=affine_map,
             obj_optimal=obj_optimal, slack=slack if use_objective_cuts else None,
         )
 
@@ -1700,19 +1735,21 @@ def generate_mga_files(
         if verbose and extra_points:
             logger.info("slack=%s: seeding with %d existing closest-point result(s)", slack, len(extra_points))
 
-        # vertex_method="bb" swaps cddlib for Qhull's polar-dual vertex enumeration (BBMethod); same interface.
+        # vertex_method="bb" swaps cddlib for Qhull's polar-dual vertex enumeration (BBMethod); same
+        # Method interface, but no find_pool_trial_points (see max_parallel in the docstring).
         if vertex_method == "bb":
             method = BBMethod(k=k, norm=norm, projection_backend=solver_name)
         else:
             method = CddMethod(k=k, norm=norm, backend="float", projection_backend=solver_name)
         if verbose:
             logger.info(
-                "slack=%s: running %s (tol=%.4f%s, max_iter=%s)",
-                slack, type(method).__name__, slack_tol * gap_scale, gap_unit, slack_max_iter,
+                "slack=%s: running %s (tol=%.4f%s, sep_tol=%.6g%s, max_iter=%s)",
+                slack, type(method).__name__, slack_tol * gap_scale, gap_unit, slack_sep_tol * gap_scale, gap_unit,
+                slack_max_iter,
             )
         drive(
             method, furthest_point, closest_point, optimal_fn,
-            tol=slack_tol, max_iter=slack_max_iter, verbose=verbose,
+            tol=slack_tol, sep_tol=slack_sep_tol, max_iter=slack_max_iter, verbose=verbose,
             extra_points=extra_points, extra_halfspaces=extra_halfspaces,
             gap_scale=gap_scale, gap_unit=gap_unit,
             max_parallel=max_parallel, incremental_bootstrap=True,

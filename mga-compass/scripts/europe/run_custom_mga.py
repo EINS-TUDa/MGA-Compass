@@ -173,13 +173,19 @@ def main() -> None:
     parser.add_argument("network", type=Path, help="Path to a solved pypsa-eur network .nc file")
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write MGA results to")
     parser.add_argument("--slack-levels", type=str, default="0.05", help="Comma-separated slack levels, e.g. 0.02,0.05,0.08")
-    parser.add_argument("--norm", choices=["l1", "l2", "linf"], default="linf")
+    parser.add_argument("--norm", choices=["l1", "linf"], default="linf")  # the closest-point solver has no l2
     parser.add_argument(
         "--tol", type=float, required=True,
         help="Convergence tolerance -- a percentage (e.g. 2.0 -> 2%%) since --normalize is on by "
              "default, or a real-unit distance if --no-normalize is passed -- see "
              "mga_surveyor.generate_mga_files's own docstring. No default -- must be chosen "
              "explicitly for every run.",
+    )
+    parser.add_argument(
+        "--sep-tol", type=float, default=None,
+        help="Separation threshold, same units as --tol: a closest point more than this from its "
+             "target adds its cuts, otherwise only the point is kept. Must be in [0, --tol). "
+             "Default: --tol * 1e-3.",
     )
     parser.add_argument(
         "--no-normalize", action="store_false", dest="normalize", default=True,
@@ -212,7 +218,7 @@ def main() -> None:
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(args.output_dir / "run2.log")
+    file_handler = logging.FileHandler(args.output_dir / "run.log")
     file_handler.setFormatter(logging.Formatter("%(message)s"))
     file_handler.addFilter(_ExcludeLoggerFilter("gurobipy"))
     logging.getLogger().addHandler(file_handler)
@@ -231,7 +237,7 @@ def main() -> None:
 
     generate_mga_files(
         n, dimensions, args.output_dir, norm=args.norm, slack_levels=slack_levels,
-        solver_name=solver_name, tol=args.tol, normalize=args.normalize, max_iter=args.max_iter,
+        solver_name=solver_name, tol=args.tol, sep_tol=args.sep_tol, normalize=args.normalize, max_iter=args.max_iter,
         max_parallel=args.max_parallel, solver_options=solver_options, vertex_method=args.method,
     )
     points_df, duals_df, _nc_files = consolidate_mga_results(args.output_dir, args.obj_label)

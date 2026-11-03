@@ -54,6 +54,26 @@ def gaps(outer_vertices: np.ndarray, closest_points: np.ndarray, norm: Norm) -> 
     return np.linalg.norm(diff, axis=1)
 
 
+#: Default `sep_tol` as a fraction of the convergence `tol` (see `separates`),
+#: used whenever a caller passes `sep_tol=None`.
+SEP_TOL_FACTOR = 1e-3
+
+
+def separates(point: np.ndarray, target: np.ndarray, sep_tol: float, norm: Norm) -> bool:
+    """Whether a closest-point solve for `target` returned a `point`
+    genuinely away from it (distance under `norm` above `sep_tol`) -- i.e.
+    `target` was infeasible and the solve's halfspaces (geometric and
+    objective cut) should be added. At or below `sep_tol` the target was
+    already (numerically) feasible, i.e. within `sep_tol` of the region,
+    and the reported normal can be a degenerate dual split, so nothing is
+    added. `sep_tol` is deliberately
+    separate from (and far below) the convergence `tol`: a target within
+    `tol` of the feasible set but outside it still yields valid,
+    tightening cuts."""
+    dist = float(gaps(np.asarray(point)[None, :], np.asarray(target)[None, :], norm=norm)[0])
+    return dist > sep_tol
+
+
 def linearized_objective_cut(
     x0: np.ndarray, obj_value: float, duals: np.ndarray, obj_optimal: float, slack: float, atol: float = 1e-9,
 ) -> Halfspace | None:

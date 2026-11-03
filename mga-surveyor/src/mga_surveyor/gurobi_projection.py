@@ -6,10 +6,12 @@ one for all three norms, including L2 (a quadratic objective, which HiGHS
 cannot solve); use `highs_projection.closest_point_on_hull` for an
 open-source, license-free alternative when your norm is 'l1' or 'linf'.
 
-`gurobipy` is imported lazily, on first call to `closest_point_on_hull`,
-not at module import time -- so `import mga_surveyor` (and picking
-`backend='highs'` throughout) never requires gurobipy to be installed, nor
-pays for opening a licensed Gurobi environment it's never going to use.
+`gurobipy` is imported at module import time but optionally (`gp = None`
+if it isn't installed, raising only on first use), and the licensed Gurobi
+environment is opened lazily, on the first call to `closest_point_on_hull`
+-- so `import mga_surveyor` (and picking `projection_backend='highs'`
+throughout) never requires gurobipy, nor pays for a Gurobi environment it's
+never going to use.
 """
 import threading
 
@@ -32,9 +34,9 @@ _gurobi_env_lock = threading.Lock()
 def _require_gurobipy():
     if gp is None:
         raise ImportError(
-            "backend='gurobi' requires the `gurobipy` package and a valid "
+            "projection_backend='gurobi' requires the `gurobipy` package and a valid "
             "Gurobi license, neither of which is available here (pip install "
-            "gurobipy). Use backend='highs' instead for a free, open-source "
+            "gurobipy). Use projection_backend='highs' instead for a free, open-source "
             "alternative -- supports norm in ('l1', 'linf') only, see "
             "highs_projection.closest_point_on_hull."
         )
@@ -62,6 +64,10 @@ def closest_point_on_hull(point: np.ndarray, points: np.ndarray, norm: Norm) -> 
     and only ever updated: the query point enters only via the RHS of k
     residual constraints (O(k) per query), and new inner points are folded
     in with O(k) work each via `gp.Column` rather than a full rebuild.
+    That reuse assumes every call from one thread passes the same growing
+    `points` array (new rows only appended), as one Method's own executor
+    does; a different point set in the same thread would silently reuse
+    the old columns.
     `Threads=1` since many of these are typically solved concurrently from
     a thread pool -- letting each individual model also spawn worker
     threads would oversubscribe the machine.
@@ -71,7 +77,8 @@ def closest_point_on_hull(point: np.ndarray, points: np.ndarray, norm: Norm) -> 
       - `normal`: a valid separating-hyperplane normal at `c`, i.e. every
         point `x` in the hull satisfies `normal @ (x - c) <= 0`, taken from
         the (sign-corrected) dual values of the residual constraints. For
-        L2 this coincides with the residual `point - c` (L2 is self-dual);
+        L2 this is `2 * (point - c)` -- the residual's direction, scaled by
+        the squared objective's gradient (L2 is self-dual);
         for L1/Linf the residual is *not* generally a valid normal, so the
         dual is required in general -- using the dual uniformly is what
         makes this function correct for all three norms with one code path.

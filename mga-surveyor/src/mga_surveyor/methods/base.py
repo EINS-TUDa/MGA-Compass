@@ -1,5 +1,5 @@
-"""The :class:`Method` interface shared by both worst-point implementations
-(bilevel MILP, cdd), so a driving loop (see
+"""The :class:`Method` interface shared by all three worst-point
+implementations (bilevel MILP, cdd, beneath-and-beyond), so a driving loop (see
 :mod:`mga_surveyor.explore`) can be written once against this interface and
 parameterized by which method to use.
 

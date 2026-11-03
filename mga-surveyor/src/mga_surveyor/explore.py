@@ -13,7 +13,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .common import Halfspace, gaps
+from .common import SEP_TOL_FACTOR, Halfspace, separates
 from .methods.base import Method
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,10 @@ class FurthestPointFn(Protocol):
 
 class ClosestPointFn(Protocol):
     """The closest point in the true region to `target` under the method's
-    norm, together with a valid separating-hyperplane normal there."""
+    norm, together with a valid separating-hyperplane normal there. Given a
+    `(k,)` target it returns `(k,)` arrays; `drive`'s pool path (see
+    `max_parallel`) also calls it with an `(n, k)` batch of targets and
+    expects `(n, k)` arrays back."""
     def __call__(self, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
 
 
@@ -52,6 +55,7 @@ def drive(
     max_iter: int | None, tol: float, max_parallel: int, verbose: bool = True,
     extra_points: list[np.ndarray] | None = None, extra_halfspaces: list[Halfspace] | None = None,
     gap_scale: float = 1.0, gap_unit: str = "", incremental_bootstrap: bool = False,
+    sep_tol: float | None = None,
 ) -> list[dict]:
     """Bootstrap `method` from the 2k axis directions +-e_i, `optimal_fn`'s
     point, and `extra_points`/`extra_halfspaces` if given -- all together
@@ -66,7 +70,8 @@ def drive(
     - `furthest_point(directions) -> (points, normals)`: called once, with
       all `2k` box directions, for bootstrapping only.
     - `closest_point(target) -> (point, normal)`: called each iteration
-      with the worst-point search's trial point.
+      with the worst-point search's trial point (or, on the pool path, an
+      `(n, k)` batch of them -- see `max_parallel`).
     - `optimal_fn() -> point`: called once, before bootstrapping.
     - `extra_points`/`extra_halfspaces`: points/cuts already known from
       elsewhere (e.g. an earlier, interrupted run), folded into the same
@@ -105,6 +110,11 @@ def drive(
     values. Lets a caller display the gap however it originally expressed
     `tol` (e.g. as a percentage) instead of `drive`'s own internal units.
 
+    `sep_tol` (default `None` -> `tol * common.SEP_TOL_FACTOR`, same units
+    as `tol`): a closest point more than `sep_tol` from its trial point
+    counts as separating and its cut is added (`common.separates`); at or
+    below it the trial point was already feasible and no cut is added.
+
     Returns a history list of dicts, one per POINT processed (see
     `max_parallel` below for when that can be more than one per loop
     iteration), with keys "iter", "gap", "trial_point", "new_point",
@@ -123,8 +133,9 @@ def drive(
     `max_parallel`: no default -- every caller must decide, same reasoning
     as `max_iter`/`tol` above. When `max_parallel > 1` AND `method`
     actually supports it (checked via `hasattr` -- currently only
-    `CddMethod.find_pool_trial_points`; anything else, `BilevelMethod`
-    included, silently keeps the original single-target path), each
+    `CddMethod.find_pool_trial_points`; anything else, `BBMethod` and
+    `BilevelMethod` included, falls back to the original single-target
+    path, logged when `verbose`), each
     iteration finds up to `max_parallel` of the worst, still-unconverged
     candidate trial points at once instead of just the single worst one,
     and solves all of them in one batched `closest_point` call --
@@ -147,6 +158,15 @@ def drive(
     point had the earlier ones already been folded in first -- an
     exploration-strategy tradeoff, not a correctness one.
     """
+    if sep_tol is None:
+        sep_tol = tol * SEP_TOL_FACTOR
+    if not 0 <= sep_tol < tol:
+        # sep_tol >= tol: a trial point whose closest point lies between tol
+        # and sep_tol away would get no cut while its gap stays >= tol, so
+        # drive would pick the same vertex again until max_iter. A negative
+        # one would accept the degenerate normals of already-feasible targets.
+        msg = f"sep_tol must satisfy 0 <= sep_tol < tol, got sep_tol={sep_tol}, tol={tol}"
+        raise ValueError(msg)
     if verbose:
         logger.info("[drive] furthest-point queries: bootstrapping %d box direction(s)", 2 * method.k)
     box_points, box_normals = furthest_point(box_directions(method.k))
@@ -210,7 +230,7 @@ def drive(
             for i in range(len(trial_points)):
                 trial_point, new_point, normal = trial_points[i], new_points[i], normals[i]
                 method.add_point(new_point)
-                cut_added = float(gaps(new_point[None, :], trial_point[None, :], norm=method.norm)[0]) > tol
+                cut_added = separates(new_point, trial_point, sep_tol, method.norm)
                 if cut_added:
                     method.add_cut(normal, new_point)
                 history.append({
@@ -241,14 +261,14 @@ def drive(
 
         method.add_point(new_point)
         # Cut only needed if the closest point differs from the trial
-        # point, i.e. the trial point itself was infeasible. Measured
-        # under method.norm -- the same metric find_trial_point's own gap
-        # (and hence this same tol, in the convergence check above) is
-        # measured under -- not a hardcoded L2 distance, which would
-        # otherwise compare a different-norm quantity against tol than
-        # the one the convergence check itself uses (up to sqrt(k)x off
-        # for L2 vs Linf in k dimensions).
-        cut_added = float(gaps(new_point[None, :], np.asarray(trial_point)[None, :], norm=method.norm)[0]) > tol
+        # point, i.e. the trial point itself was infeasible: more than
+        # sep_tol away (common.separates), not the convergence tol --
+        # a trial point within tol of the region but outside it still
+        # yields valid, tightening cuts. Measured under method.norm, the
+        # same metric find_trial_point's own gap is measured under, not a
+        # hardcoded L2 distance (up to sqrt(k)x off for L2 vs Linf in k
+        # dimensions).
+        cut_added = separates(new_point, trial_point, sep_tol, method.norm)
         if cut_added:
             method.add_cut(normal, new_point)
 

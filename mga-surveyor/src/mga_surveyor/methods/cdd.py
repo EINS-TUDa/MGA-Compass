@@ -30,7 +30,7 @@
   aren't met for this polytope -- see its docstring), :meth:`_vertices_with_ids`
   transparently falls back to a full rebuild from ``self.outer_halfspaces``
   -- still correct either way, just not incremental for that one step. So
-  this class keeps the strongest correctness guarantee of the two
+  this class keeps the strongest correctness guarantee of the three
   methods (cdd is a mature, independent implementation) regardless of
   which ``cdd`` build is installed; only the cost profile changes.
 - The per-vertex closest-inner-point solve is cached across refreshes by
@@ -169,8 +169,10 @@ def _extract_vertices_with_ids(cdd_mod: ModuleType, poly) -> tuple[np.ndarray, l
     persistent generator id -- via ``copy_generators_with_ids`` -- when the
     installed cdd module has that function and it accepts ``poly`` (it
     shares ``polyhedron_append_halfspaces``'s own restrictions: H-repr,
-    full column rank; raises :exc:`ValueError` otherwise, e.g. for a
-    not-yet-fully-bounded polytope). Returns ``ids=None`` whenever id
+    full column rank; otherwise it raises -- documented as
+    :exc:`ValueError`, but the vendored build actually raises
+    :exc:`RuntimeError` through cddlib's error path, so both are caught --
+    e.g. for a not-yet-fully-bounded polytope). Returns ``ids=None`` whenever id
     tracking isn't available for this call, signalling the caller to fall
     back to solving every vertex fresh, same as if this function didn't
     exist at all.
@@ -187,7 +189,7 @@ def _extract_vertices_with_ids(cdd_mod: ModuleType, poly) -> tuple[np.ndarray, l
         return _extract_vertices(cdd_mod, poly), None
     try:
         gens, gen_ids = cdd_mod.copy_generators_with_ids(poly)
-    except ValueError:
+    except (ValueError, RuntimeError):
         return _extract_vertices(cdd_mod, poly), None
     verts = []
     ids = []
@@ -489,8 +491,10 @@ class CddMethod(Method):
         if can_reuse:
             old_index_of_id = {vid: i for i, vid in enumerate(prev_ids)}
             new_id_set = set(ids)
-            self.stats["n_new"] += sum(1 for vid in new_id_set if vid not in old_index_of_id)
-            self.stats["n_removed"] += sum(1 for vid in prev_ids if vid not in new_id_set)
+            # None once a refresh without ids has made the counts unknown, until reset_stats().
+            if self.stats["n_new"] is not None:
+                self.stats["n_new"] += sum(1 for vid in new_id_set if vid not in old_index_of_id)
+                self.stats["n_removed"] += sum(1 for vid in prev_ids if vid not in new_id_set)
             closest = np.zeros((len(verts), self.k))
             normals = np.zeros((len(verts), self.k))
             to_solve = [i for i, vid in enumerate(ids) if vid not in old_index_of_id]
@@ -513,8 +517,9 @@ class CddMethod(Method):
                 # A fresh rebuild's ids aren't comparable to prev_ids at all
                 # (cddlib restarts id numbering) -- every current vertex
                 # counts as new, every previous one as removed.
-                self.stats["n_new"] += len(verts)
-                self.stats["n_removed"] += len(prev_ids) if prev_ids is not None else 0
+                if self.stats["n_new"] is not None:
+                    self.stats["n_new"] += len(verts)
+                    self.stats["n_removed"] += len(prev_ids) if prev_ids is not None else 0
             else:
                 self.stats["n_new"] = None
                 self.stats["n_removed"] = None
@@ -566,12 +571,14 @@ class CddMethod(Method):
         condition here -- a candidate right at `tol` exactly is still one
         `explore.drive` itself would have dispatched a solve for.
 
-        Not (yet) part of the `Method` interface -- `explore.drive` still
-        only ever calls `find_trial_point`. `BilevelMethod` has no
-        analogous notion of "every other vertex above tol" to offer (its
-        MILP reformulation finds the single worst point directly, without
-        ever enumerating a vertex set), so this lives on `CddMethod` alone
-        for now rather than on the shared base class.
+        Not part of the `Method` interface: `explore.drive` reaches it
+        through :meth:`find_pool_trial_points`, found via `hasattr`.
+        `BilevelMethod` has no analogous notion of "every other vertex
+        above tol" to offer (its MILP reformulation finds the single worst
+        point directly, without ever enumerating a vertex set), and
+        `BBMethod` -- which does keep a vertex set -- doesn't implement it
+        (yet), so this lives on `CddMethod` alone rather than on the
+        shared base class.
 
         :param tol: The same convergence tolerance `explore.drive` itself
             is called with. No default -- see `explore.drive`'s own
@@ -599,10 +606,10 @@ class CddMethod(Method):
         worst ones, since :meth:`find_trial_points_above_tol` already
         returns them sorted by gap descending.
 
-        Not (yet) wired into `explore.drive` -- that still only ever calls
-        `find_trial_point`. This exists so an experimental batched driving
-        loop has something to call; the sequential-by-construction
-        original is untouched.
+        `explore.drive` calls this (found via `hasattr`) whenever its
+        `max_parallel > 1`, solving the returned points in one batched
+        `closest_point` call; with `max_parallel == 1`, or for a method
+        without it, `drive` uses :meth:`find_trial_point` instead.
 
         :param max_parallel: Upper bound on how many points are returned
             -- meant to match however many parallel workers will actually

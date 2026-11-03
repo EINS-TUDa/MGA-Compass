@@ -306,9 +306,9 @@ class BilevelMethod(Method):
         check_norm(norm)
         if norm != "linf":
             raise NotImplementedError(
-                "BilevelMethod only supports norm='linf' -- see module docstring "
-                "for why L1/L2 would each need a different reformulation. "
-                "Use CddMethod for other norms."
+                "BilevelMethod only supports norm='linf' -- L1/L2 would each need a "
+                "different reformulation, not implemented. "
+                "Use CddMethod or BBMethod for other norms."
             )
         super().__init__(k, norm)
         self.M_P = M_P
