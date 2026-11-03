@@ -1,0 +1,6 @@
+[submodule "mga-surveyor/vendor/cdd/cddlib"]
+	path = mga-surveyor/vendor/cdd/cddlib
+	url = https://github.com/cddlib/cddlib.git
+[submodule "mga-surveyor/vendor/cdd/pycddlib"]
+	path = mga-surveyor/vendor/cdd/pycddlib
+	url = https://github.com/mcmtroffaes/pycddlib.git

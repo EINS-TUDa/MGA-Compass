@@ -1,0 +1,28 @@
+# Deployed by MGA-Dashboard/mga-compass/scripts/europe/run_pipeline.py into
+# <pypsa-eur-dir>/config/config.yaml -- same structure/conventions as any
+# other pypsa-eur config.yaml (see pypsa-eur/config/config.default.yaml).
+#
+# Electricity-only, one node per country (administrative clustering at
+# country level -- exact, not a kmeans approximation), daily resolution to
+# keep the LP tractable over a full year, Gurobi.
+
+run:
+  name: "{run_name}"
+
+scenario:
+  clusters:
+  - {clusters}
+  opts:
+  - ''
+
+clustering:
+  mode: administrative
+  administrative:
+    level: 0
+  temporal:
+    resolution_elec: 3h
+
+solving:
+  solver:
+    name: gurobi
+    options: "gurobi-default"

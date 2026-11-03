@@ -1,0 +1,5 @@
+{
+  "name": "mga-surveyor-cdd-vendor",
+  "version-string": "0.1.0",
+  "dependencies": ["gmp"]
+}

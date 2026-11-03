@@ -8,7 +8,14 @@ packages = ["src/mga_surveyor"]
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "DEBUG"
-testpaths = ["tests"]
+# "tests": this repo's own pytest-only tests (never shipped in the wheel).
+# "src/mga_surveyor/tests": the ported sandbox test/example subpackage,
+# which IS shipped as part of mga_surveyor (its own files import it as
+# `mga_surveyor.tests.X`, e.g. `from mga_surveyor.tests.lp_region import ...`).
+testpaths = ["tests", "src/mga_surveyor/tests"]
+markers = [
+    "slow: computationally expensive (MILP solves and/or hundreds of iterations across method/norm combinations) -- deselect with -m 'not slow'",
+]
 
 [project]
 name = "mga-surveyor"
@@ -17,11 +24,36 @@ description = "Near-optimal solution space exploration for PyPSA models — a dr
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pypsa>=1.2.0",
+    # >=1.3.0 specifically: pypsa_ext.py's multiprocessing.Pool paths pass
+    # Network objects directly to worker processes, which needs PyPSA's fix
+    # for https://github.com/PyPSA/PyPSA/issues/1888 (a SubNetwork weakref
+    # that broke pickling networks with sub-networks), released in 1.3.0.
+    "pypsa>=1.3.0",
     "pandas",
     "netCDF4",
+    "numpy",
+    "scipy",
+    # closest_point_on_hull backends (methods/cdd.py) and
+    # BilevelMethod's MILP -- both gurobipy/highspy are imported lazily elsewhere, so
+    # picking one backend never requires the other to actually be used. Also required
+    # (non-lazily -- a top-level import) by mga_surveyor.tests.lp_region, the
+    # test/example true-region oracle used by tests/test_*_icosahedron.py. On the
+    # default install (not an extra) since nearly every real use needs at least one.
     "gurobipy>=13.0.2",
+    "highspy>=1.14.0",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
+# methods/cdd.py's ground-truth vertex computation (CddMethod). Imported
+# lazily inside cdd_vertices_of, so the package works without this extra
+# as long as CddMethod is never actually called. Built locally from the
+# patched, vendored submodule at vendor/cdd/pycddlib (see tool.uv.sources
+# below and vendor/cdd/README.md) rather than a PyPI wheel -- run
+# `python vendor/cdd/build.py` once per machine/venv before `uv sync
+# --extra cdd`, or this extra will fail to build (missing cdd/cddgmp/gmp
+# headers and libs).
+cdd = ["pycddlib"]
+
+[tool.uv.sources]
+pycddlib = { path = "vendor/cdd/pycddlib", editable = true }

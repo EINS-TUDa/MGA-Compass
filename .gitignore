@@ -1,0 +1,3 @@
+# MSVC build artifacts (cddlib compilation)
+*.obj
+*.pdb

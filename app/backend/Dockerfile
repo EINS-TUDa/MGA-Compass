@@ -4,22 +4,31 @@ WORKDIR /repo
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# mga-compass is a local path dependency of app/backend (see app/backend/pyproject.toml)
+# app/backend is a workspace member (see /pyproject.toml's [tool.uv.workspace])
+# depending on mga-compass (see app/backend/pyproject.toml's [tool.uv.sources]).
+# uv validates/resolves the whole workspace even when syncing just mgaserver, so
+# every member needs its pyproject.toml present -- mga-surveyor only needs that
+# (mgaserver doesn't depend on it, and mga-compass's own dependency on it is
+# behind an extra mgaserver doesn't request), mga-compass needs its full source
+# since it IS an editable dependency of mgaserver.
+COPY pyproject.toml uv.lock ./
+COPY mga-surveyor/pyproject.toml ./mga-surveyor/pyproject.toml
 COPY mga-compass/ ./mga-compass/
+COPY app/backend/pyproject.toml ./app/backend/pyproject.toml
+
+# Install dependencies first (cached layer — only re-runs when any
+# pyproject.toml/uv.lock changes, not on app source changes).
+RUN uv sync --frozen --no-dev --package mgaserver
+
+# Copy application code and install the project
+COPY app/backend/mgaserver/ ./app/backend/mgaserver/
+RUN uv sync --frozen --no-dev --package mgaserver
+
+# Copy data files
+COPY app/backend/data/ ./app/backend/data/
 
 WORKDIR /repo/app/backend
 
-# Install dependencies first (cached layer — only re-runs when pyproject.toml/uv.lock change)
-COPY app/backend/pyproject.toml app/backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
-
-# Copy application code and install the project
-COPY app/backend/mgaserver/ ./mgaserver/
-RUN uv sync --frozen --no-dev
-
-# Copy data files
-COPY app/backend/data/ ./data/
-
 EXPOSE 8000
 
-CMD ["/repo/app/backend/.venv/bin/uvicorn", "mgaserver.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/repo/.venv/bin/uvicorn", "mgaserver.main:app", "--host", "0.0.0.0", "--port", "8000"]

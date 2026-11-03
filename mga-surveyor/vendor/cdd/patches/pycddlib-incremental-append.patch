@@ -1,0 +1,240 @@
+diff --git a/.gitignore b/.gitignore
+index 7e29231..3c4b9bb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -7,6 +7,7 @@
+ /lib/
+ /out/
+ /build/
++/build_local/
+ /dist/
+ /wheel/
+ __pycache__/
+diff --git a/CHANGELOG.rst b/CHANGELOG.rst
+index 87af3c7..a75d1d3 100644
+--- a/CHANGELOG.rst
++++ b/CHANGELOG.rst
+@@ -7,6 +7,28 @@ Version 3.0.3 (in development)
+ 
+ * Bump vcpkg hash for Windows wheel.
+ 
++* Add :func:`~cdd.polyhedron_append_halfspaces` and
++  :func:`~cdd.copy_generators_with_ids`, wrapping cddlib's new
++  ``dd_DDAppendHalfspaces`` and ``dd_CopyGeneratorsWithIds``: incrementally
++  append inequalities to an already-computed polyhedron (resuming the
++  double description method instead of recomputing from scratch), and
++  retrieve each vertex/ray together with a persistent id that survives
++  across such calls.
++
++  .. warning::
++      Requires a cddlib build that provides ``dd_DDAppendHalfspaces`` and
++      ``dd_CopyGeneratorsWithIds``. These are not yet part of any released
++      cddlib version.
++
++* Fix the Windows ``tmpfile()`` workaround (used internally for error
++  reporting and for ``str()`` on :class:`~cdd.Matrix`/:class:`~cdd.LinProg`/
++  :class:`~cdd.Polyhedron`) to also apply when compiling with MinGW, not
++  just MSVC. The workaround was previously gated on ``_MSC_VER`` alone;
++  MinGW builds fell through to plain ``tmpfile()``, which is broken on
++  Windows regardless of compiler (it tries to create the file in the root
++  of the current drive) and caused a crash the moment any of those code
++  paths ran.
++
+ Version 3.0.2 (13 January 2025)
+ -------------------------------
+ 
+diff --git a/cython/cdd.pxi b/cython/cdd.pxi
+index 67d9f80..02bf753 100644
+--- a/cython/cdd.pxi
++++ b/cython/cdd.pxi
+@@ -88,6 +88,7 @@ cdef extern from "cddlib/cdd.h" nogil:
+         dd_ColIndexOutOfRange
+         dd_LPCycling
+         dd_NumericallyInconsistent
++        dd_PolyhedraNotComputed
+         dd_NoError
+ 
+     ctypedef enum dd_CompStatusType:
+@@ -316,12 +317,16 @@ cdef extern from "cddlib/cdd.h" nogil:
+     cdef dd_MatrixPtr dd_CopyOutput(dd_PolyhedraPtr)
+     cdef dd_MatrixPtr dd_CopyInequalities(dd_PolyhedraPtr)
+     cdef dd_MatrixPtr dd_CopyGenerators(dd_PolyhedraPtr)
++    cdef dd_MatrixPtr dd_CopyGeneratorsWithIds(
++        dd_PolyhedraPtr, dd_rowindex *, dd_ErrorType *
++    )
+     cdef dd_SetFamilyPtr dd_CopyIncidence(dd_PolyhedraPtr)
+     cdef dd_SetFamilyPtr dd_CopyAdjacency(dd_PolyhedraPtr)
+     cdef dd_SetFamilyPtr dd_CopyInputIncidence(dd_PolyhedraPtr)
+     cdef dd_SetFamilyPtr dd_CopyInputAdjacency(dd_PolyhedraPtr)
+     cdef dd_boolean dd_DDFile2File(char *ifile, char *ofile, dd_ErrorType *err)
+     cdef dd_boolean dd_DDInputAppend(dd_PolyhedraPtr*, dd_MatrixPtr, dd_ErrorType*)
++    cdef dd_boolean dd_DDAppendHalfspaces(dd_PolyhedraPtr*, dd_MatrixPtr, dd_ErrorType*)
+     cdef dd_MatrixPtr dd_PolyFile2Matrix(libc.stdio.FILE *f, dd_ErrorType *)
+ 
+     cdef dd_PolyhedraPtr dd_DDMatrix2Poly(dd_MatrixPtr, dd_ErrorType *)
+diff --git a/cython/pycddlib.pxi b/cython/pycddlib.pxi
+index 482bb44..acfbc86 100644
+--- a/cython/pycddlib.pxi
++++ b/cython/pycddlib.pxi
+@@ -28,7 +28,7 @@ cimport libc.stdlib
+ # windows hack for broken libc.stdio.tmpfile
+ 
+ cdef extern from * nogil:
+-    cdef void _emit_ifdef_msc_ver "#ifdef _MSC_VER //" ()
++    cdef void _emit_ifdef_windows "#if defined(_MSC_VER) || defined(_WIN32) //" ()
+     cdef void _emit_else "#else //" ()
+     cdef void _emit_endif "#endif //" ()
+ 
+@@ -38,7 +38,11 @@ cdef extern from "stdio.h" nogil:
+ cdef libc.stdio.FILE *libc_stdio_tmpfile() except NULL:
+     cdef libc.stdio.FILE *result
+     cdef char *name
+-    _emit_ifdef_msc_ver()
++    # plain tmpfile() is broken on Windows (it tries to create the file in
++    # the root of the current drive, which fails due to permissions) on
++    # every Windows toolchain, not just MSVC (_MSC_VER) -- mingw-w64 is
++    # _WIN32 but not _MSC_VER, and needs the same workaround.
++    _emit_ifdef_windows()
+     name = _tempnam(NULL, NULL)
+     if name == NULL:
+         raise RuntimeError("failed to create temporary file name")
+@@ -1096,6 +1100,67 @@ def copy_generators(poly: Polyhedron) -> Matrix:
+     return matrix_from_ptr(dd_CopyGenerators(poly.dd_poly))
+ 
+ 
++def copy_generators_with_ids(poly: Polyhedron) -> tuple[Matrix, Sequence[int]]:
++    """Like :func:`~cdd.copy_generators`, but also returns a persistent
++    integer id for each generator (vertex/ray), aligned with the rows
++    of the returned matrix.
++
++    A generator that survives a :func:`~cdd.polyhedron_append_halfspaces`
++    call keeps the exact same id afterwards, so callers can recognize
++    "the same vertex" by an exact integer match instead of comparing
++    floating-point coordinates: an id present in an earlier snapshot but
++    absent from a later one identifies an eliminated generator, and an id
++    absent from an earlier snapshot but present in a later one identifies
++    a newly created one.
++
++    Only supported for an inequality (H-representation) *poly* whose
++    original matrix has full column rank, i.e. exactly what
++    :func:`~cdd.polyhedron_append_halfspaces` supports; a :exc:`ValueError`
++    is raised otherwise (e.g. for a V-representation *poly*, or one whose
++    original matrix left some direction entirely unconstrained).
++
++    .. versionadded:: 3.0.3
++    """
++    cdef dd_rowindex ids = NULL
++    cdef dd_ErrorType error = dd_NoError
++    cdef dd_MatrixPtr dd_mat = dd_CopyGeneratorsWithIds(
++        poly.dd_poly, &ids, &error
++    )
++    if dd_mat == NULL:
++        _raise_error(error)
++    try:
++        id_list = [ids[i] for i in range(dd_mat.rowsize)]
++    finally:
++        libc.stdlib.free(ids)
++    return matrix_from_ptr(dd_mat), id_list
++
++
++def polyhedron_append_halfspaces(poly: Polyhedron, mat: Matrix) -> None:
++    """Incrementally append the inequality rows of *mat* to *poly* in place,
++    resuming the double description method instead of recomputing the
++    polyhedron from scratch.
++
++    *poly* must already be a fully computed inequality (H-representation)
++    polyhedron (see :func:`~cdd.polyhedron_from_matrix`) whose original
++    matrix has full column rank, i.e. no direction is left entirely
++    unconstrained -- otherwise a :exc:`RuntimeError` is raised, since
++    cddlib permanently restructures its internal representation for such a
++    polyhedron in a way that is incompatible with resuming the computation
++    later. *mat* must contain only inequality rows (an empty
++    :attr:`~cdd.Matrix.lin_set`), and, if *poly* is homogeneous, every row
++    of *mat* must be homogeneous too.
++
++    After this call, *poly* itself reflects the updated polyhedron: use
++    :func:`~cdd.copy_generators` or :func:`~cdd.copy_generators_with_ids`
++    to retrieve its (updated) generators.
++
++    .. versionadded:: 3.0.3
++    """
++    cdef dd_ErrorType error = dd_NoError
++    if not dd_DDAppendHalfspaces(&poly.dd_poly, mat.dd_mat, &error):
++        _raise_error(error)
++
++
+ def copy_adjacency(poly: Polyhedron) -> Sequence[Set[int]]:
+     """Get the adjacencies.
+ 
+diff --git a/cython/pyenums.pxi b/cython/pyenums.pxi
+index c292426..c501e98 100644
+--- a/cython/pyenums.pxi
++++ b/cython/pyenums.pxi
+@@ -74,6 +74,7 @@ class _ErrorType(IntEnum):
+     COL_INDEX_OUT_OF_RANGE = dd_ColIndexOutOfRange
+     LP_CYCLING = dd_LPCycling
+     NUMERICALLY_INCONSISTENT = dd_NumericallyInconsistent
++    POLYHEDRA_NOT_COMPUTED = dd_PolyhedraNotComputed
+     NO_ERROR = dd_NoError
+ 
+ 
+diff --git a/docs/source/cdd.rst b/docs/source/cdd.rst
+index d951010..37e49b8 100644
+--- a/docs/source/cdd.rst
++++ b/docs/source/cdd.rst
+@@ -74,6 +74,7 @@ Factories
+ .. autofunction:: linprog_from_array
+ .. autofunction:: linprog_from_matrix
+ .. autofunction:: polyhedron_from_matrix
++.. autofunction:: polyhedron_append_halfspaces
+ 
+ Basic Operations
+ ----------------
+@@ -118,6 +119,7 @@ Polyhedron Operations
+ .. autofunction:: copy_output
+ .. autofunction:: copy_inequalities
+ .. autofunction:: copy_generators
++.. autofunction:: copy_generators_with_ids
+ .. autofunction:: copy_adjacency
+ .. autofunction:: copy_incidence
+ .. autofunction:: copy_input_adjacency
+diff --git a/src/cdd/__init__.pyi b/src/cdd/__init__.pyi
+index a1f9821..ea8035c 100644
+--- a/src/cdd/__init__.pyi
++++ b/src/cdd/__init__.pyi
+@@ -84,6 +84,7 @@ class RowOrderType(enum.IntEnum):
+ def block_elimination(mat: Matrix, col_set: Container[int]) -> Matrix: ...
+ def copy_adjacency(poly: Polyhedron) -> Sequence[Set[int]]: ...
+ def copy_generators(poly: Polyhedron) -> Matrix: ...
++def copy_generators_with_ids(poly: Polyhedron) -> tuple[Matrix, Sequence[int]]: ...
+ def copy_incidence(poly: Polyhedron) -> Sequence[Set[int]]: ...
+ def copy_inequalities(poly: Polyhedron) -> Matrix: ...
+ def copy_input(poly: Polyhedron) -> Matrix: ...
+@@ -123,6 +124,7 @@ def matrix_redundancy_remove(
+     mat: Matrix,
+ ) -> tuple[Set[int], Sequence[Optional[int]]]: ...
+ def matrix_weak_adjacency(mat: Matrix) -> Sequence[Set[int]]: ...
++def polyhedron_append_halfspaces(poly: Polyhedron, mat: Matrix) -> None: ...
+ def polyhedron_from_matrix(
+     mat: Matrix, row_order: Optional[RowOrderType] = None
+ ) -> Polyhedron: ...
+diff --git a/src/cdd/gmp.pyi b/src/cdd/gmp.pyi
+index 7e6e396..c868316 100644
+--- a/src/cdd/gmp.pyi
++++ b/src/cdd/gmp.pyi
+@@ -57,6 +57,7 @@ class Polyhedron:
+ def block_elimination(mat: Matrix, col_set: Container[int]) -> Matrix: ...
+ def copy_adjacency(poly: Polyhedron) -> Sequence[Set[int]]: ...
+ def copy_generators(poly: Polyhedron) -> Matrix: ...
++def copy_generators_with_ids(poly: Polyhedron) -> tuple[Matrix, Sequence[int]]: ...
+ def copy_incidence(poly: Polyhedron) -> Sequence[Set[int]]: ...
+ def copy_inequalities(poly: Polyhedron) -> Matrix: ...
+ def copy_input(poly: Polyhedron) -> Matrix: ...
+@@ -96,6 +97,7 @@ def matrix_redundancy_remove(
+     mat: Matrix,
+ ) -> tuple[Set[int], Sequence[Optional[int]]]: ...
+ def matrix_weak_adjacency(mat: Matrix) -> Sequence[Set[int]]: ...
++def polyhedron_append_halfspaces(poly: Polyhedron, mat: Matrix) -> None: ...
+ def polyhedron_from_matrix(
+     mat: Matrix, row_order: Optional[RowOrderType] = None
+ ) -> Polyhedron: ...

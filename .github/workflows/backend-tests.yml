@@ -29,5 +29,8 @@ jobs:
         working-directory: app/backend
 
       - name: Run tests
-        run: uv run pytest
+        # --frozen, like the sync above: without it uv re-validates the whole
+        # workspace lock, which needs the vendored pycddlib submodule (not
+        # checked out here, and not needed by the backend).
+        run: uv run --frozen pytest
         working-directory: app/backend
