@@ -48,5 +48,11 @@
       "dataset": "generation",
       "x_dim": "snapshot"
     }
+  },
+  "category_labels": {
+    "gas": "Gas Power"
+  },
+  "category_colors": {
+    "gas": "#a85522"
   }
 }

@@ -21,6 +21,13 @@ const props = defineProps({
 /** @type {import('vue').Ref<string>} */
 const objLabel = ref('')
 
+/** Display name and color per plot category (e.g. technology), from /init_plot. */
+/** @type {import('vue').Ref<Record<string, string>>} */
+const labels = ref({})
+/** @type {import('vue').Ref<Record<string, string>>} */
+const colors = ref({})
+const label = (name) => labels.value[name] ?? name
+
 /** @type {import('vue').Ref<string[]>} */
 const types = ref([])
 /** @type {import('vue').Ref<string>} */
@@ -109,19 +116,26 @@ const renderChart = (notMerge = true) => {
     series = [{
       name: type.value,
       type: isBar ? 'bar' : 'line',
-      data: isTime ? xData.map((x, i) => [x, interpolated[i]]) : interpolated,
+      // A bar per category (e.g. technology): each bar in its category's color.
+      data: isTime
+        ? xData.map((x, i) => [x, interpolated[i]])
+        : interpolated.map((v, i) => (colors.value[pd.x_dim[i]] ? { value: v, itemStyle: { color: colors.value[pd.x_dim[i]] } } : v)),
       lineStyle: { width: 1.5 },
       symbol: 'none',
     }]
   } else {
-    series = Object.entries(interpolated).map(([name, values]) => ({
-      name,
-      type: isBar ? 'bar' : 'line',
-      stack: isStackedBar ? 'total' : undefined,
-      data: isTime ? xData.map((x, i) => [x, values[i]]) : values,
-      lineStyle: { width: 1 },
-      symbol: 'none',
-    }))
+    series = Object.entries(interpolated).map(([name, values]) => {
+      const color = colors.value[name]
+      return {
+        name: label(name),
+        type: isBar ? 'bar' : 'line',
+        stack: isStackedBar ? 'total' : undefined,
+        data: isTime ? xData.map((x, i) => [x, values[i]]) : values,
+        lineStyle: color ? { width: 1, color } : { width: 1 },
+        itemStyle: color ? { color } : undefined,
+        symbol: 'none',
+      }
+    })
   }
 
   if (!notMerge) {
@@ -146,7 +160,7 @@ const renderChart = (notMerge = true) => {
       grid: { top: 8, right: 16, bottom: isTime ? 72 : isBar ? 64 : 48, left: 64 },
       xAxis: {
         type: isTime ? 'time' : 'category',
-        data: isTime ? undefined : pd.x_dim,
+        data: isTime ? undefined : pd.x_dim.map(label),
         axisLabel: {
           color: '#6b7280',
           fontSize: 11,
@@ -295,6 +309,8 @@ let resizeObserver = null
 onMounted(async () => {
   const initData = await get('/init_plot')
   objLabel.value = String(initData?.obj_label ?? '')
+  labels.value = initData?.labels ?? {}
+  colors.value = initData?.colors ?? {}
   const datasets = Array.isArray(initData?.datasets) ? initData.datasets : []
   datasets.forEach((t) => { if (!types.value.includes(t)) types.value.push(t) })
   if (objLabel.value && !types.value.includes(objLabel.value)) types.value.unshift(objLabel.value)

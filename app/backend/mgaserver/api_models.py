@@ -53,6 +53,8 @@ class InitResponse(BaseModel):
 class InitPlotResponse(BaseModel):
     datasets: list[str]
     obj_label: str
+    labels: dict[str, str] = {}  # plot category -> display name (manifest.category_labels)
+    colors: dict[str, str] = {}  # plot category -> CSS color (manifest.category_colors)
 
 
 class BetaAlphaItem(BaseModel):

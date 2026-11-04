@@ -35,6 +35,11 @@ class Manifest(BaseModel):
     duals: str | None = "duals.parquet"
     output_datasets: dict[str, OutputDataset] = {}
     plots: dict[str, Plot] = {}
+    # Display name and color (any CSS color) per plot category, keyed by its
+    # coordinate value in the output datasets (e.g. a technology name). Optional:
+    # a category without one is shown by its own name, in the chart's default color.
+    category_labels: dict[str, str] = {}
+    category_colors: dict[str, str] = {}
     # sha256 of every file in the bundle except the manifest itself, written by
     # mga_compass.dataset.finalize_bundle and checked before the server loads it.
     files: dict[str, str] = {}

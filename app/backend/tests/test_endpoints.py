@@ -96,6 +96,11 @@ class TestInitPlotEndpoint:
         response = client.get("/init_plot")
         assert set(response.json()["datasets"]) == set(manifest.plots.keys())
 
+    def test_labels_and_colors_match_config(self, client, manifest):
+        data = client.get("/init_plot").json()
+        assert data["labels"] == manifest.category_labels
+        assert data["colors"] == manifest.category_colors
+
 
 @pytest.fixture
 def navigate_payload(constraints_df):

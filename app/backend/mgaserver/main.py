@@ -93,7 +93,10 @@ def get_init(request: Request) -> InitResponse:
 @app.get("/init_plot", response_model=InitPlotResponse)
 @limiter.limit("60/minute")
 def get_init_plot(request: Request) -> InitPlotResponse:
-    return InitPlotResponse(datasets=list(manifest.plots.keys()), obj_label=manifest.obj_label)
+    return InitPlotResponse(
+        datasets=list(manifest.plots.keys()), obj_label=manifest.obj_label,
+        labels=manifest.category_labels, colors=manifest.category_colors,
+    )
 
 
 @app.post("/navigate", response_model=NavigateResponse)
