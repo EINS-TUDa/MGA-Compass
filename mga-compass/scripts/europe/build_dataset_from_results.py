@@ -36,6 +36,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger("build_dataset_from_results")
 
 OBJ_LABEL = "system_cost"
+#: Display names for the run's dimension keys (run_custom_mga.py's DIMENSIONS_SPEC)
+#: and objective -- the names the platform shows; the manifest uses the same.
+DISPLAY_NAMES = {
+    "onwind": "Onshore Wind",
+    "offwind-ac": "Offshore Wind",
+    "offwind-float": "Floating Wind",
+    "solar": "Solar",
+    "solar-hsat": "Tracking Solar",
+    "CCGT": "Gas Power",
+    "battery": "Battery Storage",
+    "H2": "Hydrogen Storage",
+    OBJ_LABEL: "System Cost",
+}
 #: (component, nominal-capacity variable, carriers counted as power capacity)
 CAPACITY_COMPONENTS = [
     ("generators", "generators_p_nom_opt", None),  # every carrier
@@ -118,6 +131,7 @@ def main() -> None:
     link_layout(run_dir, box_dir, args.slack, layout)
 
     points, duals, nc_files = consolidate_mga_results(layout, OBJ_LABEL)
+    points, duals = points.rename(columns=DISPLAY_NAMES), duals.rename(columns=DISPLAY_NAMES)
     logger.info("points %s, duals %s", points.shape, duals.shape)
     snapshots = pd.DatetimeIndex(pypsa.Network(str(args.network)).snapshots)
     generation, capacity = extract(nc_files, snapshots)

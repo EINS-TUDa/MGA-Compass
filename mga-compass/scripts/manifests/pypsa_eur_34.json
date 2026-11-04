@@ -1,35 +1,42 @@
 {
-  "obj_label": "system_cost",
+  "obj_label": "System Cost",
   "dimension_info": {
-    "onwind": "Installed onshore wind capacity, summed over all 34 nodes.",
-    "offwind-ac": "Installed offshore wind capacity with AC grid connection, summed over all nodes.",
-    "offwind-float": "Installed floating offshore wind capacity, summed over all nodes.",
-    "solar": "Installed fixed-tilt solar PV capacity, summed over all nodes.",
-    "solar-hsat": "Installed single-axis tracking solar PV capacity, summed over all nodes.",
-    "CCGT": "Installed combined-cycle gas turbine capacity, summed over all nodes.",
-    "battery": "Installed battery storage energy capacity, summed over all nodes.",
-    "H2": "Installed hydrogen storage energy capacity, summed over all nodes.",
-    "system_cost": "Total annual system cost (annualised capital plus operational costs). This is the objective function being minimized."
+    "Onshore Wind": "Installed onshore wind capacity, summed over all 34 nodes.",
+    "Offshore Wind": "Installed fixed-bottom offshore wind capacity (AC grid connection), summed over all nodes.",
+    "Floating Wind": "Installed floating offshore wind capacity, summed over all nodes.",
+    "Solar": "Installed fixed-tilt solar PV capacity, summed over all nodes.",
+    "Tracking Solar": "Installed single-axis tracking solar PV capacity, summed over all nodes.",
+    "Gas Power": "Installed combined-cycle gas turbine (CCGT) capacity, summed over all nodes.",
+    "Battery Storage": "Installed battery storage energy capacity, summed over all nodes.",
+    "Hydrogen Storage": "Installed hydrogen storage energy capacity, summed over all nodes.",
+    "System Cost": "Total annual system cost (annualised capital plus operational costs). This is the objective function being minimized."
   },
   "dimension_unit": {
-    "onwind": "MW",
-    "offwind-ac": "MW",
-    "offwind-float": "MW",
-    "solar": "MW",
-    "solar-hsat": "MW",
-    "CCGT": "MW",
-    "battery": "MWh",
-    "H2": "MWh",
-    "system_cost": "€/a"
+    "Onshore Wind": "MW",
+    "Offshore Wind": "MW",
+    "Floating Wind": "MW",
+    "Solar": "MW",
+    "Tracking Solar": "MW",
+    "Gas Power": "MW",
+    "Battery Storage": "MWh",
+    "Hydrogen Storage": "MWh",
+    "System Cost": "€/a"
   },
   "output_datasets": {
     "capacity": {
       "path": "installed_capacity.parquet",
-      "dims": ["index", "technology"]
+      "dims": [
+        "index",
+        "technology"
+      ]
     },
     "generation": {
       "path": "generation_over_snapshots.parquet",
-      "dims": ["index", "snapshot", "technology"]
+      "dims": [
+        "index",
+        "snapshot",
+        "technology"
+      ]
     }
   },
   "plots": {
