@@ -10,7 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from mga_compass import fetch_bundle, load_bundle
-from mga_compass import Constraints, Alpha, Breakpoint, navigate, interpolate, get_plot_data, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
+from mga_compass import Constraints, Alpha, AlphaSumError, Breakpoint, SolverError, navigate, interpolate, get_plot_data, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
 
 from .api_models import ConstraintRow, ConstraintsPayload, BreakpointResult, NavigateResponse, ConstraintChangeItem, DimensionRange, DimensionEntry, InitResponse, InitPlotResponse, PlotRequest, PlotResponse, LowerBoundRequest, LowerBoundResponse, LowerBoundPointResult
 from .config import settings, Manifest
@@ -115,13 +115,19 @@ def run_navigation(request: Request, payload: ConstraintsPayload) -> NavigateRes
         # negative delta). FastAPI uses 422 for its own validation errors, so we match
         # that convention here rather than using 400 Bad Request.
         raise HTTPException(status_code=422, detail=str(e))
-    logger.info("navigate: calling navigate()")
-    output_constraints, point = navigate(points, input_constraints, manifest.obj_label, settings.solver_name, settings.solver_options)
-    logger.info("navigate: calling interpolate()")
-    logger.info("interpolate point_start:\n%s", input_constraints["value"].to_string())
-    logger.info("interpolate point_end:\n%s", point.to_string())
-    logger.info("constraints:\n%s", input_constraints[["value", "direction", "delta"]].to_string())
-    breakpoints = interpolate(points, input_constraints["value"], point, manifest.obj_label, solver_name=settings.solver_name, solver_options=settings.solver_options)
+    try:
+        logger.info("navigate: calling navigate()")
+        output_constraints, point = navigate(points, input_constraints, manifest.obj_label, settings.solver_name, settings.solver_options)
+        logger.info("navigate: calling interpolate()")
+        logger.info("interpolate point_start:\n%s", input_constraints["value"].to_string())
+        logger.info("interpolate point_end:\n%s", point.to_string())
+        logger.info("constraints:\n%s", input_constraints[["value", "direction", "delta"]].to_string())
+        breakpoints = interpolate(points, input_constraints["value"], point, manifest.obj_label, solver_name=settings.solver_name, solver_options=settings.solver_options)
+    except (SolverError, AlphaSumError) as e:
+        # An HTTPException, unlike an unhandled error, still passes through the
+        # CORS middleware, so the frontend sees this message, not a network error.
+        logger.error("navigate: %s", e)
+        raise HTTPException(status_code=500, detail=f"The solver failed: {e}")
     logger.info("navigate: building response")
     constraints_out = {
         label: ConstraintRow(**row.to_dict())

@@ -90,7 +90,11 @@ class Constraints(pd.DataFrame):
             col_min = points[func].min()
             col_max = points[func].max()
             val = self.loc[func, "value"]
-            if not (col_min <= val <= col_max):
+            # A point navigate() returned is a convex combination of the points, so
+            # it can lie a rounding error outside the range -- e.g. on the face where
+            # a dimension is at its minimum -- and must still be accepted back.
+            tol = 1e-9 * max(abs(col_min), abs(col_max))
+            if not (col_min - tol <= val <= col_max + tol):
                 raise ConstraintsValueError(
                     f"Value for '{func}' is {val}, outside the points range [{col_min}, {col_max}]"
                 )

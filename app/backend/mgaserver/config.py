@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 
 from mga_compass import Manifest, OutputDataset, Plot, load_manifest, default_solver_options
+from mga_compass.solvers import FEASIBILITY_TOLERANCE
 from mga_compass.dataset import MANIFEST_NAME
 
 __all__ = ["Manifest", "OutputDataset", "Plot", "load_manifest", "Settings", "settings"]
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     dataset_url: str | None = None
     solver_log_path: Path = Path("solver.log")
     solver_name: str = "highs"
-    solver_feasibility_tolerance: float = 1e-4
+    solver_feasibility_tolerance: float = FEASIBILITY_TOLERANCE
     allowed_origins: list[str] = ["*"]
 
     @property

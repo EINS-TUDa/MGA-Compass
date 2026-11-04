@@ -12,15 +12,15 @@
     "System Cost": "Total annual system cost (annualised capital plus operational costs). This is the objective function being minimized."
   },
   "dimension_unit": {
-    "Onshore Wind": "MW",
-    "Offshore Wind": "MW",
-    "Floating Wind": "MW",
-    "Solar": "MW",
-    "Tracking Solar": "MW",
-    "Gas Power": "MW",
-    "Battery Storage": "MWh",
-    "Hydrogen Storage": "MWh",
-    "System Cost": "€/a"
+    "Onshore Wind": "GW",
+    "Offshore Wind": "GW",
+    "Floating Wind": "GW",
+    "Solar": "GW",
+    "Tracking Solar": "GW",
+    "Gas Power": "GW",
+    "Battery Storage": "GWh",
+    "Hydrogen Storage": "TWh",
+    "System Cost": "bn €/a"
   },
   "output_datasets": {
     "capacity": {

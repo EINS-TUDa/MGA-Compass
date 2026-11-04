@@ -22,6 +22,18 @@ def configure_solver_logging(log_path: Path) -> None:
         logger.propagate = False  # don't echo to console
 
 
+class SolverError(RuntimeError):
+    """An LP did not solve to optimality. linopy reports a solver that gives up
+    (e.g. HiGHS' "unknown") as status "ok" and still fills in a solution -- all
+    zeros -- so every solve's termination condition has to be checked."""
+
+
+def _solve(mdl: linopy.Model, what: str, solver_name: str, solver_options: dict | None) -> None:
+    mdl.solve(solver_name=solver_name, **(solver_options or {}))
+    if mdl.status != "ok" or mdl.termination_condition != "optimal":
+        raise SolverError(f"{what}: status={mdl.status}, condition={mdl.termination_condition}")
+
+
 def navigate(
     points: Points,
     constraints: Constraints,
@@ -43,7 +55,7 @@ def navigate(
     for func in constraints.index:
         if constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate: {func!r}", solver_name, solver_options)
             delta = (f.loc[func].solution - constraints.loc[func, "value"]).values
             if delta >= 0:
                 if delta >= constraints.loc[func, "delta"]:
@@ -59,7 +71,7 @@ def navigate(
                 mdl.add_constraints(f.loc[func] <= constraints.loc[func, "value"] + np.abs(delta))
         elif constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate: {func!r}", solver_name, solver_options)
             delta = (constraints.loc[func, "value"] - f.loc[func].solution).values
             if delta >= 0:
                 if delta >= constraints.loc[func, "delta"]:
@@ -76,9 +88,7 @@ def navigate(
             mdl.add_constraints(abs_delta.loc[func] >= f.loc[func] - constraints.loc[func, "value"])
             mdl.add_constraints(abs_delta.loc[func] >= constraints.loc[func, "value"] - f.loc[func])
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
-            if mdl.status != "ok" or mdl.termination_condition != "optimal":
-                raise ValueError(f"Solver failed for '==' constraint on '{func}': status={mdl.status}, condition={mdl.termination_condition}")
+            _solve(mdl, f"navigate: '==' on {func!r}", solver_name, solver_options)
             delta = np.abs((f.loc[func].solution - constraints.loc[func, "value"]).values)
             if delta <= constraints.loc[func, "delta"]:
                 mdl.add_constraints(abs_delta.loc[func] <= constraints.loc[func, "delta"])
@@ -96,20 +106,20 @@ def navigate(
             continue
         elif constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate: {func!r}", solver_name, solver_options)
         elif constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate: {func!r}", solver_name, solver_options)
         elif constraints.loc[func, "direction"] == "==":
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate: {func!r}", solver_name, solver_options)
         mdl.add_constraints(f.loc[func] == f.loc[func].solution)
 
     # Find the solution with the minimum cost
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
-    mdl.solve(solver_name=solver_name, **(solver_options or {}))
+    _solve(mdl, "navigate: minimum cost", solver_name, solver_options)
 
-    point = f.solution.to_series()
+    point = alpha_2_point(_normalized_alpha(alpha.solution.values, points.index), points)
     return output_df, point
 
 
@@ -196,8 +206,17 @@ def point_2_alpha(
         if func != obj_label:
             mdl.add_constraints((points[func] * alpha).sum() == point[func])
     mdl.add_objective((points[obj_label] * alpha).sum(), sense="min")
-    mdl.solve(solver_name=solver_name, **(solver_options or {}))
-    return Alpha(alpha.solution.clip(min=0))
+    _solve(mdl, "point_2_alpha", solver_name, solver_options)
+    return _normalized_alpha(alpha.solution.values, points.index)
+
+
+def _normalized_alpha(values: np.ndarray, index: pd.Index) -> Alpha:
+    """Solver weights as an Alpha. The solver meets sum(alpha) == 1 only to its
+    feasibility tolerance, and a point built from weights summing to 1 + 1e-7 is
+    the points' hull stretched by 1e-7 -- outside it, so the next LP that has to
+    match that point exactly is infeasible. Divided by their sum, they are not."""
+    weights = pd.Series(values, index=index).clip(lower=0)
+    return Alpha(weights / weights.sum())
 
 
 def get_plot_data(alphas: list[Alpha], plot: Plot, da: xr.DataArray) -> dict:
@@ -336,7 +355,7 @@ def navigate_outer_approximation(
     for func in input_constraints.index:
         if input_constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
             delta = (f.loc[func].solution - input_constraints.loc[func, "value"]).values
             if delta >= 0:
                 if delta >= input_constraints.loc[func, "delta"]:
@@ -351,7 +370,7 @@ def navigate_outer_approximation(
                 mdl.add_constraints(f.loc[func] <= input_constraints.loc[func, "value"] + np.abs(delta))
         elif input_constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
             delta = (input_constraints.loc[func, "value"] - f.loc[func].solution).values
             if delta >= 0:
                 if delta >= input_constraints.loc[func, "delta"]:
@@ -368,7 +387,7 @@ def navigate_outer_approximation(
             mdl.add_constraints(abs_delta.loc[func] >= f.loc[func] - input_constraints.loc[func, "value"])
             mdl.add_constraints(abs_delta.loc[func] >= input_constraints.loc[func, "value"] - f.loc[func])
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
             delta = np.abs((f.loc[func].solution - input_constraints.loc[func, "value"]).values)
             if delta <= input_constraints.loc[func, "delta"]:
                 mdl.add_constraints(abs_delta.loc[func] <= input_constraints.loc[func, "delta"])
@@ -384,19 +403,19 @@ def navigate_outer_approximation(
     for func in input_constraints.index:
         if input_constraints.loc[func, "direction"] == ">=":
             mdl.add_objective(f.loc[func], sense="max", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
             mdl.add_constraints(f.loc[func] == f.loc[func].solution)
         elif input_constraints.loc[func, "direction"] == "<=":
             mdl.add_objective(f.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
         elif input_constraints.loc[func, "direction"] == "==":
             mdl.add_objective(abs_delta.loc[func], sense="min", overwrite=True)
-            mdl.solve(solver_name=solver_name, **(solver_options or {}))
+            _solve(mdl, f"navigate_outer_approximation: {func!r}", solver_name, solver_options)
         mdl.add_constraints(f.loc[func] == f.loc[func].solution)
 
     # Find the solution with the minimum cost
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
-    mdl.solve(solver_name=solver_name, **(solver_options or {}))
+    _solve(mdl, "navigate_outer_approximation: minimum cost", solver_name, solver_options)
 
     return output_df, f.solution.to_series()
 

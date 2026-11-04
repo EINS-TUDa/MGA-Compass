@@ -49,6 +49,24 @@ DISPLAY_NAMES = {
     "H2": "Hydrogen Storage",
     OBJ_LABEL: "System Cost",
 }
+#: Factor from the run's units (MW, MWh, €/a) to the platform's, chosen so every
+#: dimension spans at most a few thousand: navigate/point_2_alpha solve LPs over
+#: these values, and with System Cost ~4e11 beside capacities ~1e5 HiGHS gave up
+#: on ~10% of points. Must match the manifest's dimension_unit.
+UNIT_FACTORS = {
+    "Onshore Wind": 1e-3,  # GW
+    "Offshore Wind": 1e-3,
+    "Floating Wind": 1e-3,
+    "Solar": 1e-3,
+    "Tracking Solar": 1e-3,
+    "Gas Power": 1e-3,
+    "Battery Storage": 1e-3,  # GWh
+    "Hydrogen Storage": 1e-6,  # TWh
+    "System Cost": 1e-9,  # bn €/a
+}
+#: Decimals kept after conversion: 1 kW / 1 kWh / 1 MWh / €1000 -- also turns the
+#: solver noise of unbuilt technologies (~1e-15) into exact zeros.
+UNIT_DECIMALS = 6
 #: (component, nominal-capacity variable, carriers counted as power capacity)
 CAPACITY_COMPONENTS = [
     ("generators", "generators_p_nom_opt", None),  # every carrier
@@ -116,6 +134,15 @@ def extract(nc_files: list[Path], snapshots: pd.DatetimeIndex) -> tuple[xr.DataA
     return gen, cap
 
 
+def to_platform_units(points: pd.DataFrame, duals: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert display-named points and duals to UNIT_FACTORS' units. A dual is the
+    cost's sensitivity to a dimension, so it scales by cost factor / that factor."""
+    factors = pd.Series(UNIT_FACTORS)
+    points = (points * factors[points.columns]).round(UNIT_DECIMALS)
+    duals = duals * (UNIT_FACTORS[DISPLAY_NAMES[OBJ_LABEL]] / factors[duals.columns])
+    return points, duals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -131,7 +158,7 @@ def main() -> None:
     link_layout(run_dir, box_dir, args.slack, layout)
 
     points, duals, nc_files = consolidate_mga_results(layout, OBJ_LABEL)
-    points, duals = points.rename(columns=DISPLAY_NAMES), duals.rename(columns=DISPLAY_NAMES)
+    points, duals = to_platform_units(points.rename(columns=DISPLAY_NAMES), duals.rename(columns=DISPLAY_NAMES))
     logger.info("points %s, duals %s", points.shape, duals.shape)
     snapshots = pd.DatetimeIndex(pypsa.Network(str(args.network)).snapshots)
     generation, capacity = extract(nc_files, snapshots)

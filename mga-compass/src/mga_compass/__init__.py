@@ -12,6 +12,7 @@ from .core import (
     build_outer_approximation,
     navigate_outer_approximation,
     upper_envelope,
+    SolverError,
 )
 from .manifest import OutputDimension, OutputDataset, Plot, Manifest, load_manifest
 from .dataset import (
@@ -59,6 +60,7 @@ __all__ = [
     "build_outer_approximation",
     "navigate_outer_approximation",
     "upper_envelope",
+    "SolverError",
     "OutputDimension",
     "OutputDataset",
     "Plot",

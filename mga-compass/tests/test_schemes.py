@@ -49,6 +49,11 @@ def test_Constraints_validate(points_df, constraints_df):
     with pytest.raises(ConstraintsValueError):
         bad_value.validate(points_df)
 
+    # a rounding error past the range, as navigate() can return, is accepted
+    rounded = constraints_df.copy()
+    rounded.loc["wind", "value"] = points_df["wind"].min() * (1 - 1e-15)
+    rounded.validate(points_df)
+
 
 def test_Constraints_changed(constraints_df):
     other = constraints_df.copy()
