@@ -4,3 +4,6 @@
 
 # Dataset bundle the backend downloads at startup (see mga_compass.dataset)
 app/backend/data/
+
+# Sphinx build output
+docs/_build/
