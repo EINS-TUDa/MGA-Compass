@@ -99,8 +99,25 @@ def test_unstacked_plot_sums_other_sets(written):
     assert result["data"] == [[1.0, 21.0], [301.0, 321.0]]
 
 
-def test_missing_combinations_count_as_zero(written):
+def test_members_absent_from_an_output_are_left_out(written):
+    """capacity has rows for wind only: gas does not exist in it."""
     directory, nos = written
     result = plot_data(directory, nos, "capacity", [Alpha(pd.Series({0: 0.5, 2: 0.5}))])
-    assert result["x_dim"] == TECHS
-    assert result["data"] == [[0.0, 2.0]]
+    assert result["x_dim"] == ["wind"]
+    assert result["data"] == [[2.0]]
+
+
+def test_combinations_missing_for_some_points_count_as_zero(tmp_path, written):
+    _, nos = written
+    directory = tmp_path / "partial"
+    capacity = pd.DataFrame({"point": [0, 1, 1, 2], "technology": ["wind", "gas", "wind", "wind"],
+                             "value": [1.0, 4.0, 2.0, 3.0]})  # gas only at point 1
+    generation = read_output_all(nos, written[0])
+    mga_format.write(directory, nos, {"generation": generation, "capacity": capacity})
+    result = plot_data(directory, mga_format.read(directory), "capacity", [Alpha(pd.Series({0: 0.5, 1: 0.5}))])
+    assert result["x_dim"] == TECHS  # gas exists (at point 1), in the set's order
+    assert result["data"] == [[2.0, 1.5]]  # gas: 0.5 * 0 + 0.5 * 4
+
+
+def read_output_all(nos, directory):
+    return mga_format.read_output(directory, "generation")

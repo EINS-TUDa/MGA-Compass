@@ -65,13 +65,18 @@ def category_styles(nos: NearOptimalSet) -> tuple[dict[str, str], dict[str, str]
 def mix_output(directory: str | Path, nos: NearOptimalSet, output: str, alphas: list[Alpha]) -> list[xr.DataArray]:
     """Output `output` mixed with each of the weights `alphas`: one DataArray per
     alpha, over the output's sets without ``point``, in the sets' member order.
-    Reads only the points with a weight in some alpha."""
+    Reads only the points with a weight in some alpha.
+
+    A set member with no rows at all in these points does not exist for this
+    output (e.g. a storage technology in a generation output) and is left out; a
+    combination missing for some points only counts as zero for them."""
     index = nos.manifest.outputs[output].index
     used = sorted({int(p) for alpha in alphas for p in alpha.index})
     df = read_output(directory, output, points=used)
     da = df.set_index(index)["value"].to_xarray()
     for set_name in index[1:]:
-        da = da.reindex({set_name: nos.sets[set_name][set_name].to_numpy()})
+        members = nos.sets[set_name][set_name]
+        da = da.reindex({set_name: members[members.isin(df[set_name])].to_numpy()})
     da = da.reindex({POINT: used}).fillna(0.0)  # a missing combination contributes nothing
     mixed = []
     for alpha in alphas:
@@ -99,8 +104,10 @@ def plot_data(
     plot = nos.manifest.plots[plot_name]
     keep = [plot.x] + ([plot.stack] if plot.stack else [])
     factor = display_factor(nos, plot.output) if display else 1.0
+    mixed_outputs = mix_output(directory, nos, plot.output, alphas)
+    x_values = mixed_outputs[0][plot.x].to_numpy()  # the members that exist in this output
     data = []
-    for da in (factor * mixed for mixed in mix_output(directory, nos, plot.output, alphas)):
+    for da in (factor * mixed for mixed in mixed_outputs):
         summed = da.sum([d for d in da.dims if d not in keep]) if set(da.dims) - set(keep) else da
         if plot.stack:
             data.append({
@@ -109,5 +116,4 @@ def plot_data(
             })
         else:
             data.append(summed.transpose(plot.x).values.tolist())
-    x_values = nos.sets[plot.x][plot.x].to_numpy()
     return {"x_dim": _axis_values(x_values), "data": data}
