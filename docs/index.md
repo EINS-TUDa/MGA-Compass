@@ -30,6 +30,9 @@ unexplored.
 MGA Surveyor finds the near-optimal solutions; MGA Compass lets you explore them. The two
 libraries are independent, and the platform can serve points from any source.
 
+**New here?** [Getting started](getting-started.md) takes you through both in about ten
+minutes.
+
 **Live demo:**
 [enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app](https://enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app/)
 
@@ -99,6 +102,7 @@ Near-Optimal Designs for Energy Systems," arXiv:2610.32759, 2026.
 :hidden:
 :maxdepth: 2
 
+getting-started
 surveyor/index
 compass/index
 reference/index

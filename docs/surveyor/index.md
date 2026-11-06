@@ -13,6 +13,7 @@ still unexplored.
 :align: center
 ```
 
+- **[Getting started](../getting-started.md):** a first run, start to finish.
 - **[Explanation](explanation.md):** how the method works and why.
 - **[How-to guides](how-to.md):** instructions for specific tasks.
 - **[Reference](../reference/index.md):** the run parameters and the API.
