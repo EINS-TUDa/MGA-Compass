@@ -69,6 +69,16 @@ Every point of the near-optimal set at that slack satisfies all of its halfspace
 
 ## manifest.json
 
+The manifest has three parts:
+
+- **Core** (required): written by Surveyor. Describes the points, duals and outer
+  approximation.
+- **Outputs** (optional): `sets` and `outputs`, present when the set has
+  [detailed outputs](#index-sets-and-outputs).
+- **Presentation** (optional): `plots`, used only by the web platform.
+
+A complete example with all three parts:
+
 ```json
 {
   "format": "mga-near-optimal-set",
@@ -99,23 +109,54 @@ Every point of the near-optimal set at that slack satisfies all of its halfspace
     }
   ],
   "fingerprint": {"network": "<sha256>", "pois": "<sha256>"},
-  "files": {"points.parquet": "<sha256>", "duals.parquet": "<sha256>", "outer.parquet": "<sha256>"}
+  "files": {
+    "points.parquet": "<sha256>",
+    "duals.parquet": "<sha256>",
+    "outer.parquet": "<sha256>",
+    "sets/snapshot.parquet": "<sha256>",
+    "sets/technology.parquet": "<sha256>",
+    "outputs/generation.parquet": "<sha256>",
+    "outputs/capacity.parquet": "<sha256>"
+  },
+
+  "sets": {
+    "snapshot": {"description": "Time steps of the model."},
+    "technology": {"description": "Generation and storage technologies."}
+  },
+  "outputs": {
+    "generation": {"index": ["point", "snapshot", "technology"], "unit": "MW",
+                   "description": "Electricity generation per technology."},
+    "capacity": {"index": ["point", "technology"], "unit": "MW",
+                 "description": "Installed capacity per technology."}
+  },
+
+  "plots": {
+    "generation": {"type": "stacked_timeseries", "output": "generation",
+                   "x": "snapshot", "stack": "technology"},
+    "capacity": {"type": "bar", "output": "capacity", "x": "technology"}
+  }
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `format`, `version` | Always `"mga-near-optimal-set"` and the format version. A reader refuses versions it does not know. |
-| `created` | When the set was exported, ISO 8601 with time zone. |
-| `software` | Versions of the packages that produced it. |
-| `cost.name` | Name of the cost column in `points.parquet`. |
-| `cost.unit` | Unit of the cost. |
-| `cost.optimum` | The optimal cost $\nu^*$. |
-| `pois` | The properties of interest, in column order: name, unit, description, and the definition as Surveyor's `dimensions` entry (component class → attribute → {component: coefficient}). |
-| `slack_levels` | One entry per slack level that was explored: the settings of the run (`norm`, `normalize`, `tol` and its unit, `vertex_method`, `objective_cuts`) and its result: `iterations` (nearest-point solves in total, including earlier runs that were resumed), the final `gap` (in the unit of `tol`) and whether it `converged` (`gap` below `tol`). |
-| `fingerprint.network` | Identifies the input network, so the set cannot be used with a different one. |
-| `fingerprint.pois` | Identifies the PoI definitions. |
-| `files` | sha256 of every other file in the directory, including those under `sets/` and `outputs/`. |
+| Field | Part | Meaning |
+|---|---|---|
+| `format`, `version` | core | Always `"mga-near-optimal-set"` and the format version. A reader refuses versions it does not know. |
+| `created` | core | When the set was exported, ISO 8601 with time zone. |
+| `software` | core | Versions of the packages that produced it. |
+| `cost.name` | core | Name of the cost column in `points.parquet`. |
+| `cost.unit` | core | Unit of the cost. |
+| `cost.optimum` | core | The optimal cost $\nu^*$. |
+| `pois` | core | The properties of interest, in column order: name, unit, description, and the definition as Surveyor's `dimensions` entry (component class → attribute → {component: coefficient}). |
+| `slack_levels` | core | One entry per slack level that was explored: the settings of the run (`norm`, `normalize`, `tol` and its unit, `vertex_method`, `objective_cuts`) and its result: `iterations` (nearest-point solves in total, including earlier runs that were resumed), the final `gap` (in the unit of `tol`) and whether it `converged` (`gap` below `tol`). |
+| `fingerprint.network` | core | Identifies the input network, so the set cannot be used with a different one. |
+| `fingerprint.pois` | core | Identifies the PoI definitions. |
+| `files` | core | sha256 of every other file in the directory, keyed by its path relative to the directory, including those under `sets/` and `outputs/`. |
+| `sets` | outputs | The index sets; see [](#in-the-manifest). |
+| `outputs` | outputs | The outputs; see [](#in-the-manifest). |
+| `plots` | presentation | The plots the web platform shows; see [](#presentation-part-web-platform-only). |
+
+A reader ignores the optional parts it does not use: the Python API needs only the core, the
+web platform needs all three.
 
 ## Index sets and outputs
 
@@ -168,18 +209,7 @@ Rules:
 
 ### In the manifest
 
-```json
-"sets": {
-  "snapshot": {"description": "Time steps of the model."},
-  "technology": {"description": "Generation and storage technologies."}
-},
-"outputs": {
-  "generation": {"index": ["point", "snapshot", "technology"], "unit": "MW",
-                 "description": "Electricity generation per technology."},
-  "capacity": {"index": ["point", "technology"], "unit": "MW",
-               "description": "Installed capacity per technology."}
-}
-```
+See the [complete example](#manifestjson) above.
 
 | Field | Meaning |
 |---|---|
