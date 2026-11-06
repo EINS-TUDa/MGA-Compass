@@ -35,22 +35,18 @@ double description instead.
 
 ## Norm
 
-Every method takes `norm`, one of `"l1"`, `"l2"` or `"linf"`, which fixes how distances, and
-so the tolerance, are measured. `BilevelMethod` supports only `"linf"`. The closest-point
-solve against a PyPSA network ({py:func}`~mga_surveyor.pypsa_ext.make_closest_point_fn`)
-currently supports `"l1"` and `"linf"`. With [normalization](normalization.md), `"linf"`
-bounds the error of every PoI individually, which is usually what you want.
+The norm fixes what "furthest" and "nearest" mean, and so what the tolerance guarantees.
+$\ell_\infty$ is usually the right choice: with [normalization](normalization.md) it bounds
+the error of every PoI individually, rather than a sum or an average over all of them. The
+$\ell_2$ norm needs a quadratic objective, which only Gurobi supports, and the nearest-point
+solve against a PyPSA network currently supports only $\ell_1$ and $\ell_\infty$.
 
 ## Projection backend
 
-The per-vertex projection $f(v)$ runs on Gurobi or HiGHS, chosen with `projection_backend`:
-
-| Backend | Norms | Licence |
-|---|---|---|
-| `"gurobi"` ({py:mod}`~mga_surveyor.gurobi_projection`) | `l1`, `l2`, `linf` | Commercial (free for academic use) |
-| `"highs"` ({py:mod}`~mga_surveyor.highs_projection`) | `l1`, `linf` | Open source |
-
-HiGHS has no quadratic objectives, hence no $\ell_2$.
+The per-vertex projection $f(v)$ is a small convex problem, solved with Gurobi
+({py:mod}`~mga_surveyor.gurobi_projection`) or HiGHS
+({py:mod}`~mga_surveyor.highs_projection`). HiGHS is open source and handles $\ell_1$ and
+$\ell_\infty$; Gurobi needs a licence but also handles $\ell_2$.
 
 ## Several trial points per iteration
 

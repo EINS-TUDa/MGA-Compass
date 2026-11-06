@@ -38,20 +38,13 @@ unchanged in the normalized coordinates.
 - **Everything written to disk stays in real units.** Only what the `Method` sees is
   normalized.
 
-## The tolerance
+## What this means for the tolerance
 
-With normalization on (the default in
-{py:func}`~mga_surveyor.pypsa_ext.generate_mga_files`), `tol` is a **percentage of each PoI's
-achievable range**. Every normalized PoI spans a width of 2, so `tol=4` corresponds to a
-distance of $0.08$ in the normalized cube. The norm decides what that percentage bounds:
-
-| `norm` | `tol=4` guarantees |
-|---|---|
-| `"linf"` | every PoI individually is within 4% of its range |
-| `"l1"` | the per-PoI percentage errors sum to at most 4 |
-| `"l2"` | the root-sum-square of the per-PoI percentage errors is at most 4 |
-
-With `normalize=False`, `tol` is a plain distance in real units.
+Normalization also gives the tolerance a natural unit. In the normalized coordinates every
+PoI spans the same width, so a single tolerance means the same thing for every PoI: a
+percentage of its achievable range, whatever its physical unit. That is why, with
+normalization on, `tol` is given as a percentage; see [](../reference/surveyor-parameters.md#tolerance)
+for exactly what it guarantees under each norm.
 
 ## In the code
 

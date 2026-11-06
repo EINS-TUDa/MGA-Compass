@@ -15,7 +15,7 @@ still unexplored.
 
 - **[Explanation](explanation.md):** how the method works and why.
 - **[How-to guides](how-to.md):** instructions for specific tasks.
-- **[Reference](../reference/index.md):** the API.
+- **[Reference](../reference/index.md):** the run parameters and the API.
 
 ```{toctree}
 :hidden:
