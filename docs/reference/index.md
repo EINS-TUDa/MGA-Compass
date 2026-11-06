@@ -7,5 +7,8 @@ Technical descriptions to look things up in.
 
 surveyor-parameters
 surveyor-api
+dataset-bundle
+server-settings
+scripts
 compass-api
 ```
