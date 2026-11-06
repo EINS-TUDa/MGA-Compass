@@ -108,7 +108,7 @@ A complete example with all three parts:
       "converged": true
     }
   ],
-  "fingerprint": {"network": "<sha256>", "pois": "<sha256>"},
+  "fingerprint": {"network": "<sha256>"},
   "files": {
     "points.parquet": "<sha256>",
     "duals.parquet": "<sha256>",
@@ -148,8 +148,7 @@ A complete example with all three parts:
 | `cost.optimum` | core | The optimal cost $\nu^*$. |
 | `pois` | core | The properties of interest, in column order: name, unit, description, and the definition as Surveyor's `dimensions` entry (component class → attribute → {component: coefficient}). |
 | `slack_levels` | core | One entry per slack level that was explored: the settings of the run (`norm`, `normalize`, `tol` and its unit, `vertex_method`, `objective_cuts`) and its result: `iterations` (nearest-point solves in total, including earlier runs that were resumed), the final `gap` (in the unit of `tol`) and whether it `converged` (`gap` below `tol`). |
-| `fingerprint.network` | core | Identifies the input network, so the set cannot be used with a different one. |
-| `fingerprint.pois` | core | Identifies the PoI definitions. |
+| `fingerprint.network` | core | Identifies the input network, so the set cannot be used with a different one; see [](#network-fingerprint). The PoIs need no fingerprint: their full definitions are in `pois`. |
 | `files` | core | sha256 of every other file in the directory, keyed by its path relative to the directory, including those under `sets/` and `outputs/`. |
 | `sets` | outputs | The index sets; see [](#in-the-manifest). |
 | `outputs` | outputs | The outputs; see [](#in-the-manifest). |
@@ -222,8 +221,14 @@ See the [complete example](#manifestjson) above.
 |---|---|
 | `plots` | {name: {`type`, `output`, `x`, `stack`}}: the plots the platform shows. `type` is `"bar"`, `"timeseries"`, `"stacked_bar"` or `"stacked_timeseries"`; `output` names an output; `x` is the set on the x-axis; `stack` is the set stacked as categories, required for the `stacked_` types. Labels and colours come from the sets' `label` and `color` attributes. |
 
-## Open questions
+## Network fingerprint
 
-- **Fingerprints:** exactly what goes into each hash. The network fingerprint should cover the
-  network's input data but not its optimization results, so that solving it again does not
-  change it.
+`fingerprint.network` is the sha256 of the network's **input data**:
+
+- the snapshots and their weightings;
+- every component's static attributes marked as input in PyPSA;
+- every component's time series marked as input in PyPSA.
+
+Optimization results, such as optimized capacities, dispatch and prices, are left out, so
+solving the network again does not change the fingerprint, while changing any cost, limit or
+time series does. Two sets with the same fingerprint were computed from the same model.
