@@ -1,4 +1,6 @@
-"""The near-optimal set format: see :mod:`mga_format.near_optimal_set`."""
+"""The near-optimal set format: see :mod:`mga_format.near_optimal_set`, and
+:mod:`mga_format.archive` for publishing a set as one file."""
+from .archive import fetch, pack, unpack
 from .near_optimal_set import (
     FORMAT,
     VERSION,
@@ -32,6 +34,9 @@ __all__ = [
     "Plot",
     "Poi",
     "SlackLevel",
+    "fetch",
+    "pack",
+    "unpack",
     "read",
     "read_manifest",
     "read_output",
