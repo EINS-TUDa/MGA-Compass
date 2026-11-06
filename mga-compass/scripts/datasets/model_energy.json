@@ -1,0 +1,32 @@
+{
+  "cost": {
+    "name": "TOTEX",
+    "unit": "€",
+    "display": {"unit": "M€", "factor": 1e-6}
+  },
+  "pois": {
+    "wind": {"unit": "MW", "description": "Installed wind power capacity."},
+    "solar": {"unit": "MW", "description": "Installed solar PV capacity."},
+    "battery": {
+      "unit": "MW",
+      "description": "Installed battery storage power (charge/discharge) rating. Energy capacity (MWh) equals this value times the storage unit's max_hours (3h for this model)."
+    },
+    "hydrogen": {"unit": "MWh", "description": "Installed hydrogen storage capacity."}
+  },
+  "sets": {
+    "snapshot": {"description": "Time steps of the model."},
+    "technology": {"description": "Generators, links, storage units and stores of the model."}
+  },
+  "outputs": {
+    "generation": {"unit": "MW", "description": "Electricity generation per generator."},
+    "capacity": {
+      "unit": "MW",
+      "description": "Installed capacity per component: power capacity (MW) for generators, links and storage units, energy capacity (MWh) for stores."
+    }
+  },
+  "plots": {
+    "generation": {"type": "stacked_timeseries", "output": "generation", "x": "snapshot", "stack": "technology"},
+    "capacity": {"type": "bar", "output": "capacity", "x": "technology"},
+    "total generation": {"type": "timeseries", "output": "generation", "x": "snapshot"}
+  }
+}

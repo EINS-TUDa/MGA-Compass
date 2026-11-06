@@ -1,19 +1,23 @@
-"""Write a dataset bundle's data files from a finished run_custom_mga.py run on
-PyPSA-Eur, ready for scripts/publish_dataset.py.
+"""Build the near-optimal set of a finished run_custom_mga.py run on PyPSA-Eur,
+ready for scripts/publish_dataset.py.
 
-Takes the run's optimum, its closest-point results and a set of box
-(furthest-point) results -- by default the run's own; pass --box-dir for ones
-re-solved separately -- links them into one consolidated layout, and writes:
+Takes the run's optimum, its closest-point results, its run summary and a set of
+box (furthest-point) results -- by default the run's own; pass --box-dir for ones
+re-solved separately -- links them into one layout, collects them as a
+near-optimal set (mga_surveyor.collect_near_optimal_set), and adds two outputs:
 
-- points.parquet / duals.parquet (mga_surveyor.consolidate_mga_results, one row
-  per result file);
-- generation_over_snapshots.parquet: Europe-wide electricity generation per
-  carrier and snapshot (MW) -- every generator plus hydro/PHS dispatch; battery
-  and H2 discharge are storage, not generation;
-- installed_capacity.parquet: Europe-wide installed power capacity per carrier
-  (MW) -- generators, hydro/PHS, battery charger/discharger, H2 electrolysis and
-  fuel cell; storage energy (MWh) is left out so the bars share one unit, and DC
+- generation: Europe-wide electricity generation per carrier and snapshot (MW)
+  -- every generator plus hydro/PHS dispatch; battery and H2 discharge are
+  storage, not generation;
+- capacity: Europe-wide installed power capacity per carrier (MW) --
+  generators, hydro/PHS, battery charger/discharger, H2 electrolysis and fuel
+  cell; storage energy (MWh) is left out so the bars share one unit, and DC
   links are transmission.
+
+Names, units, descriptions, labels, colours, plots and display units come from
+scripts/datasets/pypsa_eur_34.json. Values stay in the model's units (MW, MWh,
+€/a); the platform shows them in GW, TWh and bn €/a through the config's display
+entries. Writes <output-dir>/set and <output-dir>/near-optimal-set.zip.
 
     uv run --extra scripts python scripts/europe/build_dataset_from_results.py \\
         --run-dir /path/to/mga_results_4 --box-dir /path/to/mga_results_4_box/slack_0.05 \\
@@ -21,6 +25,7 @@ re-solved separately -- links them into one consolidated layout, and writes:
 """
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -29,44 +34,16 @@ import pypsa
 import xarray as xr
 from netCDF4 import Dataset
 
-from mga_compass import write_dataarray, write_frame
-from mga_surveyor import consolidate_mga_results
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/, for dataset_config
+from dataset_config import DatasetConfig, long_output, write_set  # noqa: E402
+
+from mga_surveyor import collect_near_optimal_set  # noqa: E402
+from mga_surveyor.pypsa_ext import RUN_SUMMARY_NAME  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("build_dataset_from_results")
 
-OBJ_LABEL = "system_cost"
-#: Display names for the run's dimension keys (run_custom_mga.py's DIMENSIONS_SPEC)
-#: and objective -- the names the platform shows; the manifest uses the same.
-DISPLAY_NAMES = {
-    "onwind": "Onshore Wind",
-    "offwind-ac": "Offshore Wind",
-    "offwind-float": "Floating Wind",
-    "solar": "Solar",
-    "solar-hsat": "Tracking Solar",
-    "CCGT": "Gas Power",
-    "battery": "Battery Storage",
-    "H2": "Hydrogen Storage",
-    OBJ_LABEL: "System Cost",
-}
-#: Factor from the run's units (MW, MWh, €/a) to the platform's, chosen so every
-#: dimension spans at most a few thousand: navigate/point_2_alpha solve LPs over
-#: these values, and with System Cost ~4e11 beside capacities ~1e5 HiGHS gave up
-#: on ~10% of points. Must match the manifest's dimension_unit.
-UNIT_FACTORS = {
-    "Onshore Wind": 1e-3,  # GW
-    "Offshore Wind": 1e-3,
-    "Floating Wind": 1e-3,
-    "Solar": 1e-3,
-    "Tracking Solar": 1e-3,
-    "Gas Power": 1e-3,
-    "Battery Storage": 1e-3,  # GWh
-    "Hydrogen Storage": 1e-6,  # TWh
-    "System Cost": 1e-9,  # bn €/a
-}
-#: Decimals kept after conversion: 1 kW / 1 kWh / 1 MWh / €1000 -- also turns the
-#: solver noise of unbuilt technologies (~1e-15) into exact zeros.
-UNIT_DECIMALS = 6
+DATASET_CONFIG = Path(__file__).resolve().parent.parent / "datasets" / "pypsa_eur_34.json"
 #: (component, nominal-capacity variable, carriers counted as power capacity)
 CAPACITY_COMPONENTS = [
     ("generators", "generators_p_nom_opt", None),  # every carrier
@@ -76,11 +53,16 @@ CAPACITY_COMPONENTS = [
 
 
 def link_layout(run_dir: Path, box_dir: Path, slack: str, layout_dir: Path) -> None:
-    """Symlink the run's optimum, its closest-point results and the chosen box
-    results into one `output_dir` layout consolidate_mga_results can scan."""
+    """Symlink the run's optimum, its closest-point results, its run summary and
+    the chosen box results into one `output_dir` layout collect_near_optimal_set
+    can read."""
     target = layout_dir / f"slack_{slack}"
     target.mkdir(parents=True, exist_ok=False)
     (layout_dir / "optimal.nc").symlink_to(run_dir / "optimal.nc")
+    summary = run_dir / f"slack_{slack}" / RUN_SUMMARY_NAME
+    if not summary.exists():
+        raise SystemExit(f"{summary} not found: the run has no run summary (older runs do not write one)")
+    (target / RUN_SUMMARY_NAME).symlink_to(summary)
     for f in sorted((run_dir / f"slack_{slack}").glob("mga_closest_result_*.nc")):
         (target / f.name).symlink_to(f)
     box = sorted(box_dir.glob("mga_furthest_result_*.nc"))
@@ -104,6 +86,8 @@ def _sum_by(values: np.ndarray, labels: list[str], order: list[str]) -> np.ndarr
 
 
 def extract(nc_files: list[Path], snapshots: pd.DatetimeIndex) -> tuple[xr.DataArray, xr.DataArray]:
+    """Generation and capacity of each result file, indexed by its position,
+    which is its point in the set."""
     with Dataset(nc_files[0]) as ds0:
         gen_carriers = list(dict.fromkeys(_strings(ds0, "generators_carrier") + _strings(ds0, "storage_units_carrier")))
         cap_carriers = []
@@ -134,15 +118,6 @@ def extract(nc_files: list[Path], snapshots: pd.DatetimeIndex) -> tuple[xr.DataA
     return gen, cap
 
 
-def to_platform_units(points: pd.DataFrame, duals: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert display-named points and duals to UNIT_FACTORS' units. A dual is the
-    cost's sensitivity to a dimension, so it scales by cost factor / that factor."""
-    factors = pd.Series(UNIT_FACTORS)
-    points = (points * factors[points.columns]).round(UNIT_DECIMALS)
-    duals = duals * (UNIT_FACTORS[DISPLAY_NAMES[OBJ_LABEL]] / factors[duals.columns])
-    return points, duals
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -157,19 +132,22 @@ def main() -> None:
     layout = args.output_dir / "layout"
     link_layout(run_dir, box_dir, args.slack, layout)
 
-    points, duals, nc_files = consolidate_mga_results(layout, OBJ_LABEL)
-    points, duals = to_platform_units(points.rename(columns=DISPLAY_NAMES), duals.rename(columns=DISPLAY_NAMES))
-    logger.info("points %s, duals %s", points.shape, duals.shape)
+    dataset = DatasetConfig.load(DATASET_CONFIG)
+    nos, files = collect_near_optimal_set(layout, **dataset.collect_arguments())
+    logger.info("points %s", nos.points.shape)
     snapshots = pd.DatetimeIndex(pypsa.Network(str(args.network)).snapshots)
-    generation, capacity = extract(nc_files, snapshots)
+    generation, capacity = extract(files, snapshots)
 
-    write_frame(points, args.output_dir / "points.parquet")
-    write_frame(duals, args.output_dir / "duals.parquet")
-    # 0.1 MW in float32: ~32 MB instead of ~112 MB, invisible in a plot.
-    write_dataarray(generation, args.output_dir / "generation_over_snapshots.parquet", decimals=1, float32=True)
-    write_dataarray(capacity, args.output_dir / "installed_capacity.parquet")
+    outputs = {"generation": long_output(generation), "capacity": long_output(capacity)}
+    members = {
+        "snapshot": list(snapshots),
+        "technology": list(dict.fromkeys([*generation.technology.values, *capacity.technology.values])),
+    }
+    nos, outputs = dataset.apply(nos, outputs, members)
+    archive = write_set(nos, outputs, args.output_dir / "set")
     logger.info("generation %s %s, capacity %s %s", dict(generation.sizes), list(generation.technology.values),
                 dict(capacity.sizes), list(capacity.technology.values))
+    logger.info("wrote %s and %s", args.output_dir / "set", archive)
 
 
 if __name__ == "__main__":

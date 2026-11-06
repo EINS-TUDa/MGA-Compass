@@ -1,18 +1,17 @@
-"""Generate the MGA dataset consumed by the MGA Compass server.
+"""Generate the near-optimal set the MGA Compass server serves.
 
-Solves a PyPSA example network, then hands it to
-mga_surveyor.generate_mga_files (which drives a CddMethod per
-sub-optimality (slack) level to discover near-optimal points, writing
-result .nc files), reads the result back via
-mga_surveyor.consolidate_mga_results, and writes the data files of a
-dataset bundle (points.parquet, duals.parquet, installed_capacity.parquet,
-generation_over_snapshots.parquet; see mga_compass.dataset) from that.
-scripts/publish_dataset.py then adds the manifest and checksums and uploads
-the bundle for the server to download.
+Solves a PyPSA example network, hands it to mga_surveyor.generate_mga_files
+(one exploration per sub-optimality (slack) level, writing a result .nc file per
+solve), collects the result as a near-optimal set (mga_surveyor.
+collect_near_optimal_set), adds each point's installed capacity and generation
+as outputs, and applies the dataset config (scripts/datasets/model_energy.json:
+units, descriptions, plots, display units; see dataset_config.py). Writes the
+set to <output-dir>/set and its archive to <output-dir>/near-optimal-set.zip,
+which scripts/publish_dataset.py uploads for the server to download.
 
 Requires the "scripts" extra (`uv sync --extra scripts`) for mga-surveyor/pypsa/netCDF4/gurobipy.
 
-Run with: uv run python scripts/generate_dataset.py
+Run with: uv run python scripts/generate_dataset.py --tol 5 --max-iter 120 --max-parallel 4
 """
 import argparse
 import logging
@@ -27,8 +26,10 @@ import pypsa
 import xarray as xr
 from netCDF4 import Dataset
 
-from mga_compass import write_dataarray, write_frame
-from mga_surveyor import consolidate_mga_results, generate_mga_files
+from dataset_config import DatasetConfig, long_output, write_set
+from mga_surveyor import collect_near_optimal_set, generate_mga_files
+
+DATASET_CONFIG = Path(__file__).parent / "datasets" / "model_energy.json"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 # Silence PyPSA's own per-variable INFO log when assigning the solution back
@@ -241,22 +242,25 @@ def main(network: NetworkConfig = MODEL_ENERGY, config: RunConfig = RUN_CONFIG) 
         max_parallel=config.max_parallel, solver_options=config.solver_options,
         use_objective_cuts=config.use_objective_cuts,
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(config.output_dir, config.obj_label)
-    logging.info(f"Total points: {len(points_df)}")
+    dataset = DatasetConfig.load(DATASET_CONFIG)
+    nos, files = collect_near_optimal_set(config.output_dir, **dataset.collect_arguments())
+    logging.info(f"Total points: {len(nos.points)}")
 
-    write_frame(points_df, config.output_dir / "points.parquet")
-    write_frame(duals_df, config.output_dir / "duals.parquet")
-
+    snapshots = pd.DatetimeIndex(n.snapshots)
     generation, installed_capacity = extract_generation_and_capacity(
-        nc_files, points_df.index, pd.DatetimeIndex(n.snapshots), network.capacity_vars
+        files, nos.points.index.rename("index"), snapshots, network.capacity_vars
     )
-    write_dataarray(generation, config.output_dir / "generation_over_snapshots.parquet")
-    write_dataarray(installed_capacity, config.output_dir / "installed_capacity.parquet")
+    outputs = {"generation": long_output(generation), "capacity": long_output(installed_capacity)}
+    members = {
+        "snapshot": list(snapshots),
+        "technology": list(dict.fromkeys([*generation.technology.values, *installed_capacity.technology.values])),
+    }
+    nos, outputs = dataset.apply(nos, outputs, members)
+    archive = write_set(nos, outputs, config.output_dir / "set")
 
-    logging.info(f"Saved generation {generation.shape} (index x snapshot x technology)")
-    logging.info(f"Saved installed_capacity {installed_capacity.shape} (index x technology)")
-    logging.info(points_df)
-    logging.info(duals_df)
+    logging.info(f"generation {generation.shape} (point x snapshot x technology)")
+    logging.info(f"installed_capacity {installed_capacity.shape} (point x technology)")
+    logging.info(f"Wrote {config.output_dir / 'set'} and {archive}")
 
 
 def parse_args() -> argparse.Namespace:
