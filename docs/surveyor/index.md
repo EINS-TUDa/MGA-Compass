@@ -13,32 +13,13 @@ still unexplored.
 :align: center
 ```
 
-## Installation
-
-From a clone of the repository, using [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --package mga-surveyor
-```
-
-`gurobipy` and `highspy` are installed by default. `CddMethod` additionally needs the `cdd`
-extra, built from the patched, vendored `pycddlib`; see `mga-surveyor/vendor/cdd/README.md`.
-
-## How it works
-
-These pages explain the method behind the package and how each part maps onto the code.
-They follow the G-ORACLE paper
-([arXiv:2610.32759](https://arxiv.org/abs/2610.32759)), which has the full proofs and the
-numerical experiments.
+- **[Explanation](explanation.md):** how the method works and why.
+- **[How-to guides](how-to.md):** instructions for specific tasks.
+- **[Reference](../reference/index.md):** the API.
 
 ```{toctree}
-:maxdepth: 1
+:hidden:
 
-near-optimal-set
-oracle
-g-oracle
-methods
-normalization
+explanation
+how-to
 ```
-
-For the full interface, see the [API reference](../reference/surveyor-api.md).
