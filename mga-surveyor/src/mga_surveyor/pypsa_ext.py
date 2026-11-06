@@ -41,7 +41,7 @@ make_oracle_fns builds all three of the above in one call, sharing
 n/dimensions/output_dir -- a convenience for feeding explore.drive's three
 callback parameters directly.
 
-generate_mga_files runs a CddMethod (float) or BBMethod (vertex_method) per
+generate_mga_files runs a BBMethod or CddMethod (float) (vertex_method) per
 slack level (via explore.drive) against a real network, writing every result to .nc files
 under output_dir -- resuming from whatever's already there (cached
 optimal/furthest-point solves are read back, and existing closest-point
@@ -1428,10 +1428,10 @@ def generate_mga_files(
     verbose: bool = True,
     normalize: bool = True,
     use_objective_cuts: bool = True,
-    vertex_method: str = "cdd",
+    vertex_method: str = "bb",
     **kwargs: Any,
 ) -> None:
-    """Run a `CddMethod` (float arithmetic) or `BBMethod` (see `vertex_method`) per slack level (`explore.drive`, up to
+    """Run a `BBMethod` or `CddMethod` (float arithmetic) (see `vertex_method`) per slack level (`explore.drive`, up to
     `max_iter` iterations each) against a real, already-solved PyPSA
     network `n`, writing every result to `.nc` files under `output_dir`.
     Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
@@ -1583,9 +1583,16 @@ def generate_mga_files(
     corrupted by hand) could otherwise seed the Method with
     points/halfspaces that don't describe a coherent region.
 
-    `vertex_method` (default `"cdd"`): `"cdd"` runs `CddMethod` with its
-    float backend, `"bb"` runs `BBMethod` (Qhull's polar dual). Both reach
-    the same gap; see their docstrings for the trade-offs.
+    `vertex_method` (default `"bb"`): `"bb"` runs `BBMethod` (Qhull's
+    polar dual), `"cdd"` runs `CddMethod` with its float backend. `"bb"` is
+    the default because on PyPSA-Eur it matched exact (rational) vertex
+    enumeration at every iteration at about the same speed, whereas cdd's
+    float backend dropped vertices as cuts accumulated and underestimated
+    the gap in later iterations, which can stop a run before it has
+    converged (see the G-ORACLE paper, arXiv:2610.32759). `"cdd"` remains
+    the only choice that batches trial points (`find_pool_trial_points`)
+    when `max_parallel > 1`; with `"bb"`, `drive` solves one target per
+    iteration.
 
     `solver_name` also becomes each slack level's Method's
     `projection_backend` (the inner-hull projection solver), so it must
