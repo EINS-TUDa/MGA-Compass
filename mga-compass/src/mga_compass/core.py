@@ -34,6 +34,34 @@ def _solve(mdl: linopy.Model, what: str, solver_name: str, solver_options: dict 
         raise SolverError(f"{what}: status={mdl.status}, condition={mdl.termination_condition}")
 
 
+# ---------------------------------------------------------------- column scaling
+#
+# navigate, interpolate and point_2_alpha solve small LPs over the points'
+# values. Columns of very different magnitude (a cost of ~1e11 next to
+# capacities of ~1e4) make those LPs numerically ill-conditioned, and solvers
+# then report feasible problems as infeasible. So each public function divides
+# every column by its own scale before building its LPs and converts the results
+# back. Dividing column j by s_j > 0 maps sum_i alpha_i z_ij to the same sum
+# divided by s_j, so every constraint and objective keeps the same feasible and
+# optimal weights alpha: the results are unchanged, only better conditioned.
+# A division only, no shift, so interpolate's threshold, relative to the cost's
+# magnitude, keeps its meaning.
+
+
+def _column_scales(points: Points) -> pd.Series:
+    """Each column's largest absolute value, or 1 for an all-zero column."""
+    scales = points.abs().max()
+    return scales.where(scales > 0, 1.0)
+
+
+def _scale_constraints(constraints: Constraints, scales: pd.Series) -> Constraints:
+    scaled = constraints.copy(deep=True)
+    factors = scales.reindex(scaled.index)
+    scaled["value"] = scaled["value"] / factors
+    scaled["delta"] = scaled["delta"] / factors
+    return scaled
+
+
 def navigate(
     points: Points,
     constraints: Constraints,
@@ -42,6 +70,25 @@ def navigate(
     solver_options: dict | None = None,
 ) -> tuple[Constraints, Point]:
     constraints.validate(points)
+    scales = _column_scales(points)
+    scaled_input = _scale_constraints(constraints, scales)
+    scaled_output, alpha = _navigate_scaled(points / scales, scaled_input, obj_label, solver_name, solver_options)
+    output_df = constraints.copy(deep=True)
+    output_df["direction"] = scaled_output["direction"]
+    # Unchanged deltas are copied, not scaled back, so that rounding cannot make
+    # describe_changes report a change that navigation never made.
+    changed = scaled_output["delta"] != scaled_input["delta"]
+    output_df.loc[changed, "delta"] = scaled_output.loc[changed, "delta"] * scales.reindex(output_df.index)[changed]
+    return output_df, alpha_2_point(alpha, points)
+
+
+def _navigate_scaled(
+    points: Points,
+    constraints: Constraints,
+    obj_label: str,
+    solver_name: str,
+    solver_options: dict | None,
+) -> tuple[Constraints, Alpha]:
     output_df = constraints.copy(deep=True)
     mdl = linopy.Model()
     alpha = mdl.add_variables(coords=[points.index], lower=0, name="alpha")
@@ -119,8 +166,7 @@ def navigate(
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
     _solve(mdl, "navigate: minimum cost", solver_name, solver_options)
 
-    point = alpha_2_point(_normalized_alpha(alpha.solution.values, points.index), points)
-    return output_df, point
+    return output_df, _normalized_alpha(alpha.solution.values, points.index)
 
 
 _interpolate_logger = logging.getLogger(__name__ + ".interpolate")
@@ -135,12 +181,28 @@ def interpolate(
     solver_name: str = "highs",
     solver_options: dict | None = None,
 ) -> list[Breakpoint]:
+    scales = _column_scales(points)
+    breakpoints = _interpolate_scaled(
+        points / scales, point_start / scales, point_end / scales, obj_label, threshold, solver_name, solver_options,
+    )
+    return [Breakpoint(bp.beta, bp.alpha, alpha_2_point(bp.alpha, points)) for bp in breakpoints]
+
+
+def _interpolate_scaled(
+    points: Points,
+    point_start: Point,
+    point_end: Point,
+    obj_label: str,
+    threshold: float,
+    solver_name: str,
+    solver_options: dict | None,
+) -> list[Breakpoint]:
     output = []
 
     def _period_interpolate(beta_start, p_start, beta_end, p_end, depth=0):
         beta_mid = (beta_start + beta_end) / 2
         p_mid = (p_start + p_end) / 2
-        alpha_mid_interpolate = point_2_alpha(p_mid, points, obj_label, solver_name, solver_options)
+        alpha_mid_interpolate = _point_2_alpha_scaled(p_mid, points, obj_label, solver_name, solver_options)
         p_mid_interpolate = alpha_2_point(alpha_mid_interpolate, points)
         gap = p_mid[obj_label] - p_mid_interpolate[obj_label]
         abs_threshold = threshold * abs(p_mid[obj_label])
@@ -152,8 +214,8 @@ def interpolate(
 
     _interpolate_logger.info("point_start:\n%s", point_start.to_string())
     _interpolate_logger.info("point_end:\n%s", point_end.to_string())
-    alpha_start = point_2_alpha(point_start, points, obj_label, solver_name, solver_options)
-    alpha_end = point_2_alpha(point_end, points, obj_label, solver_name, solver_options)
+    alpha_start = _point_2_alpha_scaled(point_start, points, obj_label, solver_name, solver_options)
+    alpha_end = _point_2_alpha_scaled(point_end, points, obj_label, solver_name, solver_options)
     p_start = alpha_2_point(alpha_start, points)
     p_end = alpha_2_point(alpha_end, points)
     output.append(Breakpoint(0, alpha_start, p_start))
@@ -198,6 +260,17 @@ def point_2_alpha(
     obj_label: str,
     solver_name: str = "highs",
     solver_options: dict | None = None,
+) -> Alpha:
+    scales = _column_scales(points)
+    return _point_2_alpha_scaled(point / scales, points / scales, obj_label, solver_name, solver_options)
+
+
+def _point_2_alpha_scaled(
+    point: Point,
+    points: Points,
+    obj_label: str,
+    solver_name: str,
+    solver_options: dict | None,
 ) -> Alpha:
     mdl = linopy.Model()
     alpha = mdl.add_variables(coords=[points.index], lower=0, name="alpha")
