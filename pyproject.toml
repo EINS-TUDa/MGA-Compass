@@ -1,2 +1,2 @@
 [tool.uv.workspace]
-members = ["mga-surveyor", "mga-compass", "app/backend"]
+members = ["mga-format", "mga-surveyor", "mga-compass", "app/backend"]

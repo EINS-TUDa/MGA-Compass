@@ -33,6 +33,8 @@ dependencies = [
     "highspy>=1.15.1",
     # Parquet I/O for dataset bundles (mga_compass.dataset).
     "pyarrow",
+    # Reads the near-optimal sets MGA Surveyor writes.
+    "mga-format",
 ]
 
 [project.optional-dependencies]
@@ -48,3 +50,4 @@ scripts = [
 
 [tool.uv.sources]
 mga-surveyor = { workspace = true }
+mga-format = { workspace = true }

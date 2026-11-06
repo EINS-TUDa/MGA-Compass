@@ -7,8 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from mga_compass import near_optimal_set as nos_format
-from mga_compass.near_optimal_set import (
+from mga_format import near_optimal_set as nos_format
+from mga_format.near_optimal_set import (
     MANIFEST_NAME,
     Manifest,
     NearOptimalSet,

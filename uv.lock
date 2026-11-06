@@ -15,6 +15,7 @@ resolution-markers = [
 [manifest]
 members = [
     "mga-compass",
+    "mga-format",
     "mga-surveyor",
     "mgaserver",
 ]
@@ -944,6 +945,7 @@ source = { editable = "mga-compass" }
 dependencies = [
     { name = "highspy" },
     { name = "linopy" },
+    { name = "mga-format" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pandera" },
@@ -968,6 +970,7 @@ requires-dist = [
     { name = "gurobipy", marker = "extra == 'scripts'", specifier = ">=13.0.2" },
     { name = "highspy", specifier = ">=1.15.1" },
     { name = "linopy", specifier = ">=0.6.7" },
+    { name = "mga-format", editable = "mga-format" },
     { name = "mga-surveyor", marker = "extra == 'scripts'", editable = "mga-surveyor" },
     { name = "netcdf4", marker = "extra == 'scripts'" },
     { name = "numpy" },
@@ -982,12 +985,37 @@ requires-dist = [
 provides-extras = ["test", "scripts"]
 
 [[package]]
+name = "mga-format"
+version = "0.1.0"
+source = { editable = "mga-format" }
+dependencies = [
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },
+]
+provides-extras = ["test"]
+
+[[package]]
 name = "mga-surveyor"
 version = "0.1.0"
 source = { editable = "mga-surveyor" }
 dependencies = [
     { name = "gurobipy" },
     { name = "highspy" },
+    { name = "mga-format" },
     { name = "netcdf4" },
     { name = "numpy" },
     { name = "pandas" },
@@ -1007,6 +1035,7 @@ test = [
 requires-dist = [
     { name = "gurobipy", specifier = ">=13.0.2" },
     { name = "highspy", specifier = ">=1.14.0" },
+    { name = "mga-format", editable = "mga-format" },
     { name = "netcdf4" },
     { name = "numpy" },
     { name = "pandas" },

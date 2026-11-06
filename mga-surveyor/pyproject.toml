@@ -41,6 +41,8 @@ dependencies = [
     # default install (not an extra) since nearly every real use needs at least one.
     "gurobipy>=13.0.2",
     "highspy>=1.14.0",
+    # Writes the near-optimal sets MGA Compass reads.
+    "mga-format",
 ]
 
 [project.optional-dependencies]
@@ -57,3 +59,4 @@ cdd = ["pycddlib"]
 
 [tool.uv.sources]
 pycddlib = { path = "vendor/cdd/pycddlib", editable = true }
+mga-format = { workspace = true }
