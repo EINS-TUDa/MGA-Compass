@@ -10,7 +10,6 @@ my-set/
 ├── manifest.json     # what the files are: PoIs, cost, run settings and results, checksums
 ├── points.parquet    # one row per point: slack, kind, PoI values, cost
 ├── duals.parquet     # one row per point: duals of the PoIs
-├── outer.parquet     # one row per halfspace of the outer approximation
 ├── sets/             # optional: index sets of the outputs, one file each
 │   ├── snapshot.parquet
 │   └── technology.parquet
@@ -19,8 +18,8 @@ my-set/
     └── generation.parquet
 ```
 
-Surveyor writes `manifest.json` (except its presentation part), `points.parquet`,
-`duals.parquet` and `outer.parquet`. The [index sets and outputs](#index-sets-and-outputs) and
+Surveyor writes `manifest.json` (except its presentation part), `points.parquet` and
+`duals.parquet`. The [index sets and outputs](#index-sets-and-outputs) and
 the presentation part of the manifest are added for the web platform.
 
 `points.parquet` and `duals.parquet` are **wide**: one row per point, one column per PoI.
@@ -55,24 +54,11 @@ One row per point, with the same `point` identifiers as `points.parquet`.
 
 The duals give the cost lower bound $\nu(z) \ge \nu(z^{(k)}) + \mu^{(k)\top}(z - z^{(k)})$.
 
-## outer.parquet
-
-One row per halfspace $a^\top z \le b$ of the outer approximation, for each slack level.
-Every point of the near-optimal set at that slack satisfies all of its halfspaces.
-
-| Column | Type | Meaning |
-|---|---|---|
-| `slack` | float64 | The slack level the halfspace belongs to. |
-| `kind` | string | `"box"` (a bound of one PoI), `"projection"` (a projection cut) or `"cost"` (a cost cut). |
-| one column per PoI | float64 | The coefficients $a$. |
-| `rhs` | float64 | The right-hand side $b$. |
-
 ## manifest.json
 
 The manifest has three parts:
 
-- **Core** (required): written by Surveyor. Describes the points, duals and outer
-  approximation.
+- **Core** (required): written by Surveyor. Describes the points and their duals.
 - **Outputs** (optional): `sets` and `outputs`, present when the set has
   [detailed outputs](#index-sets-and-outputs).
 - **Presentation** (optional): `plots`, used only by the web platform.
@@ -112,7 +98,6 @@ A complete example with all three parts:
   "files": {
     "points.parquet": "<sha256>",
     "duals.parquet": "<sha256>",
-    "outer.parquet": "<sha256>",
     "sets/snapshot.parquet": "<sha256>",
     "sets/technology.parquet": "<sha256>",
     "outputs/generation.parquet": "<sha256>",

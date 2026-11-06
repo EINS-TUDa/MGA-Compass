@@ -10,7 +10,6 @@ In memory a set is a :class:`NearOptimalSet`:
 - ``points``: indexed by ``point``; columns ``slack``, ``kind``, one per PoI, and
   the cost column.
 - ``duals``: indexed by ``point``; one column per PoI.
-- ``outer``: columns ``slack``, ``kind``, one per PoI, and ``rhs``.
 - ``sets``: {name: DataFrame}, each with the members in a column named after the
   set, plus attribute columns.
 
@@ -36,11 +35,9 @@ VERSION = 1
 MANIFEST_NAME = "manifest.json"
 POINTS_FILE = "points.parquet"
 DUALS_FILE = "duals.parquet"
-OUTER_FILE = "outer.parquet"
 #: The built-in index set whose members are the points.
 POINT = "point"
 POINT_KINDS = ("optimum", "box", "nearest")
-HALFSPACE_KINDS = ("box", "projection", "cost")
 #: Column names of points.parquet besides the PoIs and the cost.
 _POINT_COLUMNS = (POINT, "slack", "kind")
 
@@ -184,14 +181,12 @@ class NearOptimalSet:
     manifest: Manifest
     points: pd.DataFrame
     duals: pd.DataFrame
-    outer: pd.DataFrame
     sets: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Raise :class:`NearOptimalSetError` unless the tables match the manifest."""
         _validate_points(self.points, self.manifest)
         _validate_duals(self.duals, self.points, self.manifest)
-        _validate_outer(self.outer, self.manifest)
         if set(self.sets) != set(self.manifest.sets):
             raise NearOptimalSetError(
                 f"sets {sorted(self.sets)} do not match the manifest's {sorted(self.manifest.sets)}"
@@ -244,19 +239,6 @@ def _validate_duals(duals: pd.DataFrame, points: pd.DataFrame, manifest: Manifes
     _require_numeric("duals", duals, manifest.poi_names, allow_nan=True)
 
 
-def _validate_outer(outer: pd.DataFrame, manifest: Manifest) -> None:
-    _require_columns("outer", outer, ["slack", "kind", *manifest.poi_names, "rhs"])
-    _require_numeric("outer", outer, ["slack", *manifest.poi_names, "rhs"], allow_nan=False)
-    bad_kind = ~outer["kind"].isin(HALFSPACE_KINDS)
-    if bad_kind.any():
-        raise NearOptimalSetError(
-            f"outer: 'kind' must be one of {HALFSPACE_KINDS}, got {sorted(set(outer.loc[bad_kind, 'kind']))}"
-        )
-    unknown = set(outer["slack"]) - set(manifest.slacks)
-    if unknown:
-        raise NearOptimalSetError(f"outer: slack {sorted(unknown)} is not in the manifest's slack levels")
-
-
 def _validate_set(name: str, members: pd.DataFrame) -> None:
     if len(members.columns) == 0 or members.columns[0] != name:
         raise NearOptimalSetError(f"set {name!r}: its first column must be named {name!r}")
@@ -299,7 +281,7 @@ def read_manifest(directory: str | Path) -> Manifest:
 
 
 def _verify_files(directory: Path, manifest: Manifest) -> None:
-    required = [POINTS_FILE, DUALS_FILE, OUTER_FILE]
+    required = [POINTS_FILE, DUALS_FILE]
     required += [_set_path(name) for name in manifest.sets]
     required += [_output_path(name) for name in manifest.outputs]
     unlisted = [name for name in required if name not in manifest.files]
@@ -314,8 +296,8 @@ def _verify_files(directory: Path, manifest: Manifest) -> None:
 
 
 def read(directory: str | Path) -> NearOptimalSet:
-    """Read a near-optimal set: verify its checksums, load its points, duals, outer
-    approximation and index sets, and check them against the manifest. Outputs are
+    """Read a near-optimal set: verify its checksums, load its points, duals and index
+    sets, and check them against the manifest. Outputs are
     read separately, with :func:`read_output`."""
     directory = Path(directory)
     manifest = read_manifest(directory)
@@ -324,7 +306,6 @@ def read(directory: str | Path) -> NearOptimalSet:
         manifest=manifest,
         points=pd.read_parquet(directory / POINTS_FILE).set_index(POINT),
         duals=pd.read_parquet(directory / DUALS_FILE).set_index(POINT),
-        outer=pd.read_parquet(directory / OUTER_FILE),
         sets={name: pd.read_parquet(directory / _set_path(name)) for name in manifest.sets},
     )
     nos.validate()
@@ -402,7 +383,6 @@ def write(
     directory.mkdir(parents=True, exist_ok=False)
     nos.points.reset_index().to_parquet(directory / POINTS_FILE, index=False)
     nos.duals.reset_index().to_parquet(directory / DUALS_FILE, index=False)
-    nos.outer.to_parquet(directory / OUTER_FILE, index=False)
     if nos.sets:
         (directory / "sets").mkdir()
     for name, members in nos.sets.items():
@@ -418,7 +398,7 @@ def write(
     manifest = nos.manifest.model_copy(update={"files": {f: sha256_file(directory / f) for f in files}})
     (directory / MANIFEST_NAME).write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
     for name in outputs:
-        validate_output(directory, NearOptimalSet(manifest, nos.points, nos.duals, nos.outer, nos.sets), name)
+        validate_output(directory, NearOptimalSet(manifest, nos.points, nos.duals, nos.sets), name)
     return manifest
 
 

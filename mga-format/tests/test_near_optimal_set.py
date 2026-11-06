@@ -76,16 +76,6 @@ def _duals() -> pd.DataFrame:
     )
 
 
-def _outer() -> pd.DataFrame:
-    return pd.DataFrame({
-        "slack": [0.02, 0.02, 0.05],
-        "kind": ["box", "projection", "cost"],
-        "wind": [1.0, 0.5, 0.2],
-        "solar": [0.0, 0.5, 0.1],
-        "rhs": [14.0, 9.0, 6.0],
-    })
-
-
 def _sets() -> dict[str, pd.DataFrame]:
     return {
         "snapshot": pd.DataFrame({"snapshot": SNAPSHOTS}),
@@ -110,7 +100,7 @@ def _outputs() -> dict[str, pd.DataFrame]:
 def _nos(**manifest_overrides) -> NearOptimalSet:
     return NearOptimalSet(
         manifest=Manifest.model_validate(_manifest(**manifest_overrides)),
-        points=_points(), duals=_duals(), outer=_outer(), sets=_sets(),
+        points=_points(), duals=_duals(), sets=_sets(),
     )
 
 
@@ -128,11 +118,10 @@ def test_round_trip(written):
     nos = read(written)
     pd.testing.assert_frame_equal(nos.points, _points())
     pd.testing.assert_frame_equal(nos.duals, _duals())
-    pd.testing.assert_frame_equal(nos.outer, _outer(), check_dtype=False)
     assert list(nos.sets["technology"]["label"]) == ["Wind", "Solar", "Gas"]
     assert nos.manifest.poi_names == POIS
     assert sorted(nos.manifest.files) == [
-        "duals.parquet", "outer.parquet", "outputs/capacity.parquet", "outputs/generation.parquet",
+        "duals.parquet", "outputs/capacity.parquet", "outputs/generation.parquet",
         "points.parquet", "sets/snapshot.parquet", "sets/technology.parquet",
     ]
 
@@ -198,13 +187,12 @@ def test_invalid_manifest(overrides, message):
 # ---------------------------------------------------------------- tables
 
 
-def _broken(points=None, duals=None, outer=None, sets=None) -> NearOptimalSet:
+def _broken(points=None, duals=None, sets=None) -> NearOptimalSet:
     nos = _nos()
     return NearOptimalSet(
         nos.manifest,
         points if points is not None else nos.points,
         duals if duals is not None else nos.duals,
-        outer if outer is not None else nos.outer,
         sets if sets is not None else nos.sets,
     )
 
@@ -226,8 +214,6 @@ def _with(df, **changes):
         (_broken(points=_with(_points(), slack=[0.0, 0.03, 0.02, 0.05, 0.05])), "not in the manifest"),
         (_broken(points=_with(_points(), wind=[10.0, np.nan, 12.0, 20.0, 16.0])), "missing values"),
         (_broken(duals=_duals().iloc[:4]), "same as in points"),
-        (_broken(outer=_with(_outer(), kind=["box", "box", "tangent"])), "'kind' must be"),
-        (_broken(outer=_with(_outer(), slack=[0.02, 0.02, 0.08])), "not in the manifest"),
         (_broken(sets={"snapshot": pd.DataFrame({"time": SNAPSHOTS}), "technology": _sets()["technology"]}), "first column"),
         (_broken(sets={"snapshot": pd.DataFrame({"snapshot": SNAPSHOTS[[0, 0, 1]]}), "technology": _sets()["technology"]}), "unique"),
         (_broken(sets={"snapshot": _sets()["snapshot"]}), "do not match"),
@@ -242,7 +228,7 @@ def test_invalid_tables(nos, message):
 
 
 def test_corrupt_file_is_refused(written):
-    pd.DataFrame({"x": [1]}).to_parquet(written / "outer.parquet")
+    pd.DataFrame({"x": [1]}).to_parquet(written / "sets/snapshot.parquet")
     with pytest.raises(NearOptimalSetError, match="missing or corrupt"):
         read(written)
 
@@ -283,7 +269,6 @@ def read_without_checksums(directory):
         manifest,
         pd.read_parquet(directory / nos_format.POINTS_FILE).set_index("point"),
         pd.read_parquet(directory / nos_format.DUALS_FILE).set_index("point"),
-        pd.read_parquet(directory / nos_format.OUTER_FILE),
         {name: pd.read_parquet(directory / f"sets/{name}.parquet") for name in manifest.sets},
     )
 
