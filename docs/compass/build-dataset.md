@@ -70,7 +70,8 @@ and write access to the repository); the script prints the `DATASET_URL` to give
 ```{tip}
 Keep the columns of `points` at similar magnitudes, for example cost in million EUR and
 capacities in GW. Navigation solves small linear programs over these numbers, and columns
-that differ by many orders of magnitude can make them numerically infeasible.
+that differ by many orders of magnitude can make them numerically infeasible; see the known
+limitation in [](navigation.md#in-the-code).
 ```
 
 To try the bundle, [run the platform locally](run-locally.md) with `DATA_DIR` pointing at it.

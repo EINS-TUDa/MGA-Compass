@@ -71,6 +71,18 @@ the energy system model.
   {py:func}`~mga_compass.core.build_outer_approximation`, instead of over the convex hull of
   the samples.
 
+```{admonition} Known limitation: to be improved
+:class: warning
+
+Navigation and interpolation build their small linear programs directly from the values in
+`points`. If the columns differ by many orders of magnitude, for example cost in euros
+(around $10^9$) next to capacities in MW (around $10^4$), these programs can become
+numerically ill-conditioned and fail as "infeasible", even though a solution exists. Until
+the library rescales the columns itself, keep them at similar magnitudes, for example cost in
+million euros and capacities in GW, and pass `default_solver_options("highs")` as the server
+does.
+```
+
 ```{admonition} Known bug
 :class: danger
 
