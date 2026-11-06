@@ -8,8 +8,9 @@ services:
     environment:
       - ALLOWED_ORIGINS=["http://localhost"]
       # Dataset bundle to download at startup (a GitHub release of
-      # scripts/publish_dataset.py's output); override with your own tag.
-      - DATASET_URL=${DATASET_URL:-https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-v1}
+      # scripts/publish_dataset.py's output). Defaults to the PyPSA-Eur
+      # dataset of the live demo; override with your own tag.
+      - DATASET_URL=${DATASET_URL:-https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-pypsa-eur-34-2026-11-04}
 
   frontend:
     build: ./app/frontend

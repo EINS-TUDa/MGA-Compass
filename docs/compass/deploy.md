@@ -4,16 +4,12 @@
 and the frontend (nginx serving the built app, port 80, forwarding `/api` to the backend).
 Neither image contains data: the backend downloads its dataset bundle at startup.
 
-1. **Choose the dataset.** Set `DATASET_URL` to a published bundle, for example the PyPSA-Eur
-   dataset of the live demo:
+1. **Choose the dataset.** By default the backend serves the PyPSA-Eur dataset of the live
+   demo, `dataset-pypsa-eur-34-2026-11-04`. To serve another published bundle, set
+   `DATASET_URL` to it, for example the smaller `model_energy` dataset:
 
    ```bash
-   export DATASET_URL=https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-pypsa-eur-34-2026-11-04
-   ```
-
-   ```{warning}
-   Always set `DATASET_URL`. The fallback in `docker-compose.yml` points to a release,
-   `dataset-v1`, that does not exist, so without it the backend fails to start.
+   export DATASET_URL=https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-model-energy-2026-11-04
    ```
 
 2. **Allow the frontend's origin.** `docker-compose.yml` sets `ALLOWED_ORIGINS` to
