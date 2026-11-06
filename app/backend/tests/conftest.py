@@ -1,15 +1,14 @@
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 import pandas as pd
-import xarray as xr
-from mga_compass import Constraints, finalize_bundle, write_dataarray, write_frame
+import mga_format
+from mga_compass import Constraints
 
-from mgaserver.config import load_manifest, settings, Manifest
+from mgaserver.config import settings
 
-MANIFEST_TEMPLATE = Path(__file__).parent / "manifest.json"
+UNITS = {"wind": "MW", "solar": "MW", "hydrogen": "MWh", "battery": "MW"}
 
 
 @pytest.fixture(scope="session")
@@ -30,34 +29,59 @@ def dimensions(points_df):
 
 @pytest.fixture(scope="session", autouse=True)
 def dataset_dir(tmp_path_factory, points_df) -> Path:
-    """A small, real dataset bundle (see mga_compass.dataset), loaded by the app
-    through its normal startup path -- settings.data_dir points at it."""
-    bundle = tmp_path_factory.mktemp("dataset")
-    shutil.copy(MANIFEST_TEMPLATE, bundle / "manifest.json")
-    write_frame(points_df, bundle / "points.parquet")
-    write_frame(points_df.drop(columns="TOTEX") * 0.0, bundle / "duals.parquet")
-    index, techs = points_df.index.tolist(), ["gas", "coal"]
-    write_dataarray(xr.DataArray(np.ones((len(index), 2)), dims=["index", "technology"],
-                                 coords={"index": index, "technology": techs}),
-                    bundle / "installed_capacity.parquet")
+    """A small, real near-optimal set (see mga_format), loaded by the app through
+    its normal startup path -- settings.data_dir points at it."""
+    pois = [c for c in points_df.columns if c != "TOTEX"]
+    manifest = mga_format.Manifest.model_validate({
+        "format": "mga-near-optimal-set", "version": 1, "created": "2026-11-06T12:00:00+00:00",
+        "cost": {"name": "TOTEX", "unit": "€", "optimum": float(points_df["TOTEX"].min())},
+        "pois": [{"name": p, "unit": UNITS[p], "description": f"Installed {p} capacity.", "definition": {}}
+                 for p in pois],
+        "slack_levels": [{"slack": 0.05, "norm": "linf", "normalize": True, "tol": 5, "tol_unit": "percent",
+                          "vertex_method": "bb", "objective_cuts": True, "iterations": 0, "gap": 1,
+                          "converged": True}],
+        "fingerprint": {"network": "test"},
+        "sets": {"snapshot": {}, "technology": {}},
+        "outputs": {"generation": {"index": ["point", "snapshot", "technology"], "unit": "MW"},
+                    "capacity": {"index": ["point", "technology"], "unit": "MW"}},
+        "plots": {
+            "generation": {"type": "stacked_timeseries", "output": "generation", "x": "snapshot", "stack": "technology"},
+            "capacity": {"type": "bar", "output": "capacity", "x": "technology"},
+            "total generation": {"type": "timeseries", "output": "generation", "x": "snapshot"},
+        },
+    })
+    index = pd.Index(points_df.index, name="point")
+    optimum = points_df["TOTEX"].to_numpy().argmin()
+    points = points_df.astype(float).set_axis(index)
+    points.insert(0, "kind", ["optimum" if i == optimum else "box" for i in range(len(points))])
+    points.insert(0, "slack", [0.0 if i == optimum else 0.05 for i in range(len(points))])
+    duals = pd.DataFrame(0.0, index=index, columns=pois)
+    techs = ["gas", "coal"]
     snapshots = pd.date_range("2030-01-01", periods=3, freq="h")
-    write_dataarray(xr.DataArray(np.ones((len(index), 3, 2)), dims=["index", "snapshot", "technology"],
-                                 coords={"index": index, "snapshot": snapshots, "technology": techs}),
-                    bundle / "generation_over_snapshots.parquet")
-    finalize_bundle(bundle)
-    settings.data_dir = bundle
-    return bundle
+    sets = {
+        "snapshot": pd.DataFrame({"snapshot": snapshots}),
+        "technology": pd.DataFrame({"technology": techs, "label": ["Gas Power", None], "color": ["#a85522", None]}),
+    }
+    capacity = pd.MultiIndex.from_product([index, techs], names=["point", "technology"]).to_frame(index=False)
+    capacity["value"] = 1.0
+    generation = pd.MultiIndex.from_product([index, snapshots, techs], names=["point", "snapshot", "technology"]).to_frame(index=False)
+    generation["value"] = 1.0
+    directory = tmp_path_factory.mktemp("dataset") / "set"
+    mga_format.write(directory, mga_format.NearOptimalSet(manifest, points, duals, sets),
+                     {"generation": generation, "capacity": capacity})
+    settings.data_dir = directory
+    return directory
 
 
 @pytest.fixture(scope="session")
-def manifest(dataset_dir) -> Manifest:
-    return load_manifest(settings.manifest_path)
+def manifest(dataset_dir) -> mga_format.Manifest:
+    return mga_format.read_manifest(dataset_dir)
 
 
 @pytest.fixture(scope="session")
 def duals_df(points_df, manifest) -> pd.DataFrame:
     rng = np.random.default_rng(0)
-    cols = [c for c in points_df.columns if c != manifest.obj_label]
+    cols = [c for c in points_df.columns if c != manifest.cost.name]
     return pd.DataFrame(
         rng.random((len(points_df), len(cols))),
         columns=cols,

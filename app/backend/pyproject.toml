@@ -13,9 +13,11 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.136.1",
     "mga-compass",
+    "mga-format",
     "pytest>=9.0.3",
     "slowapi>=0.1.9",
 ]
 
 [tool.uv.sources]
 mga-compass = { workspace = true }
+mga-format = { workspace = true }

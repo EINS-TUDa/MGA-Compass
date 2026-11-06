@@ -1053,6 +1053,7 @@ source = { virtual = "app/backend" }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "mga-compass" },
+    { name = "mga-format" },
     { name = "pytest" },
     { name = "slowapi" },
 ]
@@ -1061,6 +1062,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.136.1" },
     { name = "mga-compass", editable = "mga-compass" },
+    { name = "mga-format", editable = "mga-format" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "slowapi", specifier = ">=0.1.9" },
 ]
