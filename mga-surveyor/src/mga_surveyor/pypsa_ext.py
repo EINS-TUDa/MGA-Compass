@@ -336,6 +336,19 @@ def _read_meta(nc_path: str | Path) -> dict:
         return json.loads(ds.meta)
 
 
+#: Per-slack-level run summary written by `generate_mga_files`, read by
+#: `export_near_optimal_set` (its fields are the format's `slack_levels` entry).
+RUN_SUMMARY_NAME = "run.json"
+
+
+def _write_run_summary(slack_dir: Path, summary: dict) -> None:
+    """Write one slack level's settings and result to `slack_dir/run.json`,
+    replacing an earlier run's: on a resume the counts and gap cover the whole
+    level, so the latest summary is the complete one."""
+    slack_dir.mkdir(parents=True, exist_ok=True)
+    (slack_dir / RUN_SUMMARY_NAME).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+
 def _build_furthest_point_solver(
     n: Network,
     dimensions: dict,
@@ -1789,6 +1802,19 @@ def generate_mga_files(
             max_parallel=max_parallel, incremental_bootstrap=True,
         )
         final_gap = method.max_gap()
+        _write_run_summary(slack_dir, {
+            "slack": float(slack),
+            "norm": norm,
+            "normalize": bool(normalize),
+            # tol and gap in the units the caller gave tol in (percent when normalized).
+            "tol": float(slack_tol * gap_scale),
+            "tol_unit": "percent" if normalize else "model",
+            "vertex_method": vertex_method,
+            "objective_cuts": bool(use_objective_cuts),
+            "iterations": len(list(slack_dir.glob("mga_closest_result_*.nc"))),
+            "gap": float(final_gap * gap_scale),
+            "converged": bool(final_gap <= slack_tol),
+        })
         if final_gap > slack_tol:
             # drive() already logged a warning for this (it's the one that
             # knows whether max_iter was actually hit), but that's easy to
