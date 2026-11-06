@@ -65,6 +65,12 @@ _GITHUB_ICON = (
     ' 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>'
 )
 html_theme_options = {
+    # Shown at the top of every page until the developers have reviewed the docs.
+    "announcement": (
+        "<strong>Warning:</strong> this documentation was generated with AI assistance and has "
+        "not yet been reviewed by the developers. It may contain errors; the code and the papers "
+        "are authoritative."
+    ),
     # "Edit this page" / "View source" links point at the repo's docs/ folder.
     "source_repository": "https://github.com/EINS-TUDa/MGA-Compass/",
     "source_branch": "main",
