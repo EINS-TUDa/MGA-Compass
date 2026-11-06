@@ -23,7 +23,8 @@ On a machine with the network and a solver (not on the server):
 
 ```sh
 cd mga-compass
-uv run --extra scripts python scripts/generate_dataset.py --output-dir scripts/output
+uv run --extra scripts python scripts/generate_dataset.py --output-dir scripts/output \
+    --tol 5 --max-iter 120 --max-parallel 4
 uv run python scripts/publish_dataset.py --data-dir scripts/output \
     --manifest scripts/manifests/model_energy.json --tag dataset-<yyyy-mm-dd>
 ```
