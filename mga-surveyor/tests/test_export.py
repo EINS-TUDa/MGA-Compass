@@ -6,7 +6,9 @@ import pypsa
 import pytest
 
 import mga_format
-from mga_surveyor import consolidate_mga_results, export_near_optimal_set, generate_mga_files, network_fingerprint
+from mga_surveyor import (
+    collect_near_optimal_set, consolidate_mga_results, export_near_optimal_set, generate_mga_files, network_fingerprint,
+)
 
 DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},
@@ -105,6 +107,18 @@ def test_export_round_trips(run, exported):
     assert manifest.slacks == SLACKS
     assert manifest.fingerprint.network == network_fingerprint(n)
     assert "mga-surveyor" in manifest.software
+
+
+def test_collect_returns_the_file_of_each_point(run):
+    _, output_dir = run
+    nos, files = collect_near_optimal_set(output_dir, units=UNITS, cost_unit="EUR")
+    assert len(files) == len(nos.points)
+    assert files[0] == output_dir / "optimal.nc"
+    for point, path in enumerate(files):
+        kind = nos.points.loc[point, "kind"]
+        if kind != "optimum":
+            assert path.parent.name == f"slack_{nos.points.loc[point, 'slack']}"
+            assert path.name.startswith("mga_furthest_result_" if kind == "box" else "mga_closest_result_")
 
 
 def test_export_needs_every_unit(run, tmp_path):

@@ -83,6 +83,8 @@ def export_near_optimal_set(
 ) -> Manifest:
     """Write the results of a `generate_mga_files` run in `output_dir` as a
     near-optimal set in the new directory `directory`, and return its manifest.
+    The set has no outputs; to add some, use :func:`collect_near_optimal_set`
+    and write the set with ``mga_format.write`` yourself.
 
     `units` gives every PoI's unit, `cost_unit` the cost's; `descriptions` can
     describe the PoIs. The cost column is named `cost_name`.
@@ -92,6 +94,25 @@ def export_near_optimal_set(
         `generate_mga_files` writes it).
     :raises ValueError: If a PoI has no unit, or a result has no duals
         (it was solved with `resolve_main_objective=False`).
+    """
+    nos, _ = collect_near_optimal_set(
+        output_dir, units=units, cost_unit=cost_unit, cost_name=cost_name, descriptions=descriptions,
+    )
+    return write(directory, nos)
+
+
+def collect_near_optimal_set(
+    output_dir: str | Path,
+    *,
+    units: dict[str, str],
+    cost_unit: str,
+    cost_name: str = "cost",
+    descriptions: dict[str, str] | None = None,
+) -> tuple[NearOptimalSet, list[Path]]:
+    """The results of a `generate_mga_files` run in `output_dir` as a
+    near-optimal set in memory, and the result file of each point, in point
+    order (``files[p]`` is the solved network behind point ``p``), for reading
+    detailed outputs. Arguments and errors as for :func:`export_near_optimal_set`.
     """
     output_dir = Path(output_dir)
     descriptions = descriptions or {}
@@ -107,6 +128,7 @@ def export_near_optimal_set(
         raise ValueError(msg)
 
     rows = [(0.0, "optimum", *_row(optimal, keys, "coordinates"))]
+    files = [optimal_nc]
     slack_levels = []
     for slack, slack_dir in _slack_dirs(output_dir):
         summary_path = slack_dir / RUN_SUMMARY_NAME
@@ -116,8 +138,10 @@ def export_near_optimal_set(
         slack_levels.append(SlackLevel.model_validate(json.loads(summary_path.read_text(encoding="utf-8"))))
         for path in sorted(slack_dir.glob("mga_furthest_result_*.nc")):
             rows.append((slack, "box", *_row(_read_meta(path), keys, "coordinates")))
+            files.append(path)
         for path in sorted(slack_dir.glob("mga_closest_result_*.nc")):
             rows.append((slack, "nearest", *_row(_read_meta(path), keys, "point")))
+            files.append(path)
 
     index = pd.Index(range(len(rows)), name="point")
     points = pd.DataFrame([r[2] for r in rows], columns=keys, index=index)
@@ -147,4 +171,6 @@ def export_near_optimal_set(
         slack_levels=slack_levels,
         fingerprint=Fingerprint(network=network_fingerprint(pypsa.Network(optimal_nc))),
     )
-    return write(directory, NearOptimalSet(manifest=manifest, points=points, duals=duals))
+    nos = NearOptimalSet(manifest=manifest, points=points, duals=duals)
+    nos.validate()
+    return nos, files
