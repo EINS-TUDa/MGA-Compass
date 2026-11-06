@@ -45,12 +45,14 @@ To work with the near-optimal set at slack $\epsilon$, use all points with
 
 ## duals.parquet
 
-One row per point, with the same `point` identifiers as `points.parquet`.
+Required. One row per point, with the same `point` identifiers as `points.parquet`. Every
+point must have all its duals: a set whose duals are incomplete cannot be written, and is
+refused when read.
 
 | Column | Type | Meaning |
 |---|---|---|
 | `point` | int64 | As in `points.parquet`. |
-| one column per PoI | float64 | The dual $\mu_i$ of fixing that PoI: a subgradient of $\nu$ at the point, in cost units per PoI unit. **NaN if not computed**, never 0. |
+| one column per PoI | float64 | The dual $\mu_i$ of fixing that PoI: a subgradient of $\nu$ at the point, in cost units per PoI unit. **Every value must be a real number**: no NaN. |
 
 The duals give the cost lower bound $\nu(z) \ge \nu(z^{(k)}) + \mu^{(k)\top}(z - z^{(k)})$.
 

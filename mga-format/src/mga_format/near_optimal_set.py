@@ -237,6 +237,12 @@ def _validate_duals(duals: pd.DataFrame, points: pd.DataFrame, manifest: Manifes
         raise NearOptimalSetError(f"duals: {POINT!r} must be the same as in points")
     _require_columns("duals", duals, manifest.poi_names)
     _require_numeric("duals", duals, manifest.poi_names, allow_nan=True)
+    missing = duals.index[duals.isna().any(axis=1)].tolist()
+    if missing:
+        raise NearOptimalSetError(
+            f"duals: not available for points {missing[:10]}{' ...' if len(missing) > 10 else ''}; "
+            "every point needs all its duals"
+        )
 
 
 def _validate_set(name: str, members: pd.DataFrame) -> None:

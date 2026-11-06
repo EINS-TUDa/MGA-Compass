@@ -71,7 +71,7 @@ def _points() -> pd.DataFrame:
 
 def _duals() -> pd.DataFrame:
     return pd.DataFrame(
-        {"wind": [0.1, 0.2, np.nan, 0.3, 0.4], "solar": [0.5, 0.6, np.nan, 0.7, 0.8]},
+        {"wind": [0.1, 0.2, 0.0, 0.3, 0.4], "solar": [0.5, 0.6, 0.0, 0.7, 0.8]},
         index=pd.Index(range(5), name="point"),
     )
 
@@ -126,8 +126,24 @@ def test_round_trip(written):
     ]
 
 
-def test_missing_duals_stay_nan(written):
-    assert read(written).duals.loc[2].isna().all()
+def test_write_refuses_missing_duals(tmp_path):
+    nos = _nos()
+    nos.duals.loc[2, "wind"] = np.nan
+    with pytest.raises(NearOptimalSetError, match=r"not available for points \[2\]"):
+        write(tmp_path / "set", nos, _outputs())
+    assert not (tmp_path / "set").exists()
+
+
+def test_read_refuses_missing_duals(written):
+    duals = _duals()
+    duals.loc[3, "solar"] = np.nan
+    duals.reset_index().to_parquet(written / "duals.parquet", index=False)
+    with pytest.raises(NearOptimalSetError, match=r"not available for points \[3\]"):
+        validate_nos_without_checksums(written)
+
+
+def validate_nos_without_checksums(directory):
+    read_without_checksums(directory).validate()
 
 
 def test_outputs_are_sorted_with_one_row_group_per_point(written):
