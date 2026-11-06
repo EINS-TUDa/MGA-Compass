@@ -6,4 +6,7 @@ Step-by-step instructions for specific tasks with MGA Compass.
 :maxdepth: 1
 
 install
+build-dataset
+run-locally
+deploy
 ```

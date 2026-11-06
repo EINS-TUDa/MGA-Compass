@@ -6,4 +6,8 @@ Step-by-step instructions for specific tasks with MGA Surveyor.
 :maxdepth: 1
 
 install
+explore-network
+resume
+without-gurobi
+build-cdd
 ```

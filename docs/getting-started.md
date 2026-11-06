@@ -166,3 +166,5 @@ the same every time.
 - Understand what happened: [the near-optimal set](surveyor/near-optimal-set.md),
   [G-ORACLE](surveyor/g-oracle.md), [navigation](compass/navigation.md) and
   [traverse](compass/traverse.md).
+- Run it on your own model: [](surveyor/explore-network.md).
+- Explore your results in the web platform: [](compass/build-dataset.md).

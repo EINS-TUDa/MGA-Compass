@@ -26,4 +26,5 @@ MGA Surveyor is installed from a clone of the repository with
    ```
 
 `CddMethod` needs one more, optional component, the patched cddlib. You only need it if you
-use `vertex_method="cdd"` or `CddMethod` directly; the default, `BBMethod`, does not.
+use `vertex_method="cdd"` or `CddMethod` directly; the default, `BBMethod`, does not. See
+[](build-cdd.md).
