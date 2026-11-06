@@ -49,6 +49,9 @@ def dataset_dir(tmp_path_factory, points_df) -> Path:
             "capacity": {"type": "bar", "output": "capacity", "x": "technology"},
             "total generation": {"type": "timeseries", "output": "generation", "x": "snapshot"},
         },
+        # Factor 1 for the cost keeps the points' values as in points_df, which most
+        # tests compare against; the generation output is shown in GW.
+        "display": {"TOTEX": {"unit": "k€", "factor": 1.0}, "generation": {"unit": "GW", "factor": 1e-3}},
     })
     index = pd.Index(points_df.index, name="point")
     optimum = points_df["TOTEX"].to_numpy().argmin()

@@ -10,7 +10,7 @@ from slowapi.util import get_remote_address
 
 import mga_format
 from mga_compass import Constraints, Alpha, AlphaSumError, Breakpoint, SolverError, navigate, interpolate, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
-from mga_compass.near_optimal import category_styles, navigable_points, plot_data
+from mga_compass.near_optimal import category_styles, display_points, display_units, plot_data
 
 from .api_models import ConstraintRow, ConstraintsPayload, BreakpointResult, NavigateResponse, ConstraintChangeItem, DimensionRange, DimensionEntry, InitResponse, InitPlotResponse, PlotRequest, PlotResponse, LowerBoundRequest, LowerBoundResponse, LowerBoundPointResult
 from .config import settings
@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 configure_solver_logging(settings.solver_log_path)
 
 nos: mga_format.NearOptimalSet
-# points: one row per point (index: point id), one column per PoI plus the cost column.
+# points: one row per point (index: point id), one column per PoI plus the cost
+# column, in the manifest's display units. The whole API speaks display units:
+# what the frontend shows, it also sends back.
 points: pd.DataFrame = pd.DataFrame()
 obj_label: str = ""
 # Empty: /lower_bound passes it to linear_lower_bounds, but the cost lower bound
@@ -38,7 +40,7 @@ async def lifespan(app: FastAPI):
     else:
         # Verified against the manifest's checksums before anything is read.
         nos = mga_format.read(settings.data_dir)
-    points = navigable_points(nos)
+    points = display_points(nos)
     obj_label = nos.manifest.cost.name
     # Outputs stay on disk: /plot_data reads only the points a request mixes.
     logger.info("serving %d points, slack levels %s (navigating the largest)", len(points), nos.manifest.slacks)
@@ -72,7 +74,7 @@ async def log_requests(request, call_next):
 def get_init(request: Request) -> InitResponse:
     optimal_point = points.loc[points[obj_label].idxmin()]
     info = {poi.name: poi.description for poi in nos.manifest.pois}
-    units = {poi.name: poi.unit for poi in nos.manifest.pois} | {obj_label: nos.manifest.cost.unit}
+    units = display_units(nos)
     return InitResponse(
         obj_label=obj_label,
         dimensions={
@@ -146,7 +148,7 @@ def get_plot_endpoint(request: Request, payload: PlotRequest) -> PlotResponse:
 
     plot = nos.manifest.plots[payload.name]
     alphas = [Alpha(pd.Series({int(k): v for k, v in item.alpha.items()})) for item in payload.breakpoints]
-    result = plot_data(settings.data_dir, nos, payload.name, alphas)
+    result = plot_data(settings.data_dir, nos, payload.name, alphas, display=True)
     return PlotResponse(type=plot.type, betas=[item.beta for item in payload.breakpoints], x_dim=result["x_dim"], data=result["data"])
 
 

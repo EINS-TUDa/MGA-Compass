@@ -75,7 +75,7 @@ class TestInitEndpoint:
         for poi in manifest.pois:
             assert dimensions[poi.name]["unit"] == poi.unit
             assert dimensions[poi.name]["info"] == poi.description
-        assert dimensions[manifest.cost.name]["unit"] == manifest.cost.unit
+        assert dimensions[manifest.cost.name]["unit"] == manifest.display[manifest.cost.name].unit
 
     def test_slack_and_kind_are_not_dimensions(self, client):
         dimensions = client.get("/init").json()["dimensions"]
@@ -288,15 +288,16 @@ class TestPlotEndpointReadsTheSet:
         assert data["x_dim"] == ["gas", "coal"]
         assert data["data"] == [[1.0, 1.0]]
 
-    def test_stacked_timeseries_uses_nanosecond_timestamps(self, client):
+    def test_stacked_timeseries_uses_nanosecond_timestamps_and_display_units(self, client):
         payload = {"name": "generation", "breakpoints": [{"beta": 0.0, "alpha": {"1": 1.0}}]}
         data = client.post("/plot_data", json=payload).json()
         assert data["x_dim"] == pd.date_range("2030-01-01", periods=3, freq="h").as_unit("ns").asi8.tolist()
-        assert data["data"] == [{"gas": [1.0, 1.0, 1.0], "coal": [1.0, 1.0, 1.0]}]
+        # stored 1.0 MW, shown in GW
+        assert data["data"] == [{"gas": [1e-3, 1e-3, 1e-3], "coal": [1e-3, 1e-3, 1e-3]}]
 
     def test_unstacked_timeseries_sums_technologies(self, client):
         payload = {"name": "total generation", "breakpoints": [{"beta": 0.0, "alpha": {"3": 1.0}}]}
-        assert client.post("/plot_data", json=payload).json()["data"] == [[2.0, 2.0, 2.0]]
+        assert client.post("/plot_data", json=payload).json()["data"] == [[2e-3, 2e-3, 2e-3]]
 
 
 class TestLowerBoundEndpoint:

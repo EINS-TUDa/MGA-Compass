@@ -116,6 +116,12 @@ class Plot(_Model):
         return self
 
 
+class Display(_Model):
+    """How the web platform shows a quantity: its values times `factor`, in `unit`."""
+    unit: str
+    factor: float = Field(gt=0)
+
+
 class Manifest(_Model):
     format: Literal["mga-near-optimal-set"]
     version: Literal[1]
@@ -129,6 +135,8 @@ class Manifest(_Model):
     sets: dict[str, IndexSet] = {}
     outputs: dict[str, Output] = {}
     plots: dict[str, Plot] = {}
+    #: Display units, keyed by a PoI, the cost column or an output.
+    display: dict[str, Display] = {}
 
     @property
     def poi_names(self) -> list[str]:
@@ -163,6 +171,9 @@ class Manifest(_Model):
             unknown = [s for s in output.index[1:] if s not in self.sets]
             if unknown:
                 raise ValueError(f"output {name!r} uses undeclared sets {unknown}")
+        displayable = {*names, self.cost.name, *self.outputs}
+        if unknown := sorted(set(self.display) - displayable):
+            raise ValueError(f"display entries {unknown} are not a PoI, the cost or an output")
         for name, plot in self.plots.items():
             if plot.output not in self.outputs:
                 raise ValueError(f"plot {name!r} refers to unknown output {plot.output!r}")

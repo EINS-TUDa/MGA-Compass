@@ -63,7 +63,7 @@ The manifest has three parts:
 - **Core** (required): written by Surveyor. Describes the points and their duals.
 - **Outputs** (optional): `sets` and `outputs`, present when the set has
   [detailed outputs](#index-sets-and-outputs).
-- **Presentation** (optional): `plots`, used only by the web platform.
+- **Presentation** (optional): `plots` and `display`, used only by the web platform.
 
 A complete example with all three parts:
 
@@ -121,6 +121,11 @@ A complete example with all three parts:
     "generation": {"type": "stacked_timeseries", "output": "generation",
                    "x": "snapshot", "stack": "technology"},
     "capacity": {"type": "bar", "output": "capacity", "x": "technology"}
+  },
+  "display": {
+    "wind": {"unit": "GW", "factor": 0.001},
+    "TOTEX": {"unit": "bn EUR", "factor": 1e-9},
+    "generation": {"unit": "GW", "factor": 0.001}
   }
 }
 ```
@@ -140,6 +145,7 @@ A complete example with all three parts:
 | `sets` | outputs | The index sets; see [](#in-the-manifest). |
 | `outputs` | outputs | The outputs; see [](#in-the-manifest). |
 | `plots` | presentation | The plots the web platform shows; see [](#presentation-part-web-platform-only). |
+| `display` | presentation | The units the web platform shows quantities in; see [](#presentation-part-web-platform-only). |
 
 A reader ignores the optional parts it does not use: the Python API needs only the core, the
 web platform needs all three.
@@ -207,6 +213,7 @@ See the [complete example](#manifestjson) above.
 | Field | Meaning |
 |---|---|
 | `plots` | {name: {`type`, `output`, `x`, `stack`}}: the plots the platform shows. `type` is `"bar"`, `"timeseries"`, `"stacked_bar"` or `"stacked_timeseries"`; `output` names an output; `x` is the set on the x-axis; `stack` is the set stacked as categories, required for the `stacked_` types. Labels and colours come from the sets' `label` and `color` attributes. |
+| `display` | {name: {`unit`, `factor`}}: how the platform shows a quantity, keyed by a PoI, the cost column or an output. The platform shows the stored values times `factor` (greater than 0), labelled `unit`. A quantity without an entry is shown as stored, in its own unit. This changes only what is shown: the stored values stay in model units. |
 
 ## Network fingerprint
 

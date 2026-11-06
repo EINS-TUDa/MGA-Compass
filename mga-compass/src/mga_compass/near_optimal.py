@@ -27,6 +27,29 @@ def navigable_points(nos: NearOptimalSet) -> pd.DataFrame:
     return nos.points.drop(columns=["slack", "kind"])
 
 
+def display_factor(nos: NearOptimalSet, name: str) -> float:
+    """The factor quantity `name` (a PoI, the cost or an output) is shown with;
+    1 when the manifest's ``display`` has no entry for it."""
+    entry = nos.manifest.display.get(name)
+    return entry.factor if entry is not None else 1.0
+
+
+def display_units(nos: NearOptimalSet) -> dict[str, str]:
+    """The unit each PoI and the cost is shown in: its ``display`` unit if it has
+    one, else its own unit."""
+    units = {poi.name: poi.unit for poi in nos.manifest.pois} | {nos.manifest.cost.name: nos.manifest.cost.unit}
+    return {name: (nos.manifest.display[name].unit if name in nos.manifest.display else unit)
+            for name, unit in units.items()}
+
+
+def display_points(nos: NearOptimalSet) -> pd.DataFrame:
+    """:func:`navigable_points` with every column multiplied by its display
+    factor. Navigating in these units gives the same weights as in model units."""
+    points = navigable_points(nos)
+    factors = pd.Series({column: display_factor(nos, column) for column in points.columns})
+    return points * factors
+
+
 def category_styles(nos: NearOptimalSet) -> tuple[dict[str, str], dict[str, str]]:
     """Display labels and colours of set members, from every set's optional
     ``label`` and ``color`` columns, keyed by the member as a string."""
@@ -65,15 +88,19 @@ def _axis_values(values: np.ndarray) -> list:
     return [str(v) if isinstance(v, str) else v for v in values.tolist()]
 
 
-def plot_data(directory: str | Path, nos: NearOptimalSet, plot_name: str, alphas: list[Alpha]) -> dict:
+def plot_data(
+    directory: str | Path, nos: NearOptimalSet, plot_name: str, alphas: list[Alpha], display: bool = False,
+) -> dict:
     """The data of plot `plot_name` for each of the weights `alphas`:
     ``{"x_dim": [...], "data": [...]}``, one entry of ``data`` per alpha. An entry
     is ``{category: values over x}`` for a plot with ``stack``, else the values
-    over x. Sets other than ``x`` and ``stack`` are summed over."""
+    over x. Sets other than ``x`` and ``stack`` are summed over. With `display`,
+    values are multiplied by the output's display factor."""
     plot = nos.manifest.plots[plot_name]
     keep = [plot.x] + ([plot.stack] if plot.stack else [])
+    factor = display_factor(nos, plot.output) if display else 1.0
     data = []
-    for da in mix_output(directory, nos, plot.output, alphas):
+    for da in (factor * mixed for mixed in mix_output(directory, nos, plot.output, alphas)):
         summed = da.sum([d for d in da.dims if d not in keep]) if set(da.dims) - set(keep) else da
         if plot.stack:
             data.append({

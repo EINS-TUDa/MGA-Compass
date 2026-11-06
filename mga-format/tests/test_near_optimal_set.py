@@ -174,6 +174,14 @@ def test_unknown_version_is_refused(written):
         read_manifest(written)
 
 
+def test_display_for_pois_cost_and_outputs():
+    display = {"wind": {"unit": "GW", "factor": 1e-3}, "TOTEX": {"unit": "kEUR", "factor": 1e-3},
+               "generation": {"unit": "GW", "factor": 1e-3}}
+    manifest = Manifest.model_validate(_manifest(display=display))
+    assert manifest.display["TOTEX"].unit == "kEUR"
+    assert manifest.display["generation"].factor == 1e-3
+
+
 def test_other_format_is_refused(written):
     (written / MANIFEST_NAME).write_text(json.dumps({"obj_label": "TOTEX"}))
     with pytest.raises(NearOptimalSetError, match="not a near-optimal set"):
@@ -193,6 +201,8 @@ def test_other_format_is_refused(written):
         ({"plots": {"p": {"type": "bar", "output": "missing", "x": "technology"}}}, "unknown output"),
         ({"plots": {"p": {"type": "stacked_bar", "output": "capacity", "x": "technology"}}}, "needs 'stack'"),
         ({"plots": {"p": {"type": "bar", "output": "capacity", "x": "snapshot"}}}, "not a set of output"),
+        ({"display": {"nuclear": {"unit": "GW", "factor": 1e-3}}}, "not a PoI, the cost or an output"),
+        ({"display": {"wind": {"unit": "GW", "factor": 0}}}, "greater than 0"),
     ],
 )
 def test_invalid_manifest(overrides, message):

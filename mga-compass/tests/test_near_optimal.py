@@ -3,7 +3,9 @@ import pandas as pd
 import pytest
 
 import mga_format
-from mga_compass.near_optimal import category_styles, mix_output, navigable_points, plot_data
+from mga_compass.near_optimal import (
+    category_styles, display_points, display_units, mix_output, navigable_points, plot_data,
+)
 from mga_compass.schemes import Alpha
 
 SNAPSHOTS = pd.date_range("2030-01-01", periods=2, freq="h")
@@ -25,6 +27,8 @@ def written(tmp_path):
         "plots": {"generation": {"type": "stacked_timeseries", "output": "generation", "x": "snapshot", "stack": "technology"},
                   "capacity": {"type": "bar", "output": "capacity", "x": "technology"},
                   "total": {"type": "timeseries", "output": "generation", "x": "snapshot"}},
+        "display": {"wind": {"unit": "kW", "factor": 1e3}, "TOTEX": {"unit": "kEUR", "factor": 1e-3},
+                    "generation": {"unit": "GW", "factor": 1e-3}},
     })
     index = pd.Index([0, 1, 2], name="point")
     points = pd.DataFrame({"slack": [0.0, 0.05, 0.05], "kind": ["optimum", "box", "nearest"],
@@ -46,6 +50,25 @@ def written(tmp_path):
 def test_navigable_points_drop_slack_and_kind(written):
     _, nos = written
     assert list(navigable_points(nos).columns) == ["wind", "TOTEX"]
+
+
+def test_display_units_and_points(written):
+    _, nos = written
+    assert display_units(nos) == {"wind": "kW", "TOTEX": "kEUR"}
+    points = display_points(nos)
+    assert list(points["wind"]) == [1000.0, 2000.0, 3000.0]
+    assert list(points["TOTEX"]) == pytest.approx([0.01, 0.0104, 0.0105])
+
+
+def test_plot_data_in_display_units(written):
+    directory, nos = written
+    alphas = [Alpha(pd.Series({1: 1.0}))]
+    stored = plot_data(directory, nos, "total", alphas)
+    shown = plot_data(directory, nos, "total", alphas, display=True)
+    assert shown["data"][0] == pytest.approx([v * 1e-3 for v in stored["data"][0]])
+    assert shown["x_dim"] == stored["x_dim"]
+    # No display entry for "capacity": shown as stored.
+    assert plot_data(directory, nos, "capacity", alphas, display=True) == plot_data(directory, nos, "capacity", alphas)
 
 
 def test_category_styles_skip_missing_values(written):
