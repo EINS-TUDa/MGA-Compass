@@ -1,7 +1,7 @@
 """Generate the MGA dataset consumed by the MGA Compass server.
 
 Solves a PyPSA example network, then hands it to
-mga_surveyor.generate_mga_files (which drives a CddMethod per
+mga_surveyor.generate_mga_files (which drives a BBMethod, its default, per
 sub-optimality (slack) level to discover near-optimal points, writing
 result .nc files), reads the result back via
 mga_surveyor.consolidate_mga_results, and writes the data files of a
