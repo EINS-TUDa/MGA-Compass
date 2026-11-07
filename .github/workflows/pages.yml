@@ -1,11 +1,27 @@
-name: Deploy Presentations to GitHub Pages
+name: Deploy Docs and Presentations to GitHub Pages
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'docs/presentation/**'
+      - 'docs/**'
+      # The API reference is generated from the packages' docstrings.
+      - 'mga-compass/src/**'
+      - 'mga-surveyor/src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/pages.yml'
+  # Build (but don't deploy) on PRs, so broken docs show up before merging.
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mga-compass/src/**'
+      - 'mga-surveyor/src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,21 +29,29 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
 
+      # --- Sphinx docs (site root) ---
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      # --all-packages so autodoc can import mga_compass and mga_surveyor.
+      - name: Install docs dependencies
+        run: uv sync --all-packages --group docs
+
+      - name: Build Sphinx docs
+        run: uv run --no-sync sphinx-build -b html docs _site
+
+      # --- reveal.js presentations (/presentations/) ---
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -51,25 +75,34 @@ jobs:
 
       # Each presentation is its own self-contained reveal.js checkout (its
       # own index.html/dist/plugin/etc at its own root, built in place by
-      # gulp above) -- assembled here into one Pages site so each is served
-      # at its own top-level path (/Trondheim, /Freiburg) regardless of
-      # where they live in the repo. node_modules is excluded: it's only
-      # needed to build, never served.
-      - name: Assemble Pages site
+      # gulp above), copied under /presentations/ next to the Sphinx site.
+      # node_modules is excluded: it's only needed to build, never served.
+      - name: Add presentations to the site
         run: |
-          mkdir -p _site/Trondheim _site/Freiburg
-          rsync -a --exclude node_modules docs/presentation/Trondheim/ _site/Trondheim/
-          rsync -a --exclude node_modules docs/presentation/Freiburg/ _site/Freiburg/
-          cp docs/presentation/index.html _site/index.html
+          mkdir -p _site/presentations/Trondheim _site/presentations/Freiburg
+          rsync -a --exclude node_modules docs/presentation/Trondheim/ _site/presentations/Trondheim/
+          rsync -a --exclude node_modules docs/presentation/Freiburg/ _site/presentations/Freiburg/
+          cp docs/presentation/index.html _site/presentations/index.html
+          touch _site/.nojekyll
 
       - name: Setup Pages
+        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

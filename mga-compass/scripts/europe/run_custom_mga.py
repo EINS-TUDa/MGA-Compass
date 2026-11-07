@@ -203,9 +203,9 @@ def main() -> None:
     )
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument(
-        "--method", choices=["cdd", "bb"], default="cdd",
-        help="Vertex enumeration of the outer polytope: cddlib (CddMethod, default) or Qhull's "
-             "polar dual (BBMethod).",
+        "--method", choices=["cdd", "bb"], default="bb",
+        help="Vertex enumeration of the outer polytope: Qhull's polar dual (BBMethod, default) "
+             "or cddlib (CddMethod, float arithmetic).",
     )
     parser.add_argument(
         "--quiet-solver", action="store_true", default=False,

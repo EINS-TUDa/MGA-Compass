@@ -4,3 +4,6 @@
 
 # Near-optimal set the backend downloads at startup (see mgaserver/config.py)
 app/backend/data/
+
+# Sphinx build output
+docs/_build/

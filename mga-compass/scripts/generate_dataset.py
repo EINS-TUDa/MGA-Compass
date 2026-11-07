@@ -1,8 +1,8 @@
 """Generate the near-optimal set the MGA Compass server serves.
 
 Solves a PyPSA example network, hands it to mga_surveyor.generate_mga_files
-(one exploration per sub-optimality (slack) level, writing a result .nc file per
-solve), collects the result as a near-optimal set (mga_surveyor.
+(one BBMethod exploration, its default, per sub-optimality (slack) level,
+writing a result .nc file per solve), collects the result as a near-optimal set (mga_surveyor.
 collect_near_optimal_set), adds each point's installed capacity and generation
 as outputs, and applies the dataset config (scripts/datasets/model_energy.json:
 units, descriptions, plots, display units; see dataset_config.py). Writes the

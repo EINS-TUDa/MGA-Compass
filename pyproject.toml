@@ -1,2 +1,16 @@
 [tool.uv.workspace]
 members = ["mga-format", "mga-surveyor", "mga-compass", "app/backend"]
+
+# Sphinx documentation (docs/). Build with:
+#   uv run --all-packages --group docs sphinx-build -b html docs docs/_build/html
+# --all-packages is needed so autodoc can import mga_compass and mga_surveyor.
+# Use `uv run`, not `uv sync`: run only adds what's missing, while sync removes
+# anything not requested (e.g. the locally built pycddlib from the `cdd` extra).
+[dependency-groups]
+docs = [
+    "sphinx>=8.2",
+    "myst-parser>=4.0",
+    "furo>=2024.8.6",
+    "sphinx-design>=0.6",
+    "sphinx-copybutton>=0.5",
+]
