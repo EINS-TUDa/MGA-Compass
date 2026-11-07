@@ -1,8 +1,7 @@
 import linopy
 import pytest
 import pandas as pd
-import xarray as xr
-from mga_compass.core import navigate, interpolate, alpha_2_point, point_2_alpha, describe_changes, linear_lower_bounds, upper_envelope, build_outer_approximation, navigate_outer_approximation, aggregate_by_alpha
+from mga_compass.core import navigate, interpolate, alpha_2_point, point_2_alpha, describe_changes, linear_lower_bounds, upper_envelope, build_outer_approximation, navigate_outer_approximation
 from mga_compass.schemes import Alpha, Breakpoint, Constraints, ConstraintChange, LinearBound, LowerBoundPoint
 
 
@@ -58,64 +57,6 @@ def test_interpolate():
 #     navigate(points_df, constraints_df)
 #     pass
 
-
-
-class TestAggregateByAlpha:
-    def test_returns_xarray_dataarray(self):
-        da = xr.DataArray([10.0, 20.0], dims=["index"], coords={"index": [0, 1]})
-        alpha = Alpha([0.5, 0.5], index=[0, 1])
-        assert isinstance(aggregate_by_alpha(da, alpha), xr.DataArray)
-
-    def test_index_dimension_removed(self):
-        da = xr.DataArray([10.0, 20.0], dims=["index"], coords={"index": [0, 1]})
-        alpha = Alpha([0.5, 0.5], index=[0, 1])
-        assert "index" not in aggregate_by_alpha(da, alpha).dims
-
-    def test_weighted_sum_1d(self):
-        da = xr.DataArray([10.0, 30.0], dims=["index"], coords={"index": [0, 1]})
-        alpha = Alpha([0.3, 0.7], index=[0, 1])
-        assert float(aggregate_by_alpha(da, alpha)) == pytest.approx(0.3 * 10.0 + 0.7 * 30.0)
-
-    def test_weighted_sum_2d(self):
-        da = xr.DataArray(
-            [[10.0, 20.0], [30.0, 40.0]],
-            dims=["index", "technology"],
-            coords={"index": [0, 1], "technology": ["gas", "coal"]},
-        )
-        alpha = Alpha([0.3, 0.7], index=[0, 1])
-        result = aggregate_by_alpha(da, alpha)
-        assert float(result.sel(technology="gas")) == pytest.approx(0.3 * 10.0 + 0.7 * 30.0)
-        assert float(result.sel(technology="coal")) == pytest.approx(0.3 * 20.0 + 0.7 * 40.0)
-
-    def test_single_point_alpha_returns_original_values(self):
-        da = xr.DataArray(
-            [[5.0, 15.0], [25.0, 35.0]],
-            dims=["index", "technology"],
-            coords={"index": [0, 1], "technology": ["gas", "coal"]},
-        )
-        alpha = Alpha([1.0], index=[0])
-        result = aggregate_by_alpha(da, alpha)
-        assert float(result.sel(technology="gas")) == pytest.approx(5.0)
-        assert float(result.sel(technology="coal")) == pytest.approx(15.0)
-
-    def test_sparse_alpha_ignores_missing_indices(self):
-        da = xr.DataArray(
-            [10.0, 20.0, 30.0, 40.0],
-            dims=["index"],
-            coords={"index": [0, 1, 2, 3]},
-        )
-        alpha = Alpha([0.4, 0.6], index=[0, 2])
-        assert float(aggregate_by_alpha(da, alpha)) == pytest.approx(0.4 * 10.0 + 0.6 * 30.0)
-
-    def test_other_dimensions_preserved(self):
-        da = xr.DataArray(
-            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]],
-            dims=["index", "snapshot", "technology"],
-            coords={"index": [0, 1], "snapshot": ["t1", "t2"], "technology": ["gas", "coal"]},
-        )
-        alpha = Alpha([0.5, 0.5], index=[0, 1])
-        result = aggregate_by_alpha(da, alpha)
-        assert set(result.dims) == {"snapshot", "technology"}
 
 
 class TestLinearLowerBounds:

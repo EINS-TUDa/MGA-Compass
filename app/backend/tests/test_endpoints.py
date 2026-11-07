@@ -14,7 +14,7 @@ from mgaserver.main import app
 
 @pytest.fixture(scope="module")
 def client(dataset_dir):
-    # The app loads conftest's dataset bundle through its normal startup path.
+    # The app loads conftest's near-optimal set through its normal startup path.
     with TestClient(app) as c:
         yield c
 
@@ -237,7 +237,7 @@ class TestNavigateValidation:
 
 class TestPlotEndpoint:
     @pytest.fixture(autouse=True)
-    def mock_get_plot_data(self):
+    def mock_plot_data(self):
         _result = {
             "x_dim": ["gas", "coal"],
             "data": [{"gas": [10.0], "coal": [30.0]}, {"gas": [20.0], "coal": [40.0]}],
@@ -268,15 +268,15 @@ class TestPlotEndpoint:
         response = client.post("/plot_data", json=payload)
         assert response.json()["betas"] == pytest.approx([0.0, 1.0])
 
-    def test_x_dim_from_get_plot_data(self, client, mock_get_plot_data):
+    def test_x_dim_from_plot_data(self, client, mock_plot_data):
         payload = {"name": "capacity", "breakpoints": [{"beta": 0.0, "alpha": {"0": 1.0}}]}
         response = client.post("/plot_data", json=payload)
-        assert response.json()["x_dim"] == mock_get_plot_data["x_dim"]
+        assert response.json()["x_dim"] == mock_plot_data["x_dim"]
 
-    def test_data_from_get_plot_data(self, client, mock_get_plot_data):
+    def test_data_from_plot_data(self, client, mock_plot_data):
         payload = {"name": "capacity", "breakpoints": [{"beta": 0.0, "alpha": {"0": 1.0}}, {"beta": 1.0, "alpha": {"1": 1.0}}]}
         response = client.post("/plot_data", json=payload)
-        assert response.json()["data"] == mock_get_plot_data["data"]
+        assert response.json()["data"] == mock_plot_data["data"]
 
 
 class TestPlotEndpointReadsTheSet:

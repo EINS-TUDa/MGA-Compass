@@ -7,7 +7,6 @@ import xarray as xr
 
 from pathlib import Path
 
-from .manifest import Plot
 from .schemes import Constraints, Breakpoint, Point, Points, Alpha, ConstraintChange, LinearBound, LowerBoundPoint
 
 
@@ -230,30 +229,6 @@ def alpha_2_point(alpha: Alpha, points: Points) -> Point:
     return pd.Series({func: sum(points.loc[i, func] * alpha[i] for i in alpha.index) for func in points.columns})
 
 
-def aggregate_by_alpha(da: xr.DataArray, alpha: Alpha) -> xr.DataArray:
-    weights = xr.DataArray(alpha, dims=["index"])
-    # xr.dot aligns on "index" like (da * weights).sum("index") does, but contracts
-    # without a da-sized temporary -- on a large output dataset that product was
-    # several times the dataset's own memory. Weights in da's dtype so a float32
-    # dataset isn't upcast (and copied) to float64 first.
-    return xr.dot(da, weights.astype(da.dtype), dim="index")
-
-
-def xr_to_series(da: xr.DataArray, plot: Plot) -> dict | list:
-    # da: xarray aggregated over alpha (no "index" dimension).
-    # Returns a dict {category -> values over x_dim} if the plot has a categories_dim,
-    # or a plain list over x_dim otherwise.
-    dims_to_sum = [d for d in da.dims if d != plot.x_dim and d != plot.categories_dim]
-    aggregated = da.sum(dims_to_sum) if dims_to_sum else da
-
-    if plot.categories_dim:
-        return {
-            str(cat): aggregated.sel({plot.categories_dim: cat}).values.tolist()
-            for cat in aggregated.coords[plot.categories_dim].values
-        }
-    return aggregated.values.tolist()
-
-
 def point_2_alpha(
     point: Point,
     points: Points,
@@ -290,13 +265,6 @@ def _normalized_alpha(values: np.ndarray, index: pd.Index) -> Alpha:
     match that point exactly is infeasible. Divided by their sum, they are not."""
     weights = pd.Series(values, index=index).clip(lower=0)
     return Alpha(weights / weights.sum())
-
-
-def get_plot_data(alphas: list[Alpha], plot: Plot, da: xr.DataArray) -> dict:
-    return {
-        "x_dim": da.coords[plot.x_dim].values.tolist(),
-        "data": [xr_to_series(aggregate_by_alpha(da, alpha), plot) for alpha in alphas],
-    }
 
 
 def describe_changes(input_constraints: Constraints, output_constraints: Constraints) -> list[ConstraintChange]:
