@@ -71,6 +71,8 @@ A complete example with all three parts:
 {
   "format": "mga-near-optimal-set",
   "version": 1,
+  "title": "PyPSA model_energy example",
+  "description": "One electricity node and one hydrogen node over 2019, at 3-hourly resolution.",
   "created": "2026-11-06T12:00:00+00:00",
   "software": {"mga-surveyor": "0.1.0", "pypsa": "1.3.0"},
   "cost": {"name": "TOTEX", "unit": "EUR", "optimum": 3899079890.0},
@@ -133,6 +135,8 @@ A complete example with all three parts:
 | Field | Part | Meaning |
 |---|---|---|
 | `format`, `version` | core | Always `"mga-near-optimal-set"` and the format version. A reader refuses versions it does not know. |
+| `title` | optional | What the set is of, in a few words. Empty if not given. |
+| `description` | optional | The model behind the set: what it covers and where it comes from. Empty if not given. |
 | `created` | core | When the set was exported, ISO 8601 with time zone. |
 | `software` | core | Versions of the packages that produced it. |
 | `cost.name` | core | Name of the cost column in `points.parquet`. |

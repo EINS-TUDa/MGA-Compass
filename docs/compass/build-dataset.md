@@ -22,8 +22,8 @@ uv run python scripts/generate_dataset.py --tol 5 --max-iter 120 --max-parallel 
 
 `--tol`, `--max-iter` and `--max-parallel` are required. The script uses Gurobi if a licence
 is available and HiGHS otherwise, explores the 2%, 5% and 8% slack levels, and writes the set
-to `scripts/output/set/` and its archive to `scripts/output/near-optimal-set.zip`. Names,
-units, plots and display units come from the dataset config
+to `scripts/output/set/` and its archive to `scripts/output/near-optimal-set.zip`. The title
+and description, names, units, plots and display units come from the dataset config
 `scripts/datasets/model_energy.json`; see [](../reference/scripts.md#dataset-configs).
 
 Then check the set and publish it:
@@ -87,7 +87,7 @@ checks.
    write_set(nos, outputs, Path("my-output/set"))  # also writes my-output/near-optimal-set.zip
    ```
 
-   Or set the manifest's `sets`, `outputs`, `plots` and `display` yourself and write the set
+   Or set the manifest's `title`, `description`, `sets`, `outputs`, `plots` and `display` yourself and write the set
    with {py:func}`mga_format.write <mga_format.near_optimal_set.write>`.
 
 5. **Publish it** with `publish_dataset.py`, as for the example above.

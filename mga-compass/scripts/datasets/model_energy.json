@@ -1,4 +1,6 @@
 {
+  "title": "PyPSA model_energy example",
+  "description": "PyPSA's model_energy example (pypsa.examples.model_energy): one electricity node and one hydrogen node over 2019, at 3-hourly resolution (every third hour of the hourly example). A demand of 7,565 MW on average is met by wind, solar, a battery with 3 hours of storage, and hydrogen made by electrolysis, stored, and turned back into electricity by a turbine. Load shedding costs 20,000 €/MWh. The cost (TOTEX) is the annualised investment plus operating cost.",
   "cost": {
     "name": "TOTEX",
     "unit": "€",

@@ -98,6 +98,20 @@ def test_repr_shows_designs_slack_and_units(set_dir):
     assert "<table" in mc.load(set_dir)._repr_html_()
 
 
+def test_title_and_description_from_the_manifest(set_dir, tmp_path):
+    space = mc.load(set_dir)
+    assert (space.title, space.description) == ("", "")
+    assert repr(space).startswith("Space: ")
+    nos = mga_format.read(set_dir)
+    manifest = nos.manifest.model_copy(update={"title": "Toy model", "description": "Two PoIs & one node."})
+    outputs = {"capacity": mga_format.read_output(set_dir, "capacity")}
+    mga_format.write(tmp_path / "described", mga_format.NearOptimalSet(manifest, nos.points, nos.duals, nos.sets), outputs)
+    space = mc.load(tmp_path / "described")
+    assert (space.title, space.description) == ("Toy model", "Two PoIs & one node.")
+    assert repr(space).startswith("Toy model\nTwo PoIs & one node.\n\nSpace: ")
+    assert "<h4>Toy model</h4><p>Two PoIs &amp; one node.</p>" in space._repr_html_()
+
+
 def test_load_archive_into_directory(set_dir, tmp_path):
     archive = mga_format.pack(set_dir, tmp_path / "set.zip")
     space = mc.load(archive, tmp_path / "unpacked")

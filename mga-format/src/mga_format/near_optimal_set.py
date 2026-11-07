@@ -125,6 +125,10 @@ class Display(_Model):
 class Manifest(_Model):
     format: Literal["mga-near-optimal-set"]
     version: Literal[1]
+    #: What the set is of, in a few words, e.g. "PyPSA model_energy example".
+    title: str = ""
+    #: The model behind the set: what it covers and where it comes from.
+    description: str = ""
     created: datetime
     software: dict[str, str] = {}
     cost: Cost

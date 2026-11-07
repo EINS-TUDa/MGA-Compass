@@ -23,8 +23,10 @@ returns a :class:`Space`: the set's designs in PoI space, ready to navigate::
 """
 from __future__ import annotations
 
+import html
 import math
 import numbers
+import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -128,6 +130,10 @@ class Space:
         self.slack = _slack_level(manifest.slacks, slack)
         self.cost: str = manifest.cost.name
         self.pois: list[str] = manifest.poi_names
+        self.title: str = manifest.title
+        """What the set is of, from its manifest; may be empty."""
+        self.description: str = manifest.description
+        """The model behind the set, from its manifest; may be empty."""
         self.solver_name = solver_name
         self.solver_options = default_solver_options(solver_name) if solver_options is None else solver_options
 
@@ -303,10 +309,16 @@ class Space:
         return table
 
     def __repr__(self) -> str:
-        return f"{self._title()}\n{self._formatted_summary().to_string()}"
+        lines = [self.title] if self.title else []
+        lines += textwrap.wrap(self.description, 90)
+        if lines:
+            lines.append("")
+        return "\n".join([*lines, self._title(), self._formatted_summary().to_string()])
 
     def _repr_html_(self) -> str:
-        return f"<p>{self._title()}</p>{self._formatted_summary().to_html()}"
+        about = f"<h4>{html.escape(self.title)}</h4>" if self.title else ""
+        about += f"<p>{html.escape(self.description)}</p>" if self.description else ""
+        return f"{about}<p>{self._title()}</p>{self._formatted_summary().to_html()}"
 
 
 @dataclass

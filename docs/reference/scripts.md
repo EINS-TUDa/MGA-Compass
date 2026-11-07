@@ -80,6 +80,7 @@ Values are never converted: `display` only changes how the platform shows them.
 
 | Field | Meaning |
 |---|---|
+| `title`, `description` | Optional: the set's title and the model's description, copied to the [manifest](near-optimal-set-format.md#manifestjson). |
 | `cost` | `name` (the cost column), `unit`, and optional `display`. |
 | `pois` | Per property of interest, keyed by its name in Surveyor's `dimensions`: `unit`, `description`, optional `name` (the name the platform shows instead) and optional `display`. |
 | `sets` | Per index set: `description`, and optional `labels` and `colors` per member. |

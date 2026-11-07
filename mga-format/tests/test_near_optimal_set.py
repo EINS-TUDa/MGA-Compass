@@ -301,3 +301,13 @@ def read_without_checksums(directory):
 
 def test_manifest_created_is_preserved(written):
     assert read(written).manifest.created == datetime(2026, 11, 6, 12, tzinfo=timezone.utc)
+
+
+def test_title_and_description_are_optional_and_kept(written, tmp_path):
+    nos = read(written)
+    assert (nos.manifest.title, nos.manifest.description) == ("", "")
+    manifest = nos.manifest.model_copy(update={"title": "Toy model", "description": "Two PoIs, one node."})
+    outputs = {name: read_output(written, name) for name in manifest.outputs}
+    write(tmp_path / "described", NearOptimalSet(manifest, nos.points, nos.duals, nos.sets), outputs)
+    again = read(tmp_path / "described").manifest
+    assert (again.title, again.description) == ("Toy model", "Two PoIs, one node.")

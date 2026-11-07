@@ -1,7 +1,7 @@
 """Turn a generate_mga_files run into a near-optimal set for the web platform.
 
 A dataset config (``scripts/datasets/<name>.json``) holds everything about a
-dataset that MGA Surveyor does not know: the PoIs' names, units and
+dataset that MGA Surveyor does not know: its title and the model's description, the PoIs' names, units and
 descriptions, the cost's name and unit, the index sets' labels and colours, the
 outputs' units and descriptions, the plots, and the units the platform shows
 quantities in. Values are never converted: units are the model's, and
@@ -65,6 +65,9 @@ class OutputConfig(_Model):
 
 
 class DatasetConfig(_Model):
+    #: The set's title and the model's description, copied to the manifest.
+    title: str = ""
+    description: str = ""
     cost: CostConfig
     #: Keyed by Surveyor's dimension key.
     pois: dict[str, PoiConfig]
@@ -91,8 +94,8 @@ class DatasetConfig(_Model):
         outputs: dict[str, pd.DataFrame],
         members: dict[str, list],
     ) -> tuple[NearOptimalSet, dict[str, pd.DataFrame]]:
-        """Add the outputs, their index sets, plots and display units to `nos`,
-        and rename the PoIs. `outputs` are long tables (``point``, one column per
+        """Add the title, description, outputs, their index sets, plots and display
+        units to `nos`, and rename the PoIs. `outputs` are long tables (``point``, one column per
         set, ``value``); `members` lists each set's members in display order."""
         if missing := sorted(set(outputs) - set(self.outputs)):
             raise ValueError(f"outputs {missing} have no entry in the dataset config")
@@ -119,6 +122,7 @@ class DatasetConfig(_Model):
             if self.outputs[name].display:
                 display[name] = Display(**self.outputs[name].display.model_dump())
         manifest = nos.manifest.model_copy(update={
+            "title": self.title, "description": self.description,
             "pois": pois, "sets": sets, "outputs": output_specs, "plots": dict(self.plots), "display": display,
         })
         manifest = mga_format.Manifest.model_validate(manifest.model_dump())  # re-check the cross-references

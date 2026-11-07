@@ -11,19 +11,25 @@ You need:
 - the `mga-compass` library, with the `notebook` extra for plots:
   `uv sync --package mga-compass --extra notebook` (see [](install.md));
 - a [near-optimal set](../reference/near-optimal-set-format.md): a directory, its zip
-  archive, or the URL of a published one. The output below is from the set of PyPSA's
-  `model_energy` example that `scripts/generate_dataset.py` builds (see [](build-dataset.md)).
+  archive, or the URL of a published one. This guide uses the published set of PyPSA's
+  `model_energy` example, which `scripts/generate_dataset.py` builds (see [](build-dataset.md)).
 
 ## Load the set
 
 ```python
 import mga_compass as mc
 
-space = mc.load("scripts/output/set")
+URL = "https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-model-energy-2026-11-07/near-optimal-set.zip"
+space = mc.load(URL, "data/model-energy")
 space
 ```
 
 ```text
+PyPSA model_energy example
+PyPSA's model_energy example (pypsa.examples.model_energy): one electricity node and one
+hydrogen node over 2019, at 3-hourly resolution (every third hour of the hourly example).
+...
+
 Space: 188 near-optimal designs in 4 PoIs, slack 0.08 (set's slack levels: 0.02, 0.05, 0.08)
          unit      min        max    optimum  description
 wind       MW   15,350     42,044     25,272  Installed wind power capacity.
@@ -41,8 +47,10 @@ their cost. `space.points` has one row per design; `space.optimum` is the cheape
   way.
 - **Slack level:** by default the space is the set's largest slack level. `slack=0.02`
   keeps only the designs found within 2% of the optimal cost.
-- **Archives:** a zip archive or a URL is unpacked into a directory you name, from which
-  outputs are read later: `mc.load(url, "data/model-energy")`.
+- **Archives:** a zip archive or a URL is unpacked into the directory you name, from which
+  outputs are read later. Once unpacked, load it from there: `mc.load("data/model-energy")`.
+- **About the set:** `space.title` and `space.description` say what model it comes from,
+  when the set's manifest gives them.
 
 ## Navigate
 

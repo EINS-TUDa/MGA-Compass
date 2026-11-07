@@ -7,3 +7,6 @@ app/backend/data/
 
 # Sphinx build output
 docs/_build/
+
+# Near-optimal sets the example notebooks download
+mga-compass/examples/data/
