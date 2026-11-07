@@ -337,17 +337,28 @@ def linear_lower_bounds(
     breakpoints: list[Breakpoint],
     duals: Points,
     obj_label: str,
+    optimum: float | None = None,
 ) -> list[LinearBound]:
+    """Lines in beta below the cost along the path of `breakpoints`.
+
+    Point i, with duals mu_i (a subgradient of the cost at it), gives
+    cost(z) >= cost_i + mu_i . (z - z_i); along the path, z is linear in beta,
+    and so is this bound. Only the points with a weight at some breakpoint are
+    used. With `optimum`, the optimal cost, the constant line cost >= optimum is
+    added too: no design is cheaper. `points` and `duals` are indexed by point
+    id, as the breakpoints' weights are."""
     nonzero_index = set()
     for bp in breakpoints:
         nonzero_index.update(bp.alpha[bp.alpha != 0].index)
     p_start = breakpoints[0].point
     p_target = breakpoints[-1].point
     result = []
-    for i in nonzero_index:
+    for i in sorted(nonzero_index):
         slope = float(((p_target - p_start).drop(obj_label) * duals.loc[i]).sum())
-        intercept = float(((p_start.drop(obj_label) - points.iloc[i].drop(obj_label)) * duals.loc[i]).sum() + points.iloc[i][obj_label])
+        intercept = float(((p_start.drop(obj_label) - points.loc[i].drop(obj_label)) * duals.loc[i]).sum() + points.loc[i, obj_label])
         result.append(LinearBound(slope=slope, intercept=intercept))
+    if optimum is not None:
+        result.append(LinearBound(slope=0.0, intercept=float(optimum)))
     return result
 
 

@@ -1167,6 +1167,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+notebook = [
+    { name = "matplotlib" },
+]
 scripts = [
     { name = "gurobipy" },
     { name = "mga-surveyor" },
@@ -1182,6 +1185,7 @@ requires-dist = [
     { name = "gurobipy", marker = "extra == 'scripts'", specifier = ">=13.0.2" },
     { name = "highspy", specifier = ">=1.15.1" },
     { name = "linopy", specifier = ">=0.6.7" },
+    { name = "matplotlib", marker = "extra == 'notebook'" },
     { name = "mga-format", editable = "mga-format" },
     { name = "mga-surveyor", marker = "extra == 'scripts'", editable = "mga-surveyor" },
     { name = "netcdf4", marker = "extra == 'scripts'" },
@@ -1193,7 +1197,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },
     { name = "xarray" },
 ]
-provides-extras = ["test", "scripts"]
+provides-extras = ["test", "notebook", "scripts"]
 
 [[package]]
 name = "mga-format"

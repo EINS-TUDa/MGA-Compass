@@ -64,16 +64,15 @@ Together, the two bounds bracket the true cost of the solutions along the path.
 - {py:func}`~mga_compass.near_optimal.plot_data` mixes a detailed output for a list of weight
   vectors and arranges it for one of the set's plots.
 - {py:func}`~mga_compass.core.linear_lower_bounds` builds the lower-bound lines from the
-  breakpoints and the duals, and {py:func}`~mga_compass.core.upper_envelope` takes their
-  maximum.
+  breakpoints and the duals, plus the constant line $\nu^*$ when given the optimal cost, and
+  {py:func}`~mga_compass.core.upper_envelope` takes their maximum.
+- From Python, {py:meth}`~mga_compass.space.Space.traverse` (also part of every
+  {py:meth}`~mga_compass.space.Space.navigate` result) gives both bounds along the path as a
+  {py:class}`~mga_compass.space.Traverse`.
 
 ```{admonition} To be implemented
 :class: warning
 
-The cost lower bound is not complete yet:
-
-- {py:func}`~mga_compass.core.linear_lower_bounds` does not yet add the constant bound
-  $\nu(z) \ge \nu^*$.
-- The web platform does not yet show the lower bound: every near-optimal set carries its
-  duals, but the server does not pass them on yet.
+The web platform does not yet show the lower bound: every near-optimal set carries its
+duals, but the server does not pass them on yet.
 ```

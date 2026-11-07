@@ -123,6 +123,20 @@ class TestLinearLowerBounds:
         for b in result:
             assert b.slope == pytest.approx(0.0)
 
+    def test_points_are_found_by_id_not_position(self, simple_points, simple_duals, simple_breakpoints):
+        # Ids 7 and 3: point 7 is the first row, as point 0 was before.
+        ids = pd.Index([7, 3])
+        points, duals = simple_points.set_axis(ids), simple_duals.set_axis(ids)
+        breakpoints = [Breakpoint(bp.beta, Alpha([1.0], index=[i]), bp.point) for bp, i in zip(simple_breakpoints, ids)]
+        expected = linear_lower_bounds(simple_points, simple_breakpoints, simple_duals, obj_label="TOTEX")
+        result = linear_lower_bounds(points, breakpoints, duals, obj_label="TOTEX")
+        assert sorted(result) == pytest.approx(sorted(expected))
+
+    def test_optimum_adds_a_constant_line(self, simple_points, simple_duals, simple_breakpoints):
+        result = linear_lower_bounds(simple_points, simple_breakpoints, simple_duals, obj_label="TOTEX", optimum=9.0)
+        assert len(result) == 3
+        assert LinearBound(slope=0.0, intercept=9.0) in result
+
 
 class TestUpperEnvelope:
     def test_single_line_returns_two_endpoints(self):
