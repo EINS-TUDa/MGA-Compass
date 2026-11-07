@@ -7,8 +7,9 @@ import pytest
 
 import mga_format
 from mga_surveyor import (
-    collect_near_optimal_set, consolidate_mga_results, export_near_optimal_set, generate_mga_files, network_fingerprint,
+    collect_near_optimal_set, export_near_optimal_set, generate_mga_files, network_fingerprint,
 )
+from mga_surveyor.pypsa_ext import _read_meta
 
 DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},
@@ -79,7 +80,7 @@ def test_run_summary_per_slack_level(run):
 def test_export_round_trips(run, exported):
     n, output_dir = run
     nos = mga_format.read(exported)
-    points, _, files = consolidate_mga_results(output_dir, obj_label="cost")
+    files = [output_dir / "optimal.nc", *output_dir.glob("slack_*/mga_*_result_*.nc")]
 
     assert len(nos.points) == len(files)
     assert nos.points.loc[0, "kind"] == "optimum"
@@ -90,10 +91,14 @@ def test_export_round_trips(run, exported):
         assert (at_slack["kind"] == "box").sum() == 2 * len(DIMENSIONS)
         assert (at_slack["kind"] == "nearest").sum() == len(list((output_dir / f"slack_{slack}").glob("mga_closest_*.nc")))
 
-    # The same points and costs as consolidate_mga_results, just labelled.
+    # The same points and costs as the result files hold, just labelled.
     exported_rows = sorted(map(tuple, nos.points[["wind", "solar", "cost"]].round(6).to_numpy()))
-    consolidated_rows = sorted(map(tuple, points[["wind", "solar", "cost"]].round(6).to_numpy()))
-    assert exported_rows == consolidated_rows
+    file_rows = []
+    for path in files:
+        meta = _read_meta(path)
+        coordinates = meta.get("coordinates", meta.get("point"))
+        file_rows.append((coordinates["wind"], coordinates["solar"], meta["obj"]))
+    assert exported_rows == sorted(map(tuple, np.round(file_rows, 6)))
     assert not nos.duals.isna().any().any()
 
     manifest = nos.manifest

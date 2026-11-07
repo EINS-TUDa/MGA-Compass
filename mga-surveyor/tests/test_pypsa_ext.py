@@ -1,11 +1,10 @@
 import numpy as np
-import pandas as pd
 import pypsa
 import pytest
 
 from mga_surveyor import (
     CddMethod,
-    consolidate_mga_results,
+    collect_near_optimal_set,
     encode_cache_key,
     generate_mga_files,
     make_closest_point_fn,
@@ -20,6 +19,13 @@ DIMENSIONS = {
     "wind": {"Generator": {"p_nom": {"wind": 1}}},
     "solar": {"Generator": {"p_nom": {"solar": 1}}},
 }
+
+
+def _collect(output_dir):
+    """A generate_mga_files run's points (PoIs plus a "cost" column), duals and
+    result files, in point order."""
+    nos, files = collect_near_optimal_set(output_dir, units={k: "MW" for k in DIMENSIONS}, cost_unit="EUR")
+    return nos.points.drop(columns=["slack", "kind"]), nos.duals, files
 
 
 def _build_network() -> pypsa.Network:
@@ -481,11 +487,11 @@ def test_make_oracle_fns_returns_three_independently_usable_callables(tmp_path):
     assert method.max_gap() > 0
 
 
-def test_generate_mga_files_and_consolidate_end_to_end(tmp_path):
+def test_generate_mga_files_and_collect_end_to_end(tmp_path):
     """The full pipeline moved out of a caller script: builds all the
     oracles, drives a CddMethod per slack level, writes result .nc
-    files, then consolidates every discovered point's
-    coordinates/duals/obj into two DataFrames."""
+    files, then collects every discovered point's coordinates/duals/obj
+    as a near-optimal set."""
     n = _build_network()
     keys = list(DIMENSIONS.keys())
 
@@ -495,7 +501,7 @@ def test_generate_mga_files_and_consolidate_end_to_end(tmp_path):
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=[1e-2], max_iter=[5], max_parallel=2, verbose=False, normalize=False,
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
 
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
@@ -579,34 +585,14 @@ def test_generate_mga_files_reuses_existing_closest_point_files_on_restart(tmp_p
         n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=1e-2, max_iter=0, max_parallel=2, verbose=False, use_objective_cuts=False, normalize=False,
     )
-    points_df, _duals_df, _nc_files = consolidate_mga_results(tmp_path, obj_label="obj")
+    points_df, _duals_df, _nc_files = _collect(tmp_path)
     assert ((points_df["wind"] == point_b["wind"]) & (points_df["solar"] == point_b["solar"])).any()
     assert ((points_df["wind"] == point_a["wind"]) & (points_df["solar"] == point_a["solar"])).any()
 
 
-def test_consolidate_mga_results_is_a_repeatable_read(tmp_path):
-    """consolidate_mga_results needs only an output_dir, and is a pure
-    read: calling it again later on the same, untouched output_dir (no
-    new solving in between) reproduces the exact same DataFrames/paths --
-    it doesn't mutate anything it reads."""
-    n = _build_network()
-
-    generate_mga_files(
-        n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
-        tol=1e-2, max_iter=5, max_parallel=2, verbose=False, normalize=False,
-    )
-
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
-    points_df2, duals_df2, nc_files2 = consolidate_mga_results(tmp_path, obj_label="cost")
-
-    assert nc_files == nc_files2
-    pd.testing.assert_frame_equal(points_df, points_df2)
-    pd.testing.assert_frame_equal(duals_df, duals_df2)
-
-
-def test_generate_mga_files_then_consolidate(tmp_path):
+def test_generate_mga_files_then_collect(tmp_path):
     """generate_mga_files (just runs, writes .nc files, returns None)
-    followed by a separate consolidate_mga_results call is the whole
+    followed by a separate collect_near_optimal_set call is the whole
     pipeline, done in two explicit steps."""
     n = _build_network()
     keys = list(DIMENSIONS.keys())
@@ -617,7 +603,7 @@ def test_generate_mga_files_then_consolidate(tmp_path):
     )
     assert result is None
 
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
     assert set(points_df.columns) == {*keys, "cost"}
@@ -627,7 +613,7 @@ def test_generate_mga_files_then_consolidate(tmp_path):
 
 def test_make_optimality_fn_stashes_dimensions_in_optimal_nc_meta(tmp_path):
     """dimensions itself round-trips through optimal.nc's meta -- the piece
-    of per-run metadata consolidate_mga_results reads back instead of
+    of per-run metadata collect_near_optimal_set reads back instead of
     needing dimensions/keys passed to it directly."""
     n = _build_network()
     solve_optimal = make_optimality_fn(n, DIMENSIONS, tmp_path, solver_name="highs")
@@ -637,12 +623,12 @@ def test_make_optimality_fn_stashes_dimensions_in_optimal_nc_meta(tmp_path):
     assert cached_dimensions == DIMENSIONS
 
 
-def test_consolidate_mga_results_requires_optimal_nc(tmp_path):
+def test_collect_requires_optimal_nc(tmp_path):
     """No optimal.nc (e.g. generate_mga_files never ran, or it's the wrong
     directory) raises immediately -- there's no dimensions/keys to read
-    back, so nothing meaningful could be consolidated anyway."""
+    back, so nothing meaningful could be collected anyway."""
     with pytest.raises(FileNotFoundError, match="optimal.nc"):
-        consolidate_mga_results(tmp_path)
+        _collect(tmp_path)
 
 
 def test_make_closest_point_fn_weights_change_which_point_is_found():
@@ -675,7 +661,7 @@ def test_make_closest_point_fn_weights_change_which_point_is_found():
 def test_generate_mga_files_with_normalize_converges_and_output_is_unaffected(tmp_path):
     """normalize=True changes what CddMethod itself explores
     (a [-1, 1]^2 cube instead of raw MW), but every .nc file written and
-    everything consolidate_mga_results reads back is still real units --
+    everything collect_near_optimal_set reads back is still real units --
     the normalization is invisible outside generate_mga_files itself."""
     n = _build_network()
 
@@ -683,7 +669,7 @@ def test_generate_mga_files_with_normalize_converges_and_output_is_unaffected(tm
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=1.0, max_iter=10, max_parallel=2, verbose=False, normalize=True,  # tol=1.0 -> 1%, normalize=True
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
 
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
@@ -757,7 +743,7 @@ def test_make_closest_point_fn_on_solve_fires_for_single_and_batch(tmp_path):
 def test_generate_mga_files_with_use_objective_cuts_converges_and_output_is_unaffected(tmp_path):
     """use_objective_cuts=True adds extra cuts to CddMethod's outer
     approximation, but every .nc file written and everything
-    consolidate_mga_results reads back is still exactly what it would be
+    collect_near_optimal_set reads back is still exactly what it would be
     without it -- the extra cuts are invisible outside generate_mga_files
     itself, same property normalize=True has."""
     n = _build_network()
@@ -766,7 +752,7 @@ def test_generate_mga_files_with_use_objective_cuts_converges_and_output_is_unaf
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True, normalize=False,
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
 
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
@@ -786,7 +772,7 @@ def test_generate_mga_files_with_normalize_and_use_objective_cuts_together(tmp_p
         n, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=1.0, max_iter=10, max_parallel=2, verbose=False, normalize=True, use_objective_cuts=True,  # tol=1.0 -> 1%
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
 
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
@@ -817,7 +803,7 @@ def test_generate_mga_files_with_use_objective_cuts_uses_existing_closest_point_
         n2, DIMENSIONS, tmp_path, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=1e-2, max_iter=10, max_parallel=2, verbose=False, use_objective_cuts=True, normalize=False,
     )
-    points_df, duals_df, nc_files = consolidate_mga_results(tmp_path, obj_label="cost")
+    points_df, duals_df, nc_files = _collect(tmp_path)
     assert len(points_df) == len(nc_files) > 0
     assert len(duals_df) == len(points_df)
 
@@ -838,13 +824,13 @@ def test_generate_mga_files_tol_is_a_percentage_when_normalized(tmp_path):
         n1, DIMENSIONS, tmp_path_loose, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=50.0, max_iter=15, max_parallel=2, verbose=False, normalize=True,
     )
-    points_loose, _duals_loose, _files_loose = consolidate_mga_results(tmp_path_loose, obj_label="cost")
+    points_loose, _duals_loose, _files_loose = _collect(tmp_path_loose)
 
     n2 = _build_network()
     generate_mga_files(
         n2, DIMENSIONS, tmp_path_tight, norm="linf", slack_levels=[0.1], solver_name="highs",
         tol=0.1, max_iter=15, max_parallel=2, verbose=False, normalize=True,
     )
-    points_tight, _duals_tight, _files_tight = consolidate_mga_results(tmp_path_tight, obj_label="cost")
+    points_tight, _duals_tight, _files_tight = _collect(tmp_path_tight)
 
     assert len(points_tight) > len(points_loose)

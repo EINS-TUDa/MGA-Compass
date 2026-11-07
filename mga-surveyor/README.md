@@ -56,7 +56,7 @@ units — useful whenever those units differ wildly in scale (e.g. MW vs MWh), s
 polytope over such dimensions lets the large-range ones dominate. `explore.drive`/`Method` need no
 changes at all for this — it's just oracle functions that happen to speak normalized coordinates.
 `generate_mga_files`'s own `normalize` (`True` by default) wires this in for a whole run; everything
-written to disk (and `consolidate_mga_results`'s output) stays in real units either
+written to disk (and the near-optimal set collected from it) stays in real units either
 way, since normalization only changes what `Method` itself sees, not what the oracle functions
 solve or cache.
 
