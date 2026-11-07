@@ -35,7 +35,10 @@ import pandas as pd
 import pypsa
 
 from mga_compass import Constraints, default_solver_options, interpolate, navigate
-from mga_surveyor import consolidate_mga_results, generate_mga_files
+from mga_compass.near_optimal import navigable_points
+from mga_surveyor import collect_near_optimal_set, generate_mga_files
+
+pd.set_option("display.float_format", "{:,.1f}".format)  # plain numbers, not 3.9e+09
 
 
 def main() -> None:
@@ -75,16 +78,24 @@ this to `main()`:
 
 ## Step 3: Collect the designs
 
-Read the results back as a table, and rescale the cost to million euros and hydrogen storage
-to GWh, so that all columns are of similar size:
+Read the results back as a near-optimal set, giving the unit of each capacity and of the
+cost, and take its designs as a table: one row per design, one column per capacity, plus the
+cost.
 
 ```python
-    points, duals, _ = consolidate_mga_results("tutorial-output", obj_label="TOTEX")
-    points["TOTEX"] = points["TOTEX"] / 1e6        # EUR -> million EUR
-    points["hydrogen"] = points["hydrogen"] / 1e3  # MWh -> GWh
+    nos, _ = collect_near_optimal_set(
+        "tutorial-output",
+        units={"wind": "MW", "solar": "MW", "battery": "MW", "hydrogen": "MWh"},
+        cost_unit="EUR",
+        cost_name="TOTEX",
+    )
+    points = navigable_points(nos)
     print(f"{len(points)} designs")
     print(points.round(1).head())
 ```
+
+The values stay in the model's units, euros next to megawatts: MGA Compass handles columns
+of very different sizes itself.
 
 ## Step 4: Ask for more wind
 
@@ -112,7 +123,7 @@ Compute the path from the cheapest design to the new one, with the cost along th
 ```python
     breakpoints = interpolate(points, start, target, obj_label="TOTEX", solver_options=solver_options)
     for bp in breakpoints:
-        print(f"at {bp.beta:.0%} of the way: {bp.point['TOTEX']:,.1f} million EUR")
+        print(f"at {bp.beta:.0%} of the way: {bp.point['TOTEX'] / 1e6:,.1f} million EUR")
 
 
 if __name__ == "__main__":
@@ -132,17 +143,17 @@ After about 2 minutes, the end of the output looks like this:
 
 ```text
 38 designs
-          wind   solar  battery  hydrogen   TOTEX
-index
-0      18092.5     0.0    288.9       0.0  3899.1
-1      23083.1  2816.6   2768.4       0.0  4094.0
+          wind   solar  battery  hydrogen           TOTEX
+point
+0     18,092.5     0.0    288.9       0.0 3,899,079,889.9
+1     18,092.5 3,796.8    288.9       0.0 4,094,032,909.6
 ...
-            start   target
-wind      18092.5  24654.0
-solar         0.0      0.0
-battery     288.9   2013.4
-hydrogen      0.0      0.0
-TOTEX      3899.1   4016.1
+                   start          target
+wind            18,092.5        24,654.0
+solar                0.0             0.0
+battery            288.9         2,013.4
+hydrogen             0.0             0.0
+TOTEX    3,899,079,889.9 4,016,052,286.6
 at 0% of the way: 3,899.1 million EUR
 at 100% of the way: 4,016.1 million EUR
 ```

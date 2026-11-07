@@ -14,16 +14,12 @@
 .. automodule:: mga_compass.schemes
 ```
 
-## Dataset manifest
+## Near-optimal sets
+
+Navigation and plotting on a set in the [near-optimal set format](near-optimal-set-format.md).
 
 ```{eval-rst}
-.. automodule:: mga_compass.manifest
-```
-
-## Dataset bundles
-
-```{eval-rst}
-.. automodule:: mga_compass.dataset
+.. automodule:: mga_compass.near_optimal
 ```
 
 ## Solvers

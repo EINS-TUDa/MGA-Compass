@@ -49,16 +49,22 @@ It assumes you have [installed MGA Surveyor](install.md).
    Start with a coarse tolerance such as `tol=5`, check the result, then tighten it: the
    run resumes from the existing results (see [](resume.md)).
 
-4. **Read the results:**
+4. **Read the results** as a [near-optimal set](../reference/near-optimal-set-format.md),
+   giving the unit of every property of interest and of the cost:
 
    ```python
-   from mga_surveyor import consolidate_mga_results
+   from mga_surveyor import collect_near_optimal_set
 
-   points, duals, files = consolidate_mga_results("mga-output", obj_label="cost")
+   nos, files = collect_near_optimal_set("mga-output", units={"wind": "MW", "solar": "MW"}, cost_unit="EUR")
    ```
 
-   `points` has one row per solve and one column per property of interest, plus the cost
-   column named by `obj_label`. `duals` holds the matching dual values, used for the
-   [cost lower bound](../compass/traverse.md#a-lower-bound-on-the-cost).
+   `nos.points` has one row per solve: the slack level it was found at, how it was found, one
+   column per property of interest, and the cost column (named by `cost_name`, default
+   `"cost"`). `nos.duals` holds the matching dual values, used for the
+   [cost lower bound](../compass/traverse.md#a-lower-bound-on-the-cost). `files[p]` is the
+   NetCDF file of point `p`, the solved network to read detailed results from.
+
+   To save the set, use `export_near_optimal_set("mga-output", "my-set", units=…, cost_unit=…)`
+   instead, or `mga_format.write` to add outputs first.
 
 All parameters are listed in [](../reference/surveyor-parameters.md).

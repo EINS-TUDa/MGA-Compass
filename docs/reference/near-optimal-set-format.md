@@ -226,3 +226,30 @@ See the [complete example](#manifestjson) above.
 Optimization results, such as optimized capacities, dispatch and prices, are left out, so
 solving the network again does not change the fingerprint, while changing any cost, limit or
 time series does. Two sets with the same fingerprint were computed from the same model.
+
+## Archive
+
+To publish a set as a single file, for example as a GitHub release asset, it is packed into a
+zip archive, conventionally named `near-optimal-set.zip`, that holds the directory's files at
+their relative paths (`manifest.json`, `points.parquet`, `sets/…`, `outputs/…`). Unpacking it
+gives the directory back, and the set is checked against the manifest's checksums as when
+reading a directory.
+
+Sets are immutable: a new set is a new archive under a new name or release, never an
+overwrite of an old one.
+
+## Functions
+
+The `mga-format` package implements the format; see [](format-api.md).
+
+| Function | Does |
+|---|---|
+| {py:func}`~mga_format.near_optimal_set.write` | Write a set, with its outputs, to a new directory. Refuses a set that breaks a rule above, such as missing duals. |
+| {py:func}`~mga_format.near_optimal_set.read` | Read a set's manifest, points, duals and index sets, after checking every file's checksum. Outputs are not loaded. |
+| {py:func}`~mga_format.near_optimal_set.read_output` | Read one output, optionally only for some points; reads only those points' row groups. |
+| {py:func}`~mga_format.archive.pack`, {py:func}`~mga_format.archive.unpack` | Pack a set directory into an archive, and unpack one. |
+| {py:func}`~mga_format.archive.fetch` | Download an archive from a URL and unpack it. |
+
+MGA Surveyor writes a set with {py:func}`~mga_surveyor.export.export_near_optimal_set`, or
+collects it in memory with {py:func}`~mga_surveyor.export.collect_near_optimal_set` to add
+outputs first.

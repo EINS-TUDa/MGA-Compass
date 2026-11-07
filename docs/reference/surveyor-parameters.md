@@ -57,6 +57,9 @@ With `normalize=False`, `tol` is a plain distance in the PoIs' own units.
 
 `output_dir` holds `optimal.nc`, the solved optimum, and one `slack_<ε>/` directory per slack
 level with a NetCDF file per solve: `mga_furthest_result_*.nc` for the initial box directions
-and `mga_closest_result_*.nc` for every nearest-point solve. Read them back with
-{py:func}`~mga_surveyor.pypsa_ext.consolidate_mga_results`, which returns one table of points
-and one of duals, with one row per file.
+and `mga_closest_result_*.nc` for every nearest-point solve. When a slack level finishes, its
+directory also gets `run.json`, the [run summary](../surveyor/resume.md#the-run-summary).
+
+Read the results back with {py:func}`~mga_surveyor.export.collect_near_optimal_set`, which
+returns them as a [near-optimal set](near-optimal-set-format.md) with one point per file, or
+write them as one with {py:func}`~mga_surveyor.export.export_near_optimal_set`.

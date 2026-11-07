@@ -61,8 +61,8 @@ Together, the two bounds bracket the true cost of the solutions along the path.
 - {py:func}`~mga_compass.core.interpolate` computes the breakpoints. Its `threshold` is
   relative to the cost at each midpoint (default `1e-3`, i.e. 0.1%) rather than an absolute
   amount.
-- {py:func}`~mga_compass.core.get_plot_data` mixes the detailed outputs for a list of weight
-  vectors.
+- {py:func}`~mga_compass.near_optimal.plot_data` mixes a detailed output for a list of weight
+  vectors and arranges it for one of the set's plots.
 - {py:func}`~mga_compass.core.linear_lower_bounds` builds the lower-bound lines from the
   breakpoints and the duals, and {py:func}`~mga_compass.core.upper_envelope` takes their
   maximum.
@@ -74,6 +74,6 @@ The cost lower bound is not complete yet:
 
 - {py:func}`~mga_compass.core.linear_lower_bounds` does not yet add the constant bound
   $\nu(z) \ge \nu^*$.
-- The web platform does not yet show the lower bound, because its server does not load the
-  duals of the dataset.
+- The web platform does not yet show the lower bound: every near-optimal set carries its
+  duals, but the server does not pass them on yet.
 ```

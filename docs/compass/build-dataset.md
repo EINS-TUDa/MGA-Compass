@@ -1,8 +1,9 @@
 # Build a dataset for the platform
 
-The web platform reads a **dataset bundle**: near-optimal points, their duals, detailed
-outputs for plotting, and a manifest describing them. This guide builds one from a PyPSA
-network. The format itself is described in [](../reference/dataset-bundle.md).
+The web platform serves a **near-optimal set**: the near-optimal points with their costs and
+duals, detailed outputs for plotting, and a manifest describing them, including how the
+platform plots and labels them. This guide builds one from a PyPSA network. The format itself
+is described in [](../reference/near-optimal-set-format.md).
 
 You need the `scripts` extra, which adds MGA Surveyor and PyPSA:
 
@@ -12,66 +13,88 @@ uv sync --package mga-compass --extra scripts
 
 ## The example dataset
 
-`mga-compass/scripts/generate_dataset.py` builds the dataset of PyPSA's `model_energy`
-example. From the `mga-compass` directory:
+`mga-compass/scripts/generate_dataset.py` builds the set of PyPSA's `model_energy` example.
+From the `mga-compass` directory:
 
 ```bash
 uv run python scripts/generate_dataset.py --tol 5 --max-iter 120 --max-parallel 4
 ```
 
 `--tol`, `--max-iter` and `--max-parallel` are required. The script uses Gurobi if a licence
-is available and HiGHS otherwise, explores the 2%, 5% and 8% slack levels, and writes the data
-files to `scripts/output/`.
+is available and HiGHS otherwise, explores the 2%, 5% and 8% slack levels, and writes the set
+to `scripts/output/set/` and its archive to `scripts/output/near-optimal-set.zip`. Names,
+units, plots and display units come from the dataset config
+`scripts/datasets/model_energy.json`; see [](../reference/scripts.md#dataset-configs).
 
-Then assemble the bundle:
+Then check the set and publish it:
 
 ```bash
-uv run python scripts/publish_dataset.py --data-dir scripts/output \
-    --manifest scripts/manifests/model_energy.json
+uv run python scripts/publish_dataset.py --set-dir scripts/output/set --tag dataset-<date>
 ```
 
-This copies the files the manifest lists into `scripts/output/bundle/`, records their
-checksums in the manifest, and checks that nothing is missing. To publish the bundle as a
-GitHub release, add `--tag dataset-<date>` (needs the [GitHub CLI](https://cli.github.com/)
-and write access to the repository); the script prints the `DATASET_URL` to give the server.
+This checks the set, checks that its archive unpacks to the same set, and uploads the archive
+as a new GitHub release (needs the [GitHub CLI](https://cli.github.com/) and write access to
+the repository). It prints the `DATASET_URL` to give the server. Without `--tag`, it only
+checks.
 
 ## A dataset from your own network
 
-1. **Explore the network** with MGA Surveyor and read the results back; see
-   [](../surveyor/explore-network.md).
+1. **Explore the network** with MGA Surveyor; see [](../surveyor/explore-network.md).
 
-2. **Write the points and duals** as Parquet:
-
-   ```python
-   from mga_compass import write_frame
-
-   points, duals, nc_files = consolidate_mga_results("mga-output", obj_label="cost")
-   write_frame(points, out / "points.parquet")
-   write_frame(duals, out / "duals.parquet")
-   ```
-
-3. **Write the outputs you want to plot**, one `xarray.DataArray` per file, indexed by point
-   first (`index`), with string coordinates on its last dimension:
+2. **Collect the results** as a near-optimal set, with the unit of every property of
+   interest and of the cost:
 
    ```python
-   from mga_compass import write_dataarray
+   from mga_surveyor import collect_near_optimal_set
 
-   write_dataarray(installed_capacity, out / "installed_capacity.parquet")  # dims: index, technology
+   nos, files = collect_near_optimal_set(
+       "mga-output", units={"wind": "MW", "solar": "MW"}, cost_unit="EUR", cost_name="TOTEX",
+   )
    ```
 
-   `generate_dataset.py`'s `extract_generation_and_capacity` shows how to read generation
-   and capacities out of the NetCDF files Surveyor wrote, one per point.
+   Every slack level needs its [run summary](../surveyor/resume.md#the-run-summary), and
+   every point its duals.
 
-4. **Write a manifest** describing the files and the plots; start from
-   `scripts/manifests/model_energy.json` and see [](../reference/dataset-bundle.md).
+3. **Extract the outputs you want to plot**, as long tables: a `point` column, one column per
+   index set, and a `value` column. `files[p]` is the solved network of point `p`. For
+   example, installed capacity per technology:
 
-5. **Assemble the bundle** with `publish_dataset.py`, as for the example above.
+   ```python
+   import pandas as pd
+   import pypsa
 
-```{tip}
-Keep the columns of `points` at similar magnitudes, for example cost in million EUR and
-capacities in GW. Navigation solves small linear programs over these numbers, and columns
-that differ by many orders of magnitude can make them numerically infeasible; see the known
-limitation in [](navigation.md#in-the-code).
-```
+   rows = []
+   for point, path in enumerate(files):
+       n = pypsa.Network(path)
+       capacity = n.generators.p_nom_opt
+       rows += [(point, tech, value) for tech, value in capacity.items()]
+   capacity = pd.DataFrame(rows, columns=["point", "technology", "value"])
+   ```
 
-To try the bundle, [run the platform locally](run-locally.md) with `DATA_DIR` pointing at it.
+   `generate_dataset.py`'s `extract_generation_and_capacity` reads generation and capacity
+   for all points at once, without loading each network fully.
+
+4. **Add the outputs, their index sets and the plots.** Write a dataset config, starting from
+   `scripts/datasets/model_energy.json`, and apply it as the scripts do:
+
+   ```python
+   from pathlib import Path
+
+   from dataset_config import DatasetConfig, write_set  # in mga-compass/scripts
+
+   config = DatasetConfig.load("scripts/datasets/my_network.json")
+   nos, outputs = config.apply(nos, {"capacity": capacity}, {"technology": list(capacity["technology"].unique())})
+   write_set(nos, outputs, Path("my-output/set"))  # also writes my-output/near-optimal-set.zip
+   ```
+
+   Or set the manifest's `sets`, `outputs`, `plots` and `display` yourself and write the set
+   with {py:func}`mga_format.write <mga_format.near_optimal_set.write>`.
+
+5. **Publish it** with `publish_dataset.py`, as for the example above.
+
+Keep the values in the model's units. To show them in other units, for example cost in
+million euros and capacities in GW, give them a `display` entry in the dataset config: the
+platform then shows the values times its factor.
+
+To try the set, [run the platform locally](run-locally.md) with `DATA_DIR` pointing at its
+directory.

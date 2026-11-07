@@ -4,19 +4,26 @@ The MGA Compass server (`app/backend`) is configured through environment variabl
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATASET_URL` | none | URL of a published [dataset bundle](dataset-bundle.md), e.g. `https://github.com/EINS-TUDa/MGA-Compass/releases/download/<tag>`. If set, the bundle is downloaded into `DATA_DIR` at startup. |
-| `DATA_DIR` | `data` | Directory holding the bundle, relative to the working directory. Without `DATASET_URL`, a bundle must already be there. |
+| `DATASET_URL` | none | URL of a [near-optimal set](near-optimal-set-format.md) archive, e.g. `https://github.com/EINS-TUDa/MGA-Compass/releases/download/<tag>/near-optimal-set.zip`, or a `file://` URL. If set, the archive is downloaded and unpacked into `DATA_DIR` at startup, replacing what is there. `docker-compose.yml` requires it. |
+| `DATA_DIR` | `data` | Directory holding the set, relative to the working directory. Without `DATASET_URL`, a set must already be there. |
 | `ALLOWED_ORIGINS` | `["*"]` | Origins allowed to call the API, as a JSON list. |
 | `SOLVER_NAME` | `highs` | LP solver for navigation and interpolation. |
 | `SOLVER_FEASIBILITY_TOLERANCE` | `1e-7` | Primal feasibility tolerance passed to the solver. |
 | `SOLVER_LOG_PATH` | `solver.log` | Where solver logs are written. |
 | `DEBUG` | `false` | Debug mode. |
 
-The server refuses to start if any file of the bundle is missing or fails its checksum.
+The server refuses to start if a file of the set is missing or fails its checksum, or if the
+set breaks a rule of the format. It navigates over all points of the set, so over its largest
+slack level.
+
+The server keeps the points in memory and reads the outputs from `DATA_DIR` when a plot needs
+them, only for the points the plot mixes.
 
 ## API
 
-All endpoints are rate-limited per client address.
+All endpoints are rate-limited per client address. Quantities are exchanged in the set's
+display units (its manifest's `display`): `/init` reports them, the frontend sends values back
+in them, and `/plot_data` returns them.
 
 | Endpoint | Method | Limit | Does |
 |---|---|---|---|

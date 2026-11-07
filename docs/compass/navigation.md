@@ -66,22 +66,19 @@ the energy system model.
   It returns the adjusted constraints and the new point.
 - {py:func}`~mga_compass.core.describe_changes` compares the requested and the adjusted
   constraints, for showing the user what was changed.
+- {py:func}`~mga_compass.near_optimal.navigable_points` gives the points of a
+  [near-optimal set](../reference/near-optimal-set-format.md) as `navigate` expects them.
 - {py:func}`~mga_compass.core.navigate_outer_approximation` runs the same algorithm over a
   polytope given by halfspaces, built with
   {py:func}`~mga_compass.core.build_outer_approximation`, instead of over the convex hull of
   the samples.
 
-```{admonition} Known limitation: to be improved
-:class: warning
-
-Navigation and interpolation build their small linear programs directly from the values in
-`points`. If the columns differ by many orders of magnitude, for example cost in euros
-(around $10^9$) next to capacities in MW (around $10^4$), these programs can become
-numerically ill-conditioned and fail as "infeasible", even though a solution exists. Until
-the library rescales the columns itself, keep them at similar magnitudes, for example cost in
-million euros and capacities in GW, and pass `default_solver_options("highs")` as the server
-does.
-```
+The points can be in the model's units, even when the columns differ by many orders of
+magnitude, for example cost in euros (around $10^9$) next to capacities in MW (around
+$10^4$). `navigate`, `interpolate` and `point_2_alpha` divide every column by its largest
+absolute value before building their linear programs, and convert the results back. The
+weights $\alpha$ do not depend on this scaling, so the results are the same as in any other
+units.
 
 ```{admonition} Known bug
 :class: danger

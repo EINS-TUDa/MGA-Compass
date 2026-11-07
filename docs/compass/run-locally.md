@@ -3,9 +3,9 @@
 For development, run the backend and the frontend separately. The frontend's development
 server forwards every request under `/api` to the backend on `127.0.0.1:8000`.
 
-You need a dataset bundle: either a local directory (see [](build-dataset.md)) or the URL of
-a published one, such as
-`https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-pypsa-eur-34-2026-11-04`.
+You need a [near-optimal set](../reference/near-optimal-set-format.md): either a local
+directory (see [](build-dataset.md)) or the URL of a published archive, such as
+`https://github.com/EINS-TUDa/MGA-Compass/releases/download/<tag>/near-optimal-set.zip`.
 
 ## Backend
 
@@ -15,23 +15,25 @@ From `app/backend`:
 uv sync --package mgaserver
 ```
 
-Then start it with a local bundle:
+Then start it with a local set:
 
 ```bash
-DATA_DIR=/path/to/bundle uv run uvicorn mgaserver.main:app --reload --port 8000
+DATA_DIR=/path/to/set uv run uvicorn mgaserver.main:app --reload --port 8000
 ```
 
-or with a published one, which is downloaded into `data/` on startup:
+or with a published one, which is downloaded and unpacked into `data/` on startup:
 
 ```bash
-DATASET_URL=https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-pypsa-eur-34-2026-11-04 \
+DATASET_URL=https://github.com/EINS-TUDa/MGA-Compass/releases/download/<tag>/near-optimal-set.zip \
     uv run uvicorn mgaserver.main:app --reload --port 8000
 ```
 
-On Windows PowerShell, set the variable first, e.g. `$env:DATA_DIR = "C:\path\to\bundle"`.
+A local archive works too, as a `file://` URL. On Windows PowerShell, set the variable first,
+e.g. `$env:DATA_DIR = "C:\path\to\set"`.
 
-The server refuses to start if a file in the bundle is missing or its checksum doesn't match.
-All settings are listed in [](../reference/server-settings.md).
+The server refuses to start if a file of the set is missing, its checksum doesn't match, or
+the set breaks a rule of the format. All settings are listed in
+[](../reference/server-settings.md).
 
 ## Frontend
 

@@ -55,13 +55,15 @@ linear program over the $n$ weights $\alpha$, whatever the size of the original 
 
 ## In the code
 
-- A **dataset bundle** holds what the preparation phase produces: the sample points with
-  their costs as a `Points` table (one row per sample, one column per PoI, plus the cost
-  column named by `obj_label`), the detailed outputs per sample, and a manifest; see
-  {py:mod}`mga_compass.dataset` and {py:mod}`mga_compass.manifest`.
+- A **near-optimal set** holds what the preparation phase produces: the sample points with
+  their costs and duals, and optionally detailed outputs per sample; see
+  [](../reference/near-optimal-set-format.md). MGA Surveyor exports one with
+  {py:func}`~mga_surveyor.export.export_near_optimal_set`.
+- {py:func}`~mga_compass.near_optimal.navigable_points` gives its points as a `Points` table
+  (one row per sample, one column per PoI, plus the cost column).
 - {py:func}`~mga_compass.core.point_2_alpha` solves CCP: it fixes every PoI column and
   minimizes the cost column.
-- {py:func}`~mga_compass.core.aggregate_by_alpha` mixes the detailed outputs with weights
-  $\alpha$, giving $x = \sum_i \alpha_i x^{(i)}$.
-- The scripts in `mga-compass/scripts` build a bundle from a PyPSA network using MGA
-  Surveyor.
+- {py:func}`~mga_compass.near_optimal.mix_output` mixes a detailed output with weights
+  $\alpha$, giving $x = \sum_i \alpha_i x^{(i)}$. It reads only the samples with a weight.
+- The scripts in `mga-compass/scripts` build a set for the web platform from a PyPSA network
+  using MGA Surveyor; see [](build-dataset.md).
