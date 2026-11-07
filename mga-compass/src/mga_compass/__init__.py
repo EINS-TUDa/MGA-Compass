@@ -30,8 +30,11 @@ from .schemes import (
     ConstraintChange,
 )
 from .solvers import default_solver_options
+from .space import Space, load
 
 __all__ = [
+    "Space",
+    "load",
     "configure_solver_logging",
     "navigate",
     "interpolate",

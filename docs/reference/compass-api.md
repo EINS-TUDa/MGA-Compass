@@ -2,6 +2,12 @@
 
 <!-- autodoc emits reStructuredText, so its directives must run inside eval-rst blocks. -->
 
+## Exploring a set from Python
+
+```{eval-rst}
+.. automodule:: mga_compass.space
+```
+
 ## Navigation and interpolation
 
 ```{eval-rst}
