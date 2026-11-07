@@ -19,7 +19,10 @@ def set_dir(tmp_path):
                  {"name": "solar", "unit": "MW", "definition": {}}],
         "slack_levels": [{"slack": 0.01, **LEVEL}, {"slack": 0.05, **LEVEL}],
         "fingerprint": {"network": "x"},
-        "display": {"wind": {"unit": "GW", "factor": 1e-3}, "TOTEX": {"unit": "kEUR", "factor": 1e-3}},
+        "display": {"wind": {"unit": "GW", "factor": 1e-3}, "TOTEX": {"unit": "kEUR", "factor": 1e-3},
+                    "capacity": {"unit": "GW", "factor": 1e-3}},
+        "sets": {"technology": {}},
+        "outputs": {"capacity": {"index": ["point", "technology"], "unit": "MW", "description": "capacity per technology"}},
     })
     index = pd.Index([0, 1, 2, 3, 4], name="point")
     points = pd.DataFrame({
@@ -30,8 +33,11 @@ def set_dir(tmp_path):
         "TOTEX": [1000.0, 1010.0, 1008.0, 1050.0, 1040.0],
     }, index=index)
     duals = pd.DataFrame({"wind": [0.0] * 5, "solar": [0.0] * 5}, index=index)
+    # The output repeats the PoIs: each design's wind and solar capacity.
+    capacity = points[["wind", "solar"]].rename_axis(columns="technology").stack().rename("value").reset_index()
+    sets = {"technology": pd.DataFrame({"technology": ["wind", "solar"]})}
     directory = tmp_path / "set"
-    mga_format.write(directory, mga_format.NearOptimalSet(manifest, points, duals))
+    mga_format.write(directory, mga_format.NearOptimalSet(manifest, points, duals, sets), {"capacity": capacity})
     return directory
 
 
@@ -229,6 +235,57 @@ def test_navigation_weights_make_the_target(space):
     mixed = space.points.loc[result.alpha.index].mul(result.alpha, axis=0).sum()
     assert mixed.to_numpy() == pytest.approx(result.target.to_numpy())
     assert result.traverse.breakpoints[0].point["wind"] == pytest.approx(2000)
+
+
+# ---------------------------------------------------------------- outputs
+
+
+def test_outputs_table(set_dir):
+    assert mc.load(set_dir).outputs().to_dict("index") == {
+        "capacity": {"unit": "GW", "index": "technology", "description": "capacity per technology"}}
+    assert mc.load(set_dir, units="model").outputs().loc["capacity", "unit"] == "MW"
+
+
+def test_output_of_a_point(space):
+    capacity = space.output("capacity", 3)
+    assert capacity.name == "capacity"
+    assert capacity.attrs["unit"] == "MW"
+    assert list(capacity.index) == ["wind", "solar"]
+    assert capacity.to_dict() == {"wind": 4000.0, "solar": 100.0}
+
+
+def test_output_of_a_navigation_is_the_mix_of_its_target(space):
+    result = space.navigate(space.optimum, {"wind": ("increase", 1000), "TOTEX": ("keep", 30)})
+    capacity = space.output("capacity", result)
+    assert capacity["wind"] == pytest.approx(result.target["wind"])  # 3250
+    assert capacity["solar"] == pytest.approx(result.target["solar"])  # 250
+
+
+def test_output_along_the_traverse(space):
+    result = space.navigate(space.optimum, {"wind": ("increase", 1000), "TOTEX": ("keep", 30)})
+    halfway = space.output("capacity", result.traverse.alpha_at(0.5))
+    assert halfway["wind"] == pytest.approx(result.traverse.at(0.5)["wind"])
+
+
+def test_output_of_poi_values_uses_their_cheapest_mix(space):
+    capacity = space.output("capacity", pd.Series({"wind": 3250.0, "solar": 250.0, "TOTEX": 0.0}))
+    assert capacity["wind"] == pytest.approx(3250)
+    assert capacity["solar"] == pytest.approx(250)
+
+
+def test_output_in_display_units(set_dir):
+    capacity = mc.load(set_dir).output("capacity", 3)
+    assert capacity.attrs["unit"] == "GW"
+    assert capacity["wind"] == pytest.approx(4.0)
+
+
+def test_output_errors(space, set_dir):
+    with pytest.raises(ValueError, match="no output 'dispatch'"):
+        space.output("dispatch", 0)
+    with pytest.raises(ValueError, match="not a design of this space"):
+        mc.load(set_dir, units="model", slack=0.01).output("capacity", 3)  # found at 5% only
+    with pytest.raises(TypeError, match="a design is"):
+        space.output("capacity", "optimum")
 
 
 # ---------------------------------------------------------------- traverse

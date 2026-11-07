@@ -17,6 +17,9 @@ returns a :class:`Space`: the set's designs in PoI space, ready to navigate::
     result           # start and target side by side, and what had to be adjusted
     result.traverse  # the way from start to target: cost along it, with a lower bound
     space.navigate(result, {...})    # carry on from the target
+
+    space.outputs()                       # the set's detailed outputs
+    space.output("generation", result)    # one of them, for the target
 """
 from __future__ import annotations
 
@@ -33,8 +36,10 @@ import pandas as pd
 
 import mga_format
 
-from .core import alpha_2_point, describe_changes, interpolate, linear_lower_bounds, navigate, upper_envelope
-from .near_optimal import display_factor, display_units, navigable_points
+from .core import (
+    alpha_2_point, describe_changes, interpolate, linear_lower_bounds, navigate, point_2_alpha, upper_envelope,
+)
+from .near_optimal import display_factor, display_units, mix_output, navigable_points
 from .schemes import Alpha, Breakpoint, ConstraintChange, Constraints
 from .solvers import default_solver_options
 
@@ -119,6 +124,7 @@ class Space:
         manifest = nos.manifest
         self.nos = nos
         self.directory = Path(directory)
+        self.unit_system: Units = units
         self.slack = _slack_level(manifest.slacks, slack)
         self.cost: str = manifest.cost.name
         self.pois: list[str] = manifest.poi_names
@@ -198,6 +204,59 @@ class Space:
         breakpoints = interpolate(self.points, start, target, self.cost,
                                   solver_name=self.solver_name, solver_options=self.solver_options)
         return Traverse(self, breakpoints)
+
+    def outputs(self) -> pd.DataFrame:
+        """The set's detailed outputs, one row each: the unit (in this space's
+        units), the index sets besides ``point``, and the description."""
+        manifest = self.nos.manifest
+        return pd.DataFrame({
+            "unit": [self._output_unit(name) for name in manifest.outputs],
+            "index": [", ".join(output.index[1:]) for output in manifest.outputs.values()],
+            "description": [output.description for output in manifest.outputs.values()],
+        }, index=pd.Index(list(manifest.outputs), name="output"))
+
+    def output(self, name: str, design: Navigation | Alpha | pd.Series | int) -> pd.Series:
+        """Detailed output `name` (see :meth:`outputs`) of a design, such as
+        hourly generation per technology.
+
+        A design here is a mix of the set's designs, and its output is the same
+        mix of their outputs. `design` is a navigation result (its target), the
+        weights of a design (e.g. ``result.alpha`` or
+        ``result.traverse.alpha_at(0.5)``), a point id, or a design's PoI
+        values, whose cheapest mix is found first.
+
+        Returns a Series indexed by the output's sets in their order (unstack it
+        for a table), in this space's units. Reads only the outputs of the
+        designs in the mix."""
+        outputs = self.nos.manifest.outputs
+        if name not in outputs:
+            raise ValueError(f"the set has no output {name!r}; it has {list(outputs)}")
+        alpha = self._alpha(design)
+        (mixed,) = mix_output(self.directory, self.nos, name, [alpha])
+        factor = display_factor(self.nos, name) if self.unit_system == "display" else 1.0
+        series = (mixed * factor).to_series().rename(name)
+        series.attrs["unit"] = self._output_unit(name)
+        return series
+
+    def _output_unit(self, name: str) -> str:
+        display = self.nos.manifest.display.get(name)
+        if self.unit_system == "display" and display is not None:
+            return display.unit
+        return self.nos.manifest.outputs[name].unit
+
+    def _alpha(self, design: Navigation | Alpha | pd.Series | int) -> Alpha:
+        if isinstance(design, Navigation):
+            return design.alpha
+        if isinstance(design, Alpha):
+            return design
+        if isinstance(design, numbers.Integral) and not isinstance(design, bool):
+            if design not in self.points.index:
+                raise ValueError(f"point {design} is not a design of this space")
+            return Alpha(pd.Series({design: 1.0}))
+        if isinstance(design, pd.Series):
+            return point_2_alpha(self._design(design), self.points, self.cost,
+                                 solver_name=self.solver_name, solver_options=self.solver_options)
+        raise TypeError(f"a design is a navigation result, weights, a point id or PoI values, got {type(design).__name__}")
 
     def _design(self, design: pd.Series) -> pd.Series:
         columns = list(self.points.columns)
