@@ -15,7 +15,7 @@ const props = defineProps({
   },
 })
 
-const path = defineModel('path')
+const breakpoints = defineModel('breakpoints')
 
 /**
  * @typedef {Object} Priority
@@ -155,7 +155,7 @@ const navigate = async () => {
     }
 
     messages.value = nextChanges
-    path.value = data.breakpoints
+    breakpoints.value = data.breakpoints
 
     const firstPoint = data.breakpoints[0]?.point
     if (firstPoint) {
@@ -200,16 +200,16 @@ const clampDeltas = () => {
 }
 
 watchEffect(() => {
-  const breakpoints = path.value
+  const bps = breakpoints.value
   for (const priority of priorities.value) {
-    if (priority.name === objLabel.value && breakpoints && breakpoints.length > 1) {
+    if (priority.name === objLabel.value && bps && bps.length > 1) {
       const beta = props.beta
-      let lo = breakpoints[0]
-      let hi = breakpoints[breakpoints.length - 1]
-      for (let i = 0; i < breakpoints.length - 1; i++) {
-        if (beta >= breakpoints[i].beta && beta <= breakpoints[i + 1].beta) {
-          lo = breakpoints[i]
-          hi = breakpoints[i + 1]
+      let lo = bps[0]
+      let hi = bps[bps.length - 1]
+      for (let i = 0; i < bps.length - 1; i++) {
+        if (beta >= bps[i].beta && beta <= bps[i + 1].beta) {
+          lo = bps[i]
+          hi = bps[i + 1]
           break
         }
       }
