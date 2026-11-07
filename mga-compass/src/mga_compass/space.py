@@ -177,14 +177,17 @@ class Space:
 
         - ``("increase", d)``: raise it by at least `d`, then as far as possible;
         - ``("decrease", d)``: lower it by at least `d`, then as far as possible;
-        - ``("keep", d)``: keep it within `d` of its start value.
+        - ``("keep", d)``: keep it within `d` of its start value, then as close
+          to it as possible.
 
         `d` is in the unit of :attr:`units`, or a percentage of the start value
         such as ``"20%"``; a direction alone means ``d = 0``. The order of
-        `request` is the priority order: each request is met as well as the
-        ones before it allow. When one cannot be met in full, it is met as far
-        as possible and :attr:`Navigation.changes` says how. PoIs left out are
-        free: they move however the requests make cheapest.
+        `request` is the priority order: every request is met first, then each
+        is pushed ("as far", "as close") as well as the ones before it allow,
+        so a keep listed before an increase limits it more than one after it.
+        When a request cannot be met in full, it is met as far as possible and
+        :attr:`Navigation.changes` says how. PoIs left out are free: they move
+        however the requests make cheapest.
 
         The way from start to target is computed too: :attr:`Navigation.traverse`.
         """

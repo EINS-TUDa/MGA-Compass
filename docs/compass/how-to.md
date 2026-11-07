@@ -6,6 +6,7 @@ Step-by-step instructions for specific tasks with MGA Compass.
 :maxdepth: 1
 
 install
+explore-in-python
 build-dataset
 run-locally
 deploy

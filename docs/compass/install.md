@@ -23,5 +23,8 @@ interpolation run on HiGHS.
    uv run python -c "import mga_compass; print('ok')"
    ```
 
+For plots in notebooks (see [](explore-in-python.md)), add the `notebook` extra:
+`uv sync --package mga-compass --extra notebook`.
+
 To build datasets from PyPSA networks you also need MGA Surveyor and PyPSA, which come with
 the `scripts` extra: `uv sync --package mga-compass --extra scripts`.
