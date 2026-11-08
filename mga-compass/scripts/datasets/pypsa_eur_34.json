@@ -72,10 +72,12 @@
   "outputs": {
     "generation": {
       "unit": "MW",
+      "display": {"unit": "GW", "factor": 1e-3},
       "description": "Europe-wide electricity generation per carrier: every generator plus hydro and PHS dispatch."
     },
     "capacity": {
       "unit": "MW",
+      "display": {"unit": "GW", "factor": 1e-3},
       "description": "Europe-wide installed power capacity per carrier: generators, hydro/PHS, battery charger and discharger, electrolysis and fuel cell."
     }
   },
