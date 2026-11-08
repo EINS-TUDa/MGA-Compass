@@ -24,7 +24,7 @@ def navigable_points(nos: NearOptimalSet) -> pd.DataFrame:
     """The points as navigation expects them: indexed by point, one column per
     PoI plus the cost column. All points are used, so the space navigated is the
     set's largest slack level."""
-    return nos.points.drop(columns=["slack", "kind"])
+    return nos.points[[*nos.manifest.poi_names, nos.manifest.cost.name]]
 
 
 def display_factor(nos: NearOptimalSet, name: str) -> float:

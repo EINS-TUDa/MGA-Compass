@@ -2,6 +2,7 @@ import json
 import shutil
 
 import numpy as np
+import pandas as pd
 import pypsa
 import pytest
 
@@ -124,6 +125,19 @@ def test_collect_returns_the_file_of_each_point(run):
         if kind != "optimum":
             assert path.parent.name == f"slack_{nos.points.loc[point, 'slack']}"
             assert path.name.startswith("mga_furthest_result_" if kind == "box" else "mga_closest_result_")
+
+
+def test_key_and_kind_and_slack_give_the_result_file(run):
+    _, output_dir = run
+    nos, files = collect_near_optimal_set(output_dir, units=UNITS, cost_unit="EUR")
+    for point, row in nos.points.iterrows():
+        if row["kind"] == "optimum":
+            assert pd.isna(row["key"])
+            expected = output_dir / "optimal.nc"
+        else:
+            prefix = "mga_furthest_result_" if row["kind"] == "box" else "mga_closest_result_"
+            expected = output_dir / f"slack_{row['slack']}" / f"{prefix}{row['key']}.nc"
+        assert files[point] == expected
 
 
 def test_export_needs_every_unit(run, tmp_path):

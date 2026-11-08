@@ -7,8 +7,8 @@ and writes one.
 
 In memory a set is a :class:`NearOptimalSet`:
 
-- ``points``: indexed by ``point``; columns ``slack``, ``kind``, one per PoI, and
-  the cost column.
+- ``points``: indexed by ``point``; columns ``slack``, ``kind``, optionally
+  ``key``, one per PoI, and the cost column.
 - ``duals``: indexed by ``point``; one column per PoI.
 - ``sets``: {name: DataFrame}, each with the members in a column named after the
   set, plus attribute columns.
@@ -39,7 +39,10 @@ DUALS_FILE = "duals.parquet"
 POINT = "point"
 POINT_KINDS = ("optimum", "box", "nearest")
 #: Column names of points.parquet besides the PoIs and the cost.
-_POINT_COLUMNS = (POINT, "slack", "kind")
+_POINT_COLUMNS = (POINT, "slack", "kind", "key")
+#: Optional column of points.parquet: the producer's identifier of the solve
+#: behind each point (for MGA Surveyor, the hash in its result file's name).
+KEY = "key"
 
 
 class NearOptimalSetError(ValueError):
@@ -230,8 +233,11 @@ def _validate_points(points: pd.DataFrame, manifest: Manifest) -> None:
         raise NearOptimalSetError(f"points: {POINT!r} must be integers, got {points.index.dtype}")
     if sorted(points.index) != list(range(len(points))):
         raise NearOptimalSetError(f"points: {POINT!r} must be unique and run from 0 to {len(points) - 1}")
-    _require_columns("points", points, ["slack", "kind", *manifest.poi_names, manifest.cost.name])
+    key = [KEY] if KEY in points.columns else []
+    _require_columns("points", points, ["slack", "kind", *key, *manifest.poi_names, manifest.cost.name])
     _require_numeric("points", points, ["slack", *manifest.poi_names, manifest.cost.name], allow_nan=False)
+    if key and not points[KEY].dropna().map(lambda v: isinstance(v, str)).all():
+        raise NearOptimalSetError(f"points: {KEY!r} must be strings or missing")
     bad_kind = ~points["kind"].isin(POINT_KINDS)
     if bad_kind.any():
         raise NearOptimalSetError(

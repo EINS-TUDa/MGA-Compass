@@ -25,7 +25,7 @@ def _collect(output_dir):
     """A generate_mga_files run's points (PoIs plus a "cost" column), duals and
     result files, in point order."""
     nos, files = collect_near_optimal_set(output_dir, units={k: "MW" for k in DIMENSIONS}, cost_unit="EUR")
-    return nos.points.drop(columns=["slack", "kind"]), nos.duals, files
+    return nos.points[[*nos.manifest.poi_names, "cost"]], nos.duals, files
 
 
 def _build_network() -> pypsa.Network:

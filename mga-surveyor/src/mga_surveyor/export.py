@@ -3,7 +3,7 @@
 `export_near_optimal_set` reads the result files `generate_mga_files` wrote to
 its `output_dir` and writes them in the format MGA Compass reads: one point per
 result file (the optimum, the box points and the nearest points of every slack
-level), with its cost and duals, plus the PoI definitions, the optimal cost,
+level), with its cost and duals and the cache key in its file name (``key``), plus the PoI definitions, the optimal cost,
 each slack level's run summary and the network's fingerprint.
 """
 from __future__ import annotations
@@ -54,6 +54,13 @@ def network_fingerprint(n: pypsa.Network) -> str:
 def _slack_dirs(output_dir: Path) -> list[tuple[float, Path]]:
     dirs = [(float(p.name.removeprefix("slack_")), p) for p in output_dir.glob("slack_*") if p.is_dir()]
     return sorted(dirs)
+
+
+def _key(path: Path) -> str | None:
+    """The cache key in a result file's name, ``mga_*_result_<key>.nc``; None for
+    ``optimal.nc``."""
+    _, separator, key = path.stem.partition("_result_")
+    return key if separator else None
 
 
 def _row(meta: dict, keys: list[str], coordinates_key: str) -> tuple[list[float], list[float], float]:
@@ -145,6 +152,7 @@ def collect_near_optimal_set(
 
     index = pd.Index(range(len(rows)), name="point")
     points = pd.DataFrame([r[2] for r in rows], columns=keys, index=index)
+    points.insert(0, "key", [_key(path) for path in files])
     points.insert(0, "kind", [r[1] for r in rows])
     points.insert(0, "slack", [r[0] for r in rows])
     points[cost_name] = [r[4] for r in rows]

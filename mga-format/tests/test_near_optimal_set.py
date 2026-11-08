@@ -126,6 +126,33 @@ def test_round_trip(written):
     ]
 
 
+def _keyed_points() -> pd.DataFrame:
+    points = _points()
+    points.insert(2, "key", [None, "a1b2c3d4e5", "0f9e8d7c6b", "a1b2c3d4e5", "1122334455"])
+    return points
+
+
+def test_key_column_is_optional_and_kept(tmp_path):
+    nos = _nos()
+    nos.points = _keyed_points()
+    write(tmp_path / "set", nos, _outputs())
+    points = read(tmp_path / "set").points
+    assert points["key"].isna().tolist() == [True, False, False, False, False]
+    assert points.loc[1, "key"] == "a1b2c3d4e5"
+
+
+@pytest.mark.parametrize(
+    ("points", "message"),
+    [
+        (_keyed_points().assign(key=[None, 1, 2, 3, 4]), "'key' must be strings"),
+        (_keyed_points()[["slack", "key", "kind", "wind", "solar", "TOTEX"]], "columns must be"),
+    ],
+)
+def test_invalid_key(points, message):
+    with pytest.raises(NearOptimalSetError, match=message):
+        _broken(points=points).validate()
+
+
 def test_write_refuses_missing_duals(tmp_path):
     nos = _nos()
     nos.duals.loc[2, "wind"] = np.nan

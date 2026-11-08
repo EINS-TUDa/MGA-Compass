@@ -8,7 +8,7 @@ A near-optimal set is a **directory** of Parquet files and one `manifest.json`:
 ```text
 my-set/
 ├── manifest.json     # what the files are: PoIs, cost, run settings and results, checksums
-├── points.parquet    # one row per point: slack, kind, PoI values, cost
+├── points.parquet    # one row per point: slack, kind, key, PoI values, cost
 ├── duals.parquet     # one row per point: duals of the PoIs
 ├── sets/             # optional: index sets of the outputs, one file each
 │   ├── snapshot.parquet
@@ -36,8 +36,14 @@ One row per near-optimal point, in no particular order.
 | `point` | int64 | Identifier, unique, `0 … N-1`. Every other file refers to points by it. |
 | `slack` | float64 | The slack $\epsilon$ of the level the point was found at; `0.0` for the optimum. |
 | `kind` | string | How it was found: `"optimum"`, `"box"` (maximizing or minimizing one PoI) or `"nearest"` (the nearest point to a trial point). |
+| `key` | string, nullable | Optional. The producer's identifier for the solve behind the point, so its full result can be found again. Keys need not be unique. |
 | one column per PoI | float64 | The point's PoI values $z$, named and ordered as in the manifest's `pois`. |
 | the cost column | float64 | The point's cost $\nu(z)$: the cheapest system cost with the PoIs fixed at $z$. Named by the manifest's `cost.name`. |
+
+MGA Surveyor writes `key` as the hash in a result file's name: a `box` point at slack
+$\epsilon$ comes from `slack_<ε>/mga_furthest_result_<key>.nc` and a `nearest` point from
+`slack_<ε>/mga_closest_result_<key>.nc`, under the run's output directory. The optimum has no
+key; its result is `optimal.nc`. These names are Surveyor's convention, not part of the format.
 
 A point found at slack $\epsilon'$ is near-optimal for every slack $\epsilon \ge \epsilon'$.
 To work with the near-optimal set at slack $\epsilon$, use all points with
