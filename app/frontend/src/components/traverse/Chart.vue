@@ -78,7 +78,7 @@ const computeYMax = (pd) => {
     } else {
       const keys = Object.keys(slice)
       const len = slice[keys[0]]?.length ?? 0
-      if (pd.type === 'stacked_bar') {
+      if (pd.type === 'stacked_bar' || pd.type === 'stacked_timeseries') {
         for (let i = 0; i < len; i++) {
           const sum = keys.reduce((s, k) => s + (slice[k][i] ?? 0), 0)
           if (sum > max) max = sum
@@ -107,6 +107,7 @@ const renderChart = (notMerge = true) => {
   const isTime = pd.type === 'timeseries' || pd.type === 'stacked_timeseries'
   const isBar = pd.type === 'bar' || pd.type === 'stacked_bar'
   const isStackedBar = pd.type === 'stacked_bar'
+  const isStackedTime = pd.type === 'stacked_timeseries'
 
   // x_dim timestamps are in nanoseconds — convert to milliseconds for JS/echarts
   const xData = isTime ? pd.x_dim.map((ns) => ns / 1e6) : pd.x_dim
@@ -129,9 +130,11 @@ const renderChart = (notMerge = true) => {
       return {
         name: label(name),
         type: isBar ? 'bar' : 'line',
-        stack: isStackedBar ? 'total' : undefined,
+        stack: isStackedBar || isStackedTime ? 'total' : undefined,
         data: isTime ? xData.map((x, i) => [x, values[i]]) : values,
-        lineStyle: color ? { width: 1, color } : { width: 1 },
+        // A stacked time series as filled areas, each in its category's color.
+        areaStyle: isStackedTime ? (color ? { color, opacity: 0.85 } : { opacity: 0.85 }) : undefined,
+        lineStyle: isStackedTime ? { width: 0 } : color ? { width: 1, color } : { width: 1 },
         itemStyle: color ? { color } : undefined,
         symbol: 'none',
       }
