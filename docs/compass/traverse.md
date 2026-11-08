@@ -1,7 +1,7 @@
 # Traverse
 
 Once navigation has found a target solution, the traverse view shows how the system changes
-on the way from the current solution to it: not just the PoIs, but the detailed design, and
+along the path from the current solution to it: not just the PoIs, but the detailed design, and
 an estimate of what the intermediate solutions cost.
 
 ## Interpolating between two solutions
@@ -15,7 +15,7 @@ $$
 z(\beta) = S\,\alpha(\beta),
 $$
 
-and any detailed output of the model can be shown along the way by mixing the samples'
+and any detailed output of the model can be shown along the path by mixing the samples'
 designs with the same weights, $x(\beta) = \sum_i \alpha_i(\beta)\, x^{(i)}$.
 
 Showing a path through the *designs* is less obvious than it looks, because many designs map

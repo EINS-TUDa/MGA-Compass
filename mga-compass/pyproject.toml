@@ -38,7 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
 # Plots of mga_compass.space results (Traverse.plot), e.g. in a notebook.
-notebook = ["matplotlib"]
+notebook = ["ipykernel", "matplotlib", "scipy"]
 # Only needed by scripts/generate_dataset.py, which uses `mga-surveyor` to solve a
 # PyPSA network's near-optimal space and produce the dataset the server reads.
 scripts = [

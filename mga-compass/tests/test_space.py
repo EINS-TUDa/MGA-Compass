@@ -391,5 +391,99 @@ def test_traverse_repr_and_plot(line_dir):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     ax = traverse.plot()
-    assert len(ax.lines) == 2
+    labels = [line.get_label() for line in ax.lines]
+    assert labels == ["TOTEX (cheapest mix of designs)", "lower bound", "optimal cost", "budget (slack 0.05)"]
+    assert ax.lines[3].get_ydata()[0] == pytest.approx(space.optimal_cost * 1.05)
     assert ax.get_ylabel() == "TOTEX [EUR]"
+    ax = traverse.plot(beta=0.5)
+    marker = ax.lines[-1]
+    assert list(marker.get_xdata()) == [0.5]
+    assert marker.get_ydata()[0] == pytest.approx(traverse.cost_at(0.5))
+
+
+def test_plots_of_the_pois(space):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    result = space.navigate(0, {"wind": ("increase", 500)})
+    axes = space.plot_ranges()
+    assert len(axes) == 1  # wind and solar share a unit
+    assert [t.get_text() for t in axes[0].get_xticklabels()] == ["wind", "solar"]
+    bars = axes[0].patches
+    assert [b.get_y() for b in bars] == [1000.0, 100.0]  # from the smallest value...
+    assert [b.get_height() for b in bars] == [3000.0, 800.0]  # ...to the largest
+
+    axes = result.traverse.plot_pois()
+    heights = [b.get_height() for b in axes[0].patches]
+    assert heights == pytest.approx([*result.start[["wind", "solar"]], *result.target[["wind", "solar"]]])
+    assert [t.get_text() for t in axes[0].get_legend().get_texts()] == ["start", "target"]
+    axes = result.traverse.plot_pois(beta=0.5)
+    assert [b.get_height() for b in axes[0].patches] == pytest.approx(list(result.traverse.at(0.5)[["wind", "solar"]]))
+    assert [t.get_text() for t in axes[0].get_legend().get_texts()] == ["β = 0.5", "start", "target"]
+    start_lines, target_lines = axes[0].collections
+    assert [seg[0][1] for seg in start_lines.get_segments()] == pytest.approx(list(result.start[["wind", "solar"]]))
+    assert [seg[0][1] for seg in target_lines.get_segments()] == pytest.approx(list(result.target[["wind", "solar"]]))
+
+    ax = result.traverse.plot_radar()
+    start, target = ax.lines[0].get_ydata(), ax.lines[1].get_ydata()
+    # wind 2000 of 1000..4000 and solar 500 of 100..900; the first value closes the loop.
+    assert list(start) == pytest.approx([1 / 3, 0.5, 1 / 3])
+    assert 0 <= min(target) and max(target) <= 1
+
+
+def test_display_units_split_the_panels(set_dir):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    axes = mc.load(set_dir).plot_ranges()  # wind in GW, solar in MW
+    assert [ax.get_ylabel() for ax in axes] == ["GW", "MW"]
+
+
+def test_plots_of_the_set_use_its_labels_and_colors(set_dir, tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    nos = mga_format.read(set_dir)
+    plots = {"capacity": {"type": "bar", "output": "capacity", "x": "technology"}}
+    manifest = mga_format.Manifest.model_validate({**nos.manifest.model_dump(), "plots": plots})
+    sets = {"technology": pd.DataFrame({"technology": ["wind", "solar"], "label": ["Wind", "Solar"],
+                                        "color": ["#0000ff", "#ffff00"]})}
+    outputs = {"capacity": mga_format.read_output(set_dir, "capacity")}
+    mga_format.write(tmp_path / "styled", mga_format.NearOptimalSet(manifest, nos.points, nos.duals, sets), outputs)
+    space = mc.load(tmp_path / "styled", units="model")
+
+    assert list(space.plots().index) == ["capacity"]
+    ax = space.plot("capacity", 3)
+    assert [b.get_height() for b in ax.patches] == [4000.0, 100.0]  # design 3's wind and solar
+    assert [matplotlib.colors.to_hex(b.get_facecolor()) for b in ax.patches] == ["#0000ff", "#ffff00"]
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["Wind", "Solar"]
+    assert ax.get_ylabel() == "capacity [MW]"
+    with pytest.raises(ValueError, match="no plot 'missing'"):
+        space.plot("missing", 3)
+    # A PoI of one component takes its colour; the fixture's PoIs have empty definitions.
+    assert [matplotlib.colors.to_hex(b.get_facecolor()) for b in space.plot_ranges()[0].patches] == ["#1f77b4"] * 2
+    pois = [poi.model_copy(update={"definition": {"Generator": {"p_nom": {poi.name: 1.0}}}}) for poi in manifest.pois]
+    manifest = manifest.model_copy(update={"pois": pois})
+    mga_format.write(tmp_path / "defined", mga_format.NearOptimalSet(manifest, nos.points, nos.duals, sets), outputs)
+    bars = mc.load(tmp_path / "defined", units="model").plot_ranges()[0].patches
+    assert [matplotlib.colors.to_hex(b.get_facecolor()) for b in bars] == ["#0000ff", "#ffff00"]
+
+
+def test_projection_outlines_the_hull_of_the_designs(space):
+    matplotlib = pytest.importorskip("matplotlib")
+    pytest.importorskip("scipy")
+    matplotlib.use("Agg")
+    ax = space.plot_projection("wind", "solar")
+    outline = ax.lines[0].get_xydata()
+    # (1500, 700) and (2500, 400) lie on the hull's edges, so only three vertices remain.
+    assert {tuple(p) for p in outline} == {(1000.0, 900.0), (2000.0, 500.0), (4000.0, 100.0)}
+    assert tuple(outline[0]) == tuple(outline[-1])  # closed
+    assert len(ax.collections[-1].get_offsets()) == 5  # every design
+    assert ax.get_xlabel() == "wind [MW]" and ax.get_ylabel() == "solar [MW]"
+
+    result = space.navigate(0, {"wind": ("increase", 500)})
+    ax = space.plot_projection("wind", "TOTEX", result)
+    labels = [line.get_label() for line in ax.lines]
+    assert labels[-3:] == ["path", "start", "target"]
+    assert tuple(ax.lines[-1].get_xydata()[0]) == pytest.approx((result.target["wind"], result.target["TOTEX"]))
+    with pytest.raises(ValueError, match="not a PoI or the cost"):
+        space.plot_projection("wind", "nuclear")
+    with pytest.raises(ValueError, match="must be different"):
+        space.plot_projection("wind", "wind")

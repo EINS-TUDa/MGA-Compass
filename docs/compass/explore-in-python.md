@@ -2,7 +2,7 @@
 
 The web platform is one way to explore a near-optimal set; the `mga_compass` library is
 another, for notebooks and scripts. This guide loads a set, navigates from the cheapest design
-to one with more wind, and looks at the cost and the system along the way. The same steps,
+to one with more wind, and looks at the cost and the system along the path. The same steps,
 with plots, are in the notebook
 [`mga-compass/examples/explore-a-near-optimal-set.ipynb`](https://github.com/EINS-TUDa/MGA-Compass/blob/main/mga-compass/examples/explore-a-near-optimal-set.ipynb).
 
@@ -41,6 +41,7 @@ TOTEX      M€   6,901  7,453   6,901
 
 A `Space` holds the set's designs in the space of its properties of interest (PoIs), with
 their cost. `space.points` has one row per design; `space.optimum` is the cheapest.
+`space.plot_ranges()` draws each PoI's range with the optimum marked.
 
 - **Units:** values are in the set's display units (here capacities in GW and TWh rather
   than MW and MWh, the cost in M€ rather than €). With `units="model"`, they stay in the
@@ -93,12 +94,16 @@ limit allowed.
 When a request cannot be met in full, it is met as far as possible, and `result.changes` says
 how, for example `wind: could increase by 6.148 GW only, not 7.596 GW`.
 
+`space.plot_projection("wind", "solar", result)` draws the space projected onto two PoIs, or
+a PoI and the cost: the outline of the designs' convex hull in that plane, which is exact for
+the space navigation searches, the designs, and the path from start to target.
+
 To carry on, navigate from the result: `space.navigate(result, {...})`. A point id, or any
 row of `space.points`, works as a start too.
 
-## Look at the way there
+## Look at the path
 
-`result.traverse` is the way from the start to the target. The PoIs move in a straight line;
+`result.traverse` is the path from the start to the target. The PoIs move in a straight line;
 the cost is the cheapest mix of the set's designs at each point, an upper bound on the true
 cost, and the designs' duals give a lower bound (see [](traverse.md)):
 
@@ -116,10 +121,16 @@ beta
 1     34.82  20.39   16.76   0.8796  7,108       7,099
 ```
 
-- `result.traverse.at(0.3)`: the design at 30% of the way, with its cost.
+- `result.traverse.at(0.3)`: the design at 30% of the path, with its cost.
 - `result.traverse.lower_bound_at(0.3)`: the cost's lower bound there.
-- `result.traverse.plot()`: both bounds against β.
-- `space.traverse(a, b)`: the way between any two designs.
+- `result.traverse.plot()`: both bounds against β, with the optimal cost and the budget
+  (the optimal cost plus the slack); `plot(beta=0.3)` also marks the design there.
+- `result.traverse.plot_pois()`: bars of the PoIs at the start (pale) and the target, one
+  panel per unit, in the PoIs' colours; `plot_pois(beta=0.3)` shows the design at 30% of the
+  path, with lines at the start's and the target's values.
+- `result.traverse.plot_radar()`: the same as a radar chart, each PoI scaled to its range
+  in the space; it takes a `beta` too.
+- `space.traverse(a, b)`: the path between any two designs.
 
 ## Look at the system
 
@@ -149,11 +160,15 @@ hydrogen storage 1,500,715.2 1,190,180.7 879,645.2
 ```
 
 An output is a pandas Series indexed by the output's sets, with its unit in
-`series.attrs["unit"]`. Unstack it for a table, and plot it with pandas, e.g. the target's
-generation as weekly means:
+`series.attrs["unit"]`. Unstack it for a table.
+
+The set also declares plots of its outputs, which the web platform shows. `space.plots()`
+lists them, and `space.plot` draws one for a design the same way, with the set's labels and
+colours:
 
 ```python
-space.output("generation", result).unstack().resample("W").mean().plot.area()
+space.plot("generation", result)  # stacked generation per technology over the year
+space.plot("capacity", result)
 ```
 
 ## See also

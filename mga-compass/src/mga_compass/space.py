@@ -15,7 +15,7 @@ returns a :class:`Space`: the set's designs in PoI space, ready to navigate::
         "TOTEX": ("keep", "3%"),     # within 3% of the start's cost
     })
     result           # start and target side by side, and what had to be adjusted
-    result.traverse  # the way from start to target: cost along it, with a lower bound
+    result.traverse  # the path from start to target: cost along it, with a lower bound
     space.navigate(result, {...})    # carry on from the target
 
     space.outputs()                       # the set's detailed outputs
@@ -41,7 +41,7 @@ import mga_format
 from .core import (
     alpha_2_point, describe_changes, interpolate, linear_lower_bounds, navigate, point_2_alpha, upper_envelope,
 )
-from .near_optimal import display_factor, display_units, mix_output, navigable_points
+from .near_optimal import category_styles, display_factor, display_units, mix_output, navigable_points
 from .schemes import Alpha, Breakpoint, ConstraintChange, Constraints
 from .solvers import default_solver_options
 
@@ -171,6 +171,75 @@ class Space:
             "description": pd.Series({poi.name: poi.description for poi in self.nos.manifest.pois}),
         }).reindex([*self.pois, self.cost]).fillna({"description": ""})
 
+    def plot_ranges(self, axes=None):
+        """Each PoI's range over the space's designs, as a bar from its smallest
+        to its largest value, with the optimum marked: one panel per unit. A PoI of
+        a single component takes the colour the set gives that component. Needs
+        matplotlib (``pip install mga-compass[notebook]``). Returns the panels' axes."""
+        axes = _unit_panels(self, axes)
+        optimum = self.optimum
+        colors = _poi_colors(self)
+        for ax, (unit, pois) in zip(axes, _pois_by_unit(self).items()):
+            low, high = self.points[pois].min(), self.points[pois].max()
+            x = np.arange(len(pois))
+            ax.bar(x, high - low, bottom=low, width=0.5, alpha=0.6,
+                   color=[colors.get(poi, "C0") for poi in pois])
+            ax.plot(x, optimum[pois], "D", color="black", label="optimum")
+            ax.set_xticks(x, pois)
+            ax.set_ylabel(unit)
+        axes[0].legend()
+        return axes
+
+    def plot_projection(self, x: str, y: str, navigation: Navigation | None = None, ax=None):
+        """The space projected onto two of its columns, PoIs or the cost: the
+        outline of the designs' convex hull there, the designs, and the optimum.
+        With `navigation`, also its start, target and the path between them.
+
+        The space is the convex hull of the designs, and the projection of a
+        convex hull is the hull of the projected points: the outline is exact for
+        the space navigation searches. Designs inside it lie deeper along the
+        other columns. The true near-optimal region of the model is larger; the
+        hull is an inner approximation of it. Needs matplotlib and scipy
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        columns = list(self.points.columns)
+        for name in (x, y):
+            if name not in columns:
+                raise ValueError(f"{name!r} is not a PoI or the cost; choose from {columns}")
+        if x == y:
+            raise ValueError("x and y must be different columns")
+        plt = _pyplot()
+        try:
+            from scipy.spatial import ConvexHull, QhullError
+        except ImportError:
+            raise ImportError("plot_projection needs scipy: pip install 'mga-compass[notebook]'") from None
+        if ax is None:
+            _, ax = plt.subplots(layout="constrained")
+
+        projected = self.points[[x, y]].to_numpy()
+        distinct = np.unique(projected, axis=0)
+        try:
+            outline = distinct[ConvexHull(distinct).vertices]  # counter-clockwise
+        except (QhullError, ValueError):  # fewer than 3 points, or all on a line
+            order = np.lexsort((distinct[:, 1], distinct[:, 0]))
+            outline = distinct[order[[0, -1]]]
+        if len(outline) > 2:
+            ax.fill(outline[:, 0], outline[:, 1], color="C0", alpha=0.15, label="space (hull of the designs)")
+        closed = np.vstack([outline, outline[:1]])
+        ax.plot(closed[:, 0], closed[:, 1], color="C0")
+        ax.scatter(projected[:, 0], projected[:, 1], s=12, color="C0", alpha=0.6, label="designs")
+        ax.plot([self.optimum[x]], [self.optimum[y]], "D", color="black", label="optimum")
+        if navigation is not None:
+            path = np.array([[bp.point[x], bp.point[y]] for bp in navigation.traverse.breakpoints])
+            ax.plot(path[:, 0], path[:, 1], color="dimgrey", linestyle="--", label="path")
+            ax.plot([navigation.start[x]], [navigation.start[y]], "o", color="C2", label="start")
+            ax.plot([navigation.target[x]], [navigation.target[y]], "o", color="C3", label="target")
+        for axis, name in ((ax.set_xlabel, x), (ax.set_ylabel, y)):
+            unit = self.units.get(name, "")
+            axis(f"{name} [{unit}]" if unit else name)
+        _number_ticks(ax, both=True)
+        ax.legend()
+        return ax
+
     def navigate(self, start: pd.Series | int | Navigation, request: Mapping[str, Request]) -> Navigation:
         """Move from design `start` as `request` asks, to the cheapest design that
         meets it.
@@ -195,7 +264,7 @@ class Space:
         :attr:`Navigation.changes` says how. PoIs left out are free: they move
         however the requests make cheapest.
 
-        The way from start to target is computed too: :attr:`Navigation.traverse`.
+        The path from start to target is computed too: :attr:`Navigation.traverse`.
         """
         if isinstance(start, Navigation):
             start = start.target
@@ -208,7 +277,7 @@ class Space:
         return Navigation(self, start, target, requested, applied, self.traverse(start, target))
 
     def traverse(self, start: pd.Series, target: pd.Series) -> Traverse:
-        """The way from design `start` to design `target`: see :class:`Traverse`."""
+        """The path from design `start` to design `target`: see :class:`Traverse`."""
         start, target = self._design(start), self._design(target)
         breakpoints = interpolate(self.points, start, target, self.cost,
                                   solver_name=self.solver_name, solver_options=self.solver_options)
@@ -223,6 +292,80 @@ class Space:
             "index": [", ".join(output.index[1:]) for output in manifest.outputs.values()],
             "description": [output.description for output in manifest.outputs.values()],
         }, index=pd.Index(list(manifest.outputs), name="output"))
+
+    def plots(self) -> pd.DataFrame:
+        """The plots the set declares for its outputs, one row each: the type, the
+        output, the set along x and the set stacked, if any. Draw one with
+        :meth:`plot`."""
+        plots = self.nos.manifest.plots
+        return pd.DataFrame({
+            "type": [plot.type for plot in plots.values()],
+            "output": [plot.output for plot in plots.values()],
+            "x": [plot.x for plot in plots.values()],
+            "stack": [plot.stack or "" for plot in plots.values()],
+        }, index=pd.Index(list(plots), name="plot"))
+
+    def plot(self, name: str, design: Navigation | Alpha | pd.Series | int, ax=None):
+        """Draw plot `name` of the set (see :meth:`plots`) for a design, as the web
+        platform does: its output summed over the sets other than ``x`` and
+        ``stack``, members in the sets' order, with the sets' labels and colours.
+        `design` is as for :meth:`output`. Needs matplotlib
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        plots = self.nos.manifest.plots
+        if name not in plots:
+            raise ValueError(f"the set has no plot {name!r}; it has {list(plots)}")
+        plot = plots[name]
+        plt = _pyplot()
+        if ax is None:
+            _, ax = plt.subplots(figsize=(9, 4) if plot.type.endswith("timeseries") else (6, 4), layout="constrained")
+        series = self.output(plot.output, design)
+        keep = [plot.x, plot.stack] if plot.stack else [plot.x]
+        data = series.groupby(level=keep, sort=False).sum()
+        labels, colors = category_styles(self.nos)
+
+        def ordered(present, set_name: str) -> list:
+            members = self.nos.sets[set_name][set_name]
+            return [m for m in members if m in set(present)]
+
+        def style(member, k: int) -> dict:
+            return {"label": labels.get(str(member), str(member)), "color": colors.get(str(member), f"C{k % 10}")}
+
+        if plot.stack:
+            frame = data.unstack(plot.stack)
+            frame = frame.loc[ordered(frame.index, plot.x), ordered(frame.columns, plot.stack)]
+        else:
+            data = data.loc[ordered(data.index, plot.x)]
+        if plot.type == "bar":
+            x = np.arange(len(data))
+            ax.bar(x, data.to_numpy(), color=[style(m, k)["color"] for k, m in enumerate(data.index)])
+            ax.set_xticks(x, [style(m, 0)["label"] for m in data.index], rotation=30, ha="right")
+        elif plot.type == "stacked_bar":
+            x = np.arange(len(frame))
+            bottom = np.zeros(len(frame))
+            for k, member in enumerate(frame.columns):
+                ax.bar(x, frame[member].to_numpy(), bottom=bottom, **style(member, k))
+                bottom += frame[member].to_numpy()
+            ax.set_xticks(x, [style(m, 0)["label"] for m in frame.index], rotation=30, ha="right")
+        elif plot.type == "timeseries":
+            ax.plot(data.index, data.to_numpy())
+        else:  # stacked_timeseries
+            styles = [style(m, k) for k, m in enumerate(frame.columns)]
+            ax.stackplot(frame.index, frame.to_numpy().T, labels=[s["label"] for s in styles],
+                         colors=[s["color"] for s in styles], linewidth=0)
+            ax.set_xlim(frame.index[0], frame.index[-1])
+        if plot.stack:
+            ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
+        if plot.type.endswith("timeseries") and pd.api.types.is_datetime64_any_dtype(data.index.get_level_values(0)):
+            import matplotlib.dates as mdates
+
+            locator = mdates.AutoDateLocator()
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        _number_ticks(ax)
+        unit = self._output_unit(plot.output)
+        ax.set_ylabel(f"{plot.output} [{unit}]" if unit else plot.output)
+        ax.set_title(name)
+        return ax
 
     def output(self, name: str, design: Navigation | Alpha | pd.Series | int) -> pd.Series:
         """Detailed output `name` (see :meth:`outputs`) of a design, such as
@@ -335,7 +478,7 @@ class Navigation:
     requested: Constraints
     #: The constraints as navigation could meet them.
     applied: Constraints
-    #: The way from start to target.
+    #: The path from start to target.
     traverse: Traverse
     #: How requests that could not be met in full were adjusted, in words.
     changes: list[str] = field(init=False)
@@ -393,10 +536,10 @@ class Navigation:
 
 @dataclass
 class Traverse:
-    """The way from one design to another, computed by :meth:`Space.traverse`.
+    """The path from one design to another, computed by :meth:`Space.traverse`.
 
     The PoIs move in a straight line from start to target as `beta` goes from 0
-    to 1. The cost along the way is the cheapest mix of the space's designs with
+    to 1. The cost along the path is the cheapest mix of the space's designs with
     those PoIs, refined at breakpoints until it improves by less than 0.1%: an
     upper bound on the true cost. :attr:`lower_bound` gives a matching lower
     bound from the designs' duals; the true cost lies between the two.
@@ -440,7 +583,7 @@ class Traverse:
 
     @cached_property
     def lower_bound(self) -> pd.Series:
-        """A lower bound on the cost along the way: its value (index: beta) where
+        """A lower bound on the cost along the path: its value (index: beta) where
         it bends, at 0, at 1 and in between; it is linear in between.
 
         The largest of the bounds the designs' duals give, cost >= cost_i +
@@ -456,23 +599,74 @@ class Traverse:
         """The cost's lower bound at `beta`."""
         return float(np.interp(beta, self.lower_bound.index, self.lower_bound.to_numpy()))
 
-    def plot(self, ax=None):
-        """Plot the cost along the way, with its lower bound below it. Needs
-        matplotlib (``pip install mga-compass[notebook]``). Returns the axes."""
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("plotting needs matplotlib: pip install 'mga-compass[notebook]'") from None
+    def plot(self, ax=None, beta: float | None = None):
+        """Plot the cost along the path, with its lower bound below it, the optimal
+        cost and the space's budget (the optimal cost plus its slack). With
+        `beta`, mark the design there. Needs matplotlib
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        plt = _pyplot()
         if ax is None:
             _, ax = plt.subplots()
-        cost, unit = self.space.cost, self.space.units.get(self.space.cost, "")
+        space = self.space
+        cost, unit = space.cost, space.units.get(space.cost, "")
         upper = [bp.point[cost] for bp in self.breakpoints]
         ax.plot(self.betas, upper, marker="o", label=f"{cost} (cheapest mix of designs)")
         ax.plot(self.lower_bound.index, self.lower_bound.to_numpy(), linestyle="--", label="lower bound")
-        ax.set_xlabel("β: share of the way from start to target")
+        ax.axhline(space.optimal_cost, color="grey", linewidth=0.8, linestyle=":", label="optimal cost")
+        ax.axhline(space.optimal_cost * (1 + space.slack), color="grey", linewidth=0.8, linestyle="-.",
+                   label=f"budget (slack {space.slack:g})")
+        if beta is not None:
+            ax.axvline(beta, color="black", linewidth=0.8, linestyle="--")
+            ax.plot([beta], [self.cost_at(beta)], marker="o", color="black",
+                    label=f"β = {beta:g}: {_with_unit(self.cost_at(beta), unit, max(upper))}")
+        ax.set_xlabel("β: share of the path from start to target")
         ax.set_ylabel(f"{cost} [{unit}]" if unit else cost)
         ax.set_xlim(0, 1)
         ax.legend()
+        return ax
+
+    def plot_pois(self, beta: float | None = None, axes=None):
+        """Bars of each PoI, one panel per unit, in the PoIs' colours.
+
+        Without `beta`, the start (pale) and the target side by side. With
+        `beta`, the design there, with dashed lines at the start's and the
+        target's values: the bar moves between them as `beta` goes from 0 to 1.
+        Returns the panels' axes."""
+        start, target = self.at(0), self.at(1)
+        if beta is None:
+            return _poi_bars(self.space, {"start": start, "target": target}, axes)
+        axes = _poi_bars(self.space, {f"β = {beta:g}": self.at(beta)}, axes)
+        for ax, pois in zip(axes, _pois_by_unit(self.space).values()):
+            x = np.arange(len(pois))
+            ax.hlines(start[pois], x - 0.45, x + 0.45, color="C2", linestyle="--", label="start")
+            ax.hlines(target[pois], x - 0.45, x + 0.45, color="C3", linestyle="--", label="target")
+        handles, _ = axes[0].get_legend_handles_labels()
+        axes[0].legend(handles=[*axes[0].get_legend().legend_handles, *handles])
+        return axes
+
+    def plot_radar(self, beta: float = 1.0, ax=None):
+        """A radar chart of the PoIs at the start and at `beta`, by default the
+        target, each PoI scaled from the space's smallest (0) to largest value (1).
+        Returns the axes."""
+        plt = _pyplot()
+        if ax is None:
+            _, ax = plt.subplots(subplot_kw={"projection": "polar"})
+        pois = self.space.pois
+        low, high = self.space.points[pois].min(), self.space.points[pois].max()
+        span = (high - low).replace(0, np.nan)
+        angles = np.linspace(0, 2 * np.pi, len(pois), endpoint=False)
+        closed = np.append(angles, angles[0])
+        label = "target" if beta == 1 else f"β = {beta:g}"
+        # The colours of the start and target lines in plot_pois; another design in black.
+        for name, design, color in (("start", self.at(0), "C2"), (label, self.at(beta), "C3" if beta == 1 else "black")):
+            scaled = ((design[pois] - low) / span).fillna(0.5).to_numpy()
+            values = np.append(scaled, scaled[0])
+            ax.plot(closed, values, color=color, label=name)
+            ax.fill(closed, values, color=color, alpha=0.15)
+        ax.set_xticks(angles, pois)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0.25, 0.5, 0.75], [])
+        ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
         return ax
 
     def cost_at(self, beta: float) -> float:
@@ -480,7 +674,7 @@ class Traverse:
         return float(np.interp(beta, self.betas, [bp.point[self.space.cost] for bp in self.breakpoints]))
 
     def largest_gap(self) -> float:
-        """How far the cost is above its lower bound at most, anywhere on the way.
+        """How far the cost is above its lower bound at most, anywhere on the path.
         Both are linear between their bends, so checking those is enough."""
         betas = sorted({*self.betas, *self.lower_bound.index})
         return max(self.cost_at(beta) - self.lower_bound_at(beta) for beta in betas)
@@ -605,3 +799,77 @@ def _format_number(value: float, scale: float | None = None) -> str:
 def _format_signed(value: float, scale: float | None = None) -> str:
     text = _format_number(value, scale)
     return text if text.startswith("-") or text == "0" else f"+{text}"
+
+
+def _pyplot():
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError("plotting needs matplotlib: pip install 'mga-compass[notebook]'") from None
+    return plt
+
+
+def _pois_by_unit(space: Space) -> dict[str, list[str]]:
+    """The space's PoIs grouped by unit, in their order."""
+    groups: dict[str, list[str]] = {}
+    for poi in space.pois:
+        groups.setdefault(space.units.get(poi, ""), []).append(poi)
+    return groups
+
+
+def _unit_panels(space: Space, axes=None) -> list:
+    """One axes per unit of the PoIs: `axes` if given, else a new figure."""
+    count = len(_pois_by_unit(space))
+    if axes is None:
+        widths = [len(pois) for pois in _pois_by_unit(space).values()]
+        _, axes = _pyplot().subplots(1, count, figsize=(max(6.0, 1.6 * sum(widths) + 1), 4),
+                                     gridspec_kw={"width_ratios": widths}, squeeze=False, layout="constrained")
+        axes = axes[0]
+    axes = list(np.atleast_1d(axes))
+    if len(axes) != count:
+        raise ValueError(f"need {count} axes, one per unit, got {len(axes)}")
+    for ax in axes:
+        _number_ticks(ax)
+    return axes
+
+
+def _number_ticks(ax, both: bool = False) -> None:
+    """Label the y axis, and with `both` the x axis too, 1,500,000 rather than
+    1.5 with a 1e6 offset."""
+    from matplotlib.ticker import FuncFormatter
+
+    for axis in (ax.xaxis, ax.yaxis) if both else (ax.yaxis,):
+        axis.set_major_formatter(FuncFormatter(lambda value, _: _format_number(value)))
+
+
+def _poi_bars(space: Space, designs: dict[str, pd.Series], axes=None) -> list:
+    """Grouped bars of each PoI for each design: one panel per unit. A bar has its
+    PoI's colour (see :func:`_poi_colors`), paler for the earlier designs."""
+    from matplotlib.patches import Patch
+
+    axes = _unit_panels(space, axes)
+    width = 0.8 / len(designs)
+    colors = _poi_colors(space)
+    opacities = np.linspace(0.35, 1.0, len(designs)) if len(designs) > 1 else [1.0]
+    for ax, (unit, pois) in zip(axes, _pois_by_unit(space).items()):
+        x = np.arange(len(pois))
+        for k, design in enumerate(designs.values()):
+            ax.bar(x + (k - (len(designs) - 1) / 2) * width, design[pois], width,
+                   color=[colors.get(poi, "C0") for poi in pois], alpha=opacities[k])
+        ax.set_xticks(x, pois)
+        ax.set_ylabel(unit)
+    # One swatch per design in grey: the bars' colours belong to the PoIs.
+    axes[0].legend(handles=[Patch(color="dimgrey", alpha=a, label=name) for name, a in zip(designs, opacities)])
+    return axes
+
+
+def _poi_colors(space: Space) -> dict[str, str]:
+    """The colour of each PoI defined by a single component that the set gives a
+    colour (a member of an index set with a ``color`` column)."""
+    _, colors = category_styles(space.nos)
+    found = {}
+    for poi in space.nos.manifest.pois:
+        components = {c for attributes in poi.definition.values() for weights in attributes.values() for c in weights}
+        if len(components) == 1 and (color := colors.get(str(components.pop()))):
+            found[poi.name] = color
+    return found
