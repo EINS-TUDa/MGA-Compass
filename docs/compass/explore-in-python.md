@@ -27,23 +27,24 @@ space
 ```text
 PyPSA model_energy example
 PyPSA's model_energy example (pypsa.examples.model_energy): one electricity node and one
-hydrogen node over 2019, at 3-hourly resolution (every third hour of the hourly example).
+hydrogen node over 2019, at 9-hourly resolution (every third snapshot of the 3-hourly example).
 ...
 
 Space: 188 near-optimal designs in 4 PoIs, slack 0.08 (set's slack levels: 0.02, 0.05, 0.08)
-         unit      min        max    optimum  description
-wind       MW   15,350     42,044     25,272  Installed wind power capacity.
-solar      MW   13,079     55,383     30,534  Installed solar PV capacity.
-battery    MW    6,632     35,474     16,829  Installed battery storage power (charge/discharge) rating. ...
-hydrogen  MWh  402,283  5,349,440  1,500,715  Installed hydrogen storage capacity.
-TOTEX      M€    6,901      7,453      6,901
+         unit     min    max optimum  description
+wind       GW   15.35  42.04   25.27  Installed wind power capacity.
+solar      GW   13.08  55.38   30.53  Installed solar PV capacity.
+battery    GW   6.632  35.47   16.83  Installed battery storage power (charge/discharge) rating. ...
+hydrogen  TWh  0.4023  5.349   1.501  Installed hydrogen storage capacity.
+TOTEX      M€   6,901  7,453   6,901
 ```
 
 A `Space` holds the set's designs in the space of its properties of interest (PoIs), with
 their cost. `space.points` has one row per design; `space.optimum` is the cheapest.
 
-- **Units:** values are in the set's display units (here the cost in M€ rather than €). With
-  `units="model"`, they stay in the model's units. Navigation finds the same designs either
+- **Units:** values are in the set's display units (here capacities in GW and TWh rather
+  than MW and MWh, the cost in M€ rather than €). With `units="model"`, they stay in the
+  model's units. Navigation finds the same designs either
   way.
 - **Slack level:** by default the space is the set's largest slack level. `slack=0.02`
   keeps only the designs found within 2% of the optimal cost.
@@ -66,12 +67,12 @@ result
 
 ```text
 Navigation: 2 requests, 0 adjusted
-         unit      start   target    change                request
-wind       MW     25,272   34,816    +9,544   increase by 5,054 MW
-solar      MW     30,534   20,386   -10,148
-battery    MW     16,829   16,763    -66.18
-hydrogen  MWh  1,500,715  879,645  -621,070
-TOTEX      M€      6,901    7,108    +207.0  keep within ±207.0 M€
+         unit  start  target    change                request
+wind       GW  25.27   34.82    +9.544   increase by 5.054 GW
+solar      GW  30.53   20.39    -10.15
+battery    GW  16.83   16.76  -0.06618
+hydrogen  TWh  1.501  0.8796   -0.6211
+TOTEX      M€  6,901   7,108    +207.0  keep within ±207.0 M€
 Traverse: 2 breakpoints between start and target; the cost is at most 34.27 M€ above its lower bound
 ```
 
@@ -90,7 +91,7 @@ wind replaces solar and hydrogen storage. Wind grew by more than asked, as far a
 limit allowed.
 
 When a request cannot be met in full, it is met as far as possible, and `result.changes` says
-how, for example `wind: could increase by 6,148 MW only, not 7,596 MW`.
+how, for example `wind: could increase by 6.148 GW only, not 7.596 GW`.
 
 To carry on, navigate from the result: `space.navigate(result, {...})`. A point id, or any
 row of `space.points`, works as a start too.
@@ -107,12 +108,12 @@ result.traverse
 
 ```text
 Traverse: 2 breakpoints between start and target; the cost is at most 34.27 M€ above its lower bound
-        wind   solar battery   hydrogen  TOTEX lower bound
+       wind  solar battery hydrogen  TOTEX lower bound
 beta
-0     25,272  30,534  16,829  1,500,715  6,901       6,901
-0.5   30,044  25,460  16,796  1,190,180  6,991       6,963
-0.75  32,430  22,923  16,779  1,034,913  7,036       7,007
-1     34,816  20,386  16,763    879,645  7,108       7,099
+0     25.27  30.53   16.83    1.501  6,901       6,901
+0.5   30.04  25.46   16.80    1.190  6,991       6,963
+0.75  32.43  22.92   16.78    1.035  7,036       7,007
+1     34.82  20.39   16.76   0.8796  7,108       7,099
 ```
 
 - `result.traverse.at(0.3)`: the design at 30% of the way, with its cost.

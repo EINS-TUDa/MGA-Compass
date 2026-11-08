@@ -72,7 +72,7 @@ A complete example with all three parts:
   "format": "mga-near-optimal-set",
   "version": 1,
   "title": "PyPSA model_energy example",
-  "description": "One electricity node and one hydrogen node over 2019, at 3-hourly resolution.",
+  "description": "One electricity node and one hydrogen node over 2019, at 9-hourly resolution.",
   "created": "2026-11-06T12:00:00+00:00",
   "software": {"mga-surveyor": "0.1.0", "pypsa": "1.3.0"},
   "cost": {"name": "TOTEX", "unit": "EUR", "optimum": 3899079890.0},

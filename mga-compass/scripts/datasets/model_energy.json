@@ -1,26 +1,53 @@
 {
   "title": "PyPSA model_energy example",
-  "description": "PyPSA's model_energy example (pypsa.examples.model_energy): one electricity node and one hydrogen node over 2019, at 3-hourly resolution (every third hour of the hourly example). A demand of 7,565 MW on average is met by wind, solar, a battery with 3 hours of storage, and hydrogen made by electrolysis, stored, and turned back into electricity by a turbine. Load shedding costs 20,000 €/MWh. The cost (TOTEX) is the annualised investment plus operating cost.",
+  "description": "PyPSA's model_energy example (pypsa.examples.model_energy): one electricity node and one hydrogen node over 2019, at 9-hourly resolution (every third snapshot of the 3-hourly example). A demand of 7,565 MW on average is met by wind, solar, a battery with 3 hours of storage, and hydrogen made by electrolysis, stored, and turned back into electricity by a turbine. Load shedding costs 20,000 €/MWh. The cost (TOTEX) is the annualised investment plus operating cost.",
   "cost": {
     "name": "TOTEX",
     "unit": "€",
     "display": {"unit": "M€", "factor": 1e-6}
   },
   "pois": {
-    "wind": {"unit": "MW", "description": "Installed wind power capacity."},
-    "solar": {"unit": "MW", "description": "Installed solar PV capacity."},
+    "wind": {
+      "unit": "MW",
+      "description": "Installed wind power capacity.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "solar": {
+      "unit": "MW",
+      "description": "Installed solar PV capacity.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
     "battery": {
       "unit": "MW",
-      "description": "Installed battery storage power (charge/discharge) rating. Energy capacity (MWh) equals this value times the storage unit's max_hours (3h for this model)."
+      "description": "Installed battery storage power (charge/discharge) rating. Energy capacity (MWh) equals this value times the storage unit's max_hours (3h for this model).",
+      "display": {"unit": "GW", "factor": 1e-3}
     },
-    "hydrogen": {"unit": "MWh", "description": "Installed hydrogen storage capacity."}
+    "hydrogen": {
+      "unit": "MWh",
+      "description": "Installed hydrogen storage capacity.",
+      "display": {"unit": "TWh", "factor": 1e-6}
+    }
   },
   "sets": {
-    "snapshot": {"description": "Time steps of the model."},
-    "technology": {"description": "Generators, links, storage units and stores of the model."}
+    "snapshot": {"description": "Time steps of the model (9-hourly)."},
+    "technology": {
+      "description": "Generators, links, storage units and stores of the model.",
+      "labels": {
+        "load shedding": "Load Shedding", "wind": "Wind", "solar": "Solar", "electrolysis": "Electrolysis",
+        "turbine": "Hydrogen Turbine", "battery storage": "Battery", "hydrogen storage": "Hydrogen Storage"
+      },
+      "colors": {
+        "load shedding": "#dd2e23", "wind": "#235ebc", "solar": "#f9d002", "electrolysis": "#ff29d9",
+        "turbine": "#c251ae", "battery storage": "#ace37f", "hydrogen storage": "#bf13a0"
+      }
+    }
   },
   "outputs": {
-    "generation": {"unit": "MW", "description": "Electricity generation per generator."},
+    "generation": {
+      "unit": "MW",
+      "description": "Electricity generation per generator.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
     "capacity": {
       "unit": "MW",
       "description": "Installed capacity per component: power capacity (MW) for generators, links and storage units, energy capacity (MWh) for stores."
