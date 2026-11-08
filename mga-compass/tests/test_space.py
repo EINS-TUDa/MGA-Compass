@@ -383,6 +383,32 @@ def test_alpha_at(line_dir):
         traverse.alpha_at(1.5)
 
 
+def test_weights_at(line_dir):
+    space = mc.load(line_dir, units="model")
+    traverse = space.traverse(space.points.loc[0], space.points.loc[3])
+    start = traverse.weights_at(0)
+    assert list(start.columns) == ["weight", "slack", "kind"]  # the set records no key
+    assert list(start.index) == [0] and start.loc[0, "weight"] == pytest.approx(1)
+    halfway = traverse.weights_at(0.5)  # wind 2500: half the optimum, half 3000 MW
+    assert sorted(halfway.index) == [1, 2]
+    assert list(halfway["weight"]) == pytest.approx([0.5, 0.5])
+    assert halfway.loc[1, "kind"] == "optimum" and halfway.loc[2, "slack"] == 0.05
+
+
+def test_weights_at_with_keys(line_dir, tmp_path):
+    nos = mga_format.read(line_dir)
+    nos.points.insert(2, "key", ["a", None, "b", "c"])
+    mga_format.write(tmp_path / "keyed", nos)
+    space = mc.load(tmp_path / "keyed", units="model")
+    traverse = space.traverse(space.points.loc[0], space.points.loc[3])
+    weights = traverse.weights_at(0.9)
+    assert list(weights.columns) == ["weight", "slack", "kind", "key"]
+    assert weights["weight"].is_monotonic_decreasing
+    assert weights["weight"].sum() == pytest.approx(1)
+    assert weights["key"].equals(nos.points.loc[weights.index, "key"])
+    assert traverse.weights_at(1)["key"].to_dict() == {3: "c"}
+
+
 def test_traverse_repr_and_plot(line_dir):
     space = mc.load(line_dir, units="model")
     traverse = space.traverse(space.points.loc[0], space.points.loc[3])

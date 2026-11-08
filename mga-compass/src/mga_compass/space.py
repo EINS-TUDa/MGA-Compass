@@ -581,6 +581,19 @@ class Traverse:
         mixed = ((1 - share) * self.breakpoints[left].alpha).add(share * self.breakpoints[right].alpha, fill_value=0)
         return Alpha(mixed / mixed.sum())
 
+    def weights_at(self, beta: float) -> pd.DataFrame:
+        """The set's designs mixed at `beta`, heaviest first (index: point): each
+        one's weight, and the slack, kind and key it has in the set (``key``, the
+        producer's identifier of its solve, only if the set records it). Weights
+        below 1e-9, the solver's round-off, are left out."""
+        alpha = self.alpha_at(beta)
+        alpha = alpha[alpha > 1e-9].sort_values(ascending=False)
+        points = self.space.nos.points
+        columns = [c for c in ("slack", "kind", "key") if c in points.columns]
+        frame = points.loc[[int(p) for p in alpha.index], columns]
+        frame.insert(0, "weight", alpha.to_numpy(dtype=float))
+        return frame
+
     @cached_property
     def lower_bound(self) -> pd.Series:
         """A lower bound on the cost along the path: its value (index: beta) where

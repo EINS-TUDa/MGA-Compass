@@ -123,6 +123,9 @@ beta
 
 - `result.traverse.at(0.3)`: the design at 30% of the path, with its cost.
 - `result.traverse.lower_bound_at(0.3)`: the cost's lower bound there.
+- `result.traverse.weights_at(0.3)`: the set's designs mixed there, heaviest first, with
+  each one's weight, slack, kind and key (the hash in the name of its result file, see the
+  [format](../reference/near-optimal-set-format.md)).
 - `result.traverse.plot()`: both bounds against β, with the optimal cost and the budget
   (the optimal cost plus the slack); `plot(beta=0.3)` also marks the design there.
 - `result.traverse.plot_pois()`: bars of the PoIs at the start (pale) and the target, one
