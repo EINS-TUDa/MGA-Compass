@@ -191,7 +191,7 @@ Each output is one variable, stored in `outputs/<name>.parquet` in **long** form
 | Column | Type | Meaning |
 |---|---|---|
 | one column per index set | the set's type | The keys, named after the sets, in the order the manifest gives. |
-| `value` | float64 | The value. |
+| `value` | float64 or float32 | The value. float32 keeps about 7 significant digits in half the space: enough for large outputs such as time series. |
 
 For example, `outputs/generation.parquet`:
 

@@ -179,6 +179,15 @@ def test_outputs_are_sorted_with_one_row_group_per_point(written):
     assert pq.ParquetFile(written / "outputs/generation.parquet").metadata.num_row_groups == 5
 
 
+def test_float32_output_is_kept(tmp_path):
+    outputs = _outputs()
+    outputs["generation"]["value"] = outputs["generation"]["value"].astype("float32")
+    write(tmp_path / "set", _nos(), outputs)
+    validate_output(tmp_path / "set", read(tmp_path / "set"), "generation")
+    df = read_output(tmp_path / "set", "generation", points=[2])
+    assert df["value"].dtype == "float32"
+
+
 def test_read_output_for_some_points(written):
     df = read_output(written, "generation", points=[1, 3])
     assert sorted(df["point"].unique()) == [1, 3]
