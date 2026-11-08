@@ -45,8 +45,11 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       # --all-packages so autodoc can import mga_compass and mga_surveyor.
+      # pycddlib is built from the vendored submodule, which is not checked out
+      # here; mga_surveyor imports it only when its cdd method runs, so the docs
+      # don't need it. --frozen keeps uv from building it to re-lock.
       - name: Install docs dependencies
-        run: uv sync --all-packages --group docs
+        run: uv sync --frozen --all-packages --group docs --no-install-package pycddlib
 
       - name: Build Sphinx docs
         run: uv run --no-sync sphinx-build -b html docs _site
