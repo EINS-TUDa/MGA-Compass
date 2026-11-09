@@ -7,7 +7,6 @@ import xarray as xr
 
 from pathlib import Path
 
-from .manifest import Plot
 from .schemes import Constraints, Breakpoint, Point, Points, Alpha, ConstraintChange, LinearBound, LowerBoundPoint
 
 
@@ -34,6 +33,34 @@ def _solve(mdl: linopy.Model, what: str, solver_name: str, solver_options: dict 
         raise SolverError(f"{what}: status={mdl.status}, condition={mdl.termination_condition}")
 
 
+# ---------------------------------------------------------------- column scaling
+#
+# navigate, interpolate and point_2_alpha solve small LPs over the points'
+# values. Columns of very different magnitude (a cost of ~1e11 next to
+# capacities of ~1e4) make those LPs numerically ill-conditioned, and solvers
+# then report feasible problems as infeasible. So each public function divides
+# every column by its own scale before building its LPs and converts the results
+# back. Dividing column j by s_j > 0 maps sum_i alpha_i z_ij to the same sum
+# divided by s_j, so every constraint and objective keeps the same feasible and
+# optimal weights alpha: the results are unchanged, only better conditioned.
+# A division only, no shift, so interpolate's threshold, relative to the cost's
+# magnitude, keeps its meaning.
+
+
+def _column_scales(points: Points) -> pd.Series:
+    """Each column's largest absolute value, or 1 for an all-zero column."""
+    scales = points.abs().max()
+    return scales.where(scales > 0, 1.0)
+
+
+def _scale_constraints(constraints: Constraints, scales: pd.Series) -> Constraints:
+    scaled = constraints.copy(deep=True)
+    factors = scales.reindex(scaled.index)
+    scaled["value"] = scaled["value"] / factors
+    scaled["delta"] = scaled["delta"] / factors
+    return scaled
+
+
 def navigate(
     points: Points,
     constraints: Constraints,
@@ -42,6 +69,25 @@ def navigate(
     solver_options: dict | None = None,
 ) -> tuple[Constraints, Point]:
     constraints.validate(points)
+    scales = _column_scales(points)
+    scaled_input = _scale_constraints(constraints, scales)
+    scaled_output, alpha = _navigate_scaled(points / scales, scaled_input, obj_label, solver_name, solver_options)
+    output_df = constraints.copy(deep=True)
+    output_df["direction"] = scaled_output["direction"]
+    # Unchanged deltas are copied, not scaled back, so that rounding cannot make
+    # describe_changes report a change that navigation never made.
+    changed = scaled_output["delta"] != scaled_input["delta"]
+    output_df.loc[changed, "delta"] = scaled_output.loc[changed, "delta"] * scales.reindex(output_df.index)[changed]
+    return output_df, alpha_2_point(alpha, points)
+
+
+def _navigate_scaled(
+    points: Points,
+    constraints: Constraints,
+    obj_label: str,
+    solver_name: str,
+    solver_options: dict | None,
+) -> tuple[Constraints, Alpha]:
     output_df = constraints.copy(deep=True)
     mdl = linopy.Model()
     alpha = mdl.add_variables(coords=[points.index], lower=0, name="alpha")
@@ -119,8 +165,7 @@ def navigate(
     mdl.add_objective(f.loc[obj_label], sense="min", overwrite=True)
     _solve(mdl, "navigate: minimum cost", solver_name, solver_options)
 
-    point = alpha_2_point(_normalized_alpha(alpha.solution.values, points.index), points)
-    return output_df, point
+    return output_df, _normalized_alpha(alpha.solution.values, points.index)
 
 
 _interpolate_logger = logging.getLogger(__name__ + ".interpolate")
@@ -135,12 +180,28 @@ def interpolate(
     solver_name: str = "highs",
     solver_options: dict | None = None,
 ) -> list[Breakpoint]:
+    scales = _column_scales(points)
+    breakpoints = _interpolate_scaled(
+        points / scales, point_start / scales, point_end / scales, obj_label, threshold, solver_name, solver_options,
+    )
+    return [Breakpoint(bp.beta, bp.alpha, alpha_2_point(bp.alpha, points)) for bp in breakpoints]
+
+
+def _interpolate_scaled(
+    points: Points,
+    point_start: Point,
+    point_end: Point,
+    obj_label: str,
+    threshold: float,
+    solver_name: str,
+    solver_options: dict | None,
+) -> list[Breakpoint]:
     output = []
 
     def _period_interpolate(beta_start, p_start, beta_end, p_end, depth=0):
         beta_mid = (beta_start + beta_end) / 2
         p_mid = (p_start + p_end) / 2
-        alpha_mid_interpolate = point_2_alpha(p_mid, points, obj_label, solver_name, solver_options)
+        alpha_mid_interpolate = _point_2_alpha_scaled(p_mid, points, obj_label, solver_name, solver_options)
         p_mid_interpolate = alpha_2_point(alpha_mid_interpolate, points)
         gap = p_mid[obj_label] - p_mid_interpolate[obj_label]
         abs_threshold = threshold * abs(p_mid[obj_label])
@@ -152,8 +213,8 @@ def interpolate(
 
     _interpolate_logger.info("point_start:\n%s", point_start.to_string())
     _interpolate_logger.info("point_end:\n%s", point_end.to_string())
-    alpha_start = point_2_alpha(point_start, points, obj_label, solver_name, solver_options)
-    alpha_end = point_2_alpha(point_end, points, obj_label, solver_name, solver_options)
+    alpha_start = _point_2_alpha_scaled(point_start, points, obj_label, solver_name, solver_options)
+    alpha_end = _point_2_alpha_scaled(point_end, points, obj_label, solver_name, solver_options)
     p_start = alpha_2_point(alpha_start, points)
     p_end = alpha_2_point(alpha_end, points)
     output.append(Breakpoint(0, alpha_start, p_start))
@@ -168,36 +229,23 @@ def alpha_2_point(alpha: Alpha, points: Points) -> Point:
     return pd.Series({func: sum(points.loc[i, func] * alpha[i] for i in alpha.index) for func in points.columns})
 
 
-def aggregate_by_alpha(da: xr.DataArray, alpha: Alpha) -> xr.DataArray:
-    weights = xr.DataArray(alpha, dims=["index"])
-    # xr.dot aligns on "index" like (da * weights).sum("index") does, but contracts
-    # without a da-sized temporary -- on a large output dataset that product was
-    # several times the dataset's own memory. Weights in da's dtype so a float32
-    # dataset isn't upcast (and copied) to float64 first.
-    return xr.dot(da, weights.astype(da.dtype), dim="index")
-
-
-def xr_to_series(da: xr.DataArray, plot: Plot) -> dict | list:
-    # da: xarray aggregated over alpha (no "index" dimension).
-    # Returns a dict {category -> values over x_dim} if the plot has a categories_dim,
-    # or a plain list over x_dim otherwise.
-    dims_to_sum = [d for d in da.dims if d != plot.x_dim and d != plot.categories_dim]
-    aggregated = da.sum(dims_to_sum) if dims_to_sum else da
-
-    if plot.categories_dim:
-        return {
-            str(cat): aggregated.sel({plot.categories_dim: cat}).values.tolist()
-            for cat in aggregated.coords[plot.categories_dim].values
-        }
-    return aggregated.values.tolist()
-
-
 def point_2_alpha(
     point: Point,
     points: Points,
     obj_label: str,
     solver_name: str = "highs",
     solver_options: dict | None = None,
+) -> Alpha:
+    scales = _column_scales(points)
+    return _point_2_alpha_scaled(point / scales, points / scales, obj_label, solver_name, solver_options)
+
+
+def _point_2_alpha_scaled(
+    point: Point,
+    points: Points,
+    obj_label: str,
+    solver_name: str,
+    solver_options: dict | None,
 ) -> Alpha:
     mdl = linopy.Model()
     alpha = mdl.add_variables(coords=[points.index], lower=0, name="alpha")
@@ -217,13 +265,6 @@ def _normalized_alpha(values: np.ndarray, index: pd.Index) -> Alpha:
     match that point exactly is infeasible. Divided by their sum, they are not."""
     weights = pd.Series(values, index=index).clip(lower=0)
     return Alpha(weights / weights.sum())
-
-
-def get_plot_data(alphas: list[Alpha], plot: Plot, da: xr.DataArray) -> dict:
-    return {
-        "x_dim": da.coords[plot.x_dim].values.tolist(),
-        "data": [xr_to_series(aggregate_by_alpha(da, alpha), plot) for alpha in alphas],
-    }
 
 
 def describe_changes(input_constraints: Constraints, output_constraints: Constraints) -> list[ConstraintChange]:
@@ -296,17 +337,28 @@ def linear_lower_bounds(
     breakpoints: list[Breakpoint],
     duals: Points,
     obj_label: str,
+    optimum: float | None = None,
 ) -> list[LinearBound]:
+    """Lines in beta below the cost along the path of `breakpoints`.
+
+    Point i, with duals mu_i (a subgradient of the cost at it), gives
+    cost(z) >= cost_i + mu_i . (z - z_i); along the path, z is linear in beta,
+    and so is this bound. Only the points with a weight at some breakpoint are
+    used. With `optimum`, the optimal cost, the constant line cost >= optimum is
+    added too: no design is cheaper. `points` and `duals` are indexed by point
+    id, as the breakpoints' weights are."""
     nonzero_index = set()
     for bp in breakpoints:
         nonzero_index.update(bp.alpha[bp.alpha != 0].index)
     p_start = breakpoints[0].point
     p_target = breakpoints[-1].point
     result = []
-    for i in nonzero_index:
+    for i in sorted(nonzero_index):
         slope = float(((p_target - p_start).drop(obj_label) * duals.loc[i]).sum())
-        intercept = float(((p_start.drop(obj_label) - points.iloc[i].drop(obj_label)) * duals.loc[i]).sum() + points.iloc[i][obj_label])
+        intercept = float(((p_start.drop(obj_label) - points.loc[i].drop(obj_label)) * duals.loc[i]).sum() + points.loc[i, obj_label])
         result.append(LinearBound(slope=slope, intercept=intercept))
+    if optimum is not None:
+        result.append(LinearBound(slope=0.0, intercept=float(optimum)))
     return result
 
 

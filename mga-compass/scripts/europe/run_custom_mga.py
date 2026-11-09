@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pypsa
 
-from mga_surveyor import consolidate_mga_results, generate_mga_files
+from mga_surveyor import generate_mga_files
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logging.getLogger("pypsa.optimization.optimize").setLevel(logging.WARNING)
@@ -202,11 +202,10 @@ def main() -> None:
              "own default: runs until convergence).",
     )
     parser.add_argument("--max-parallel", type=int, default=4)
-    parser.add_argument("--obj-label", type=str, default="system_cost")
     parser.add_argument(
-        "--method", choices=["cdd", "bb"], default="cdd",
-        help="Vertex enumeration of the outer polytope: cddlib (CddMethod, default) or Qhull's "
-             "polar dual (BBMethod).",
+        "--method", choices=["cdd", "bb"], default="bb",
+        help="Vertex enumeration of the outer polytope: Qhull's polar dual (BBMethod, default) "
+             "or cddlib (CddMethod, float arithmetic).",
     )
     parser.add_argument(
         "--quiet-solver", action="store_true", default=False,
@@ -240,14 +239,7 @@ def main() -> None:
         solver_name=solver_name, tol=args.tol, sep_tol=args.sep_tol, normalize=args.normalize, max_iter=args.max_iter,
         max_parallel=args.max_parallel, solver_options=solver_options, vertex_method=args.method,
     )
-    points_df, duals_df, _nc_files = consolidate_mga_results(args.output_dir, args.obj_label)
-
-    points_df.to_pickle(args.output_dir / "points.pkl")
-    duals_df.to_pickle(args.output_dir / "duals.pkl")
-    points_df.to_csv(args.output_dir / "points.csv")
-
-    logger.info("Total points: %d", len(points_df))
-    logger.info("%s", points_df)
+    logger.info("Done. Build the near-optimal set from %s with build_dataset_from_results.py.", args.output_dir)
 
 
 if __name__ == "__main__":

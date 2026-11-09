@@ -1,0 +1,47 @@
+"""The near-optimal set format: see :mod:`mga_format.near_optimal_set`, and
+:mod:`mga_format.archive` for publishing a set as one file."""
+from .archive import fetch, pack, unpack
+from .near_optimal_set import (
+    FORMAT,
+    VERSION,
+    Cost,
+    Display,
+    Fingerprint,
+    IndexSet,
+    Manifest,
+    NearOptimalSet,
+    NearOptimalSetError,
+    Output,
+    Plot,
+    Poi,
+    SlackLevel,
+    read,
+    read_manifest,
+    read_output,
+    validate_output,
+    write,
+)
+
+__all__ = [
+    "FORMAT",
+    "VERSION",
+    "Cost",
+    "Display",
+    "Fingerprint",
+    "IndexSet",
+    "Manifest",
+    "NearOptimalSet",
+    "NearOptimalSetError",
+    "Output",
+    "Plot",
+    "Poi",
+    "SlackLevel",
+    "fetch",
+    "pack",
+    "unpack",
+    "read",
+    "read_manifest",
+    "read_output",
+    "validate_output",
+    "write",
+]

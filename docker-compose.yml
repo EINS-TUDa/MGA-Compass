@@ -7,9 +7,10 @@ services:
       - "8000:8000"
     environment:
       - ALLOWED_ORIGINS=["http://localhost"]
-      # Dataset bundle to download at startup (a GitHub release of
-      # scripts/publish_dataset.py's output); override with your own tag.
-      - DATASET_URL=${DATASET_URL:-https://github.com/EINS-TUDa/MGA-Compass/releases/download/dataset-v1}
+      # Near-optimal set to download at startup: the archive a GitHub release of
+      # scripts/publish_dataset.py holds, .../releases/download/<tag>/near-optimal-set.zip.
+      # Required until a set in this format is published to default to.
+      - DATASET_URL=${DATASET_URL:?set DATASET_URL to a near-optimal set archive (.../near-optimal-set.zip)}
 
   frontend:
     build: ./app/frontend

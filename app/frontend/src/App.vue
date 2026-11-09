@@ -46,17 +46,18 @@ onUnmounted(() => {
   document.removeEventListener('mouseup', onMouseup)
 })
 
-/** @type {import('vue').Ref<'naviagte' | 'traverse'>} */
-const mode = ref('naviagte')
+/** @type {import('vue').Ref<'navigate' | 'traverse'>} */
+const mode = ref('navigate')
 
 /**
- * @typedef {Object} PathItem
+ * @typedef {Object} Breakpoint
  * @property {number} beta
  * @property {Map<number, number>} alpha
+ * @property {Object<string, number>} point
  */
 
-/** @type {import('vue').Ref<PathItem[]>} */
-const path = ref([])
+/** @type {import('vue').Ref<Breakpoint[]>} */
+const breakpoints = ref([])
 
 const onNavigated = () => {
   mode.value = 'traverse'
@@ -64,7 +65,7 @@ const onNavigated = () => {
 }
 
 const toggleMode = () => {
-  mode.value = mode.value === 'naviagte' ? 'traverse' : 'naviagte'
+  mode.value = mode.value === 'navigate' ? 'traverse' : 'navigate'
 }
 </script>
 
@@ -101,7 +102,7 @@ const toggleMode = () => {
             </span>
           </span>
           <span class="toggle-thumb" aria-hidden="true">
-            <svg v-if="mode === 'naviagte'" viewBox="0 0 24 24" width="16" height="16">
+            <svg v-if="mode === 'navigate'" viewBox="0 0 24 24" width="16" height="16">
               <path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M17,7L13.5,13.5L7,17L10.5,10.5L17,7M12,11A1,1 0 0,0 11,12A1,1 0 0,0 12,13A1,1 0 0,0 13,12A1,1 0 0,0 12,11Z" />
             </svg>
             <svg v-else viewBox="0 0 24 24" width="18" height="18">
@@ -143,16 +144,16 @@ const toggleMode = () => {
 
     <main class="content-area" ref="contentAreaRef">
       <Navigate
-        :active="mode === 'naviagte'"
+        :active="mode === 'navigate'"
         :beta="beta"
-        v-model:path="path"
+        v-model:breakpoints="breakpoints"
         @navigated="onNavigated"
         :style="{ flex: 'none', width: splitPercent + '%' }"
       />
       <div class="divider" @mousedown="onDividerMousedown">
         <span class="divider-handle" />
       </div>
-      <Traverse :active="mode === 'traverse'" :path="path" v-model:beta="beta" />
+      <Traverse :active="mode === 'traverse'" :breakpoints="breakpoints" v-model:beta="beta" />
     </main>
   </div>
 </template>

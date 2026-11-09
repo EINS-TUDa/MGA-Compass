@@ -31,12 +31,14 @@ dependencies = [
     # scripts/generate_dataset.py's own dataset-generation use, not this
     # package's core solve path.
     "highspy>=1.15.1",
-    # Parquet I/O for dataset bundles (mga_compass.dataset).
-    "pyarrow",
+    # Reads the near-optimal sets MGA Surveyor writes.
+    "mga-format",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
+# Plots of mga_compass.space results (Traverse.plot), e.g. in a notebook.
+notebook = ["ipykernel", "matplotlib", "scipy"]
 # Only needed by scripts/generate_dataset.py, which uses `mga-surveyor` to solve a
 # PyPSA network's near-optimal space and produce the dataset the server reads.
 scripts = [
@@ -48,3 +50,4 @@ scripts = [
 
 [tool.uv.sources]
 mga-surveyor = { workspace = true }
+mga-format = { workspace = true }

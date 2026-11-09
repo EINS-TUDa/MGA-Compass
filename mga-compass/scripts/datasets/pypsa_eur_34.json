@@ -1,0 +1,89 @@
+{
+  "cost": {
+    "name": "System Cost",
+    "unit": "€/a",
+    "display": {"unit": "bn €/a", "factor": 1e-9}
+  },
+  "pois": {
+    "onwind": {
+      "name": "Onshore Wind", "unit": "MW",
+      "description": "Installed onshore wind capacity, summed over all 34 nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "offwind-ac": {
+      "name": "Offshore Wind", "unit": "MW",
+      "description": "Installed fixed-bottom offshore wind capacity (AC grid connection), summed over all nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "offwind-float": {
+      "name": "Floating Wind", "unit": "MW",
+      "description": "Installed floating offshore wind capacity, summed over all nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "solar": {
+      "name": "Solar", "unit": "MW",
+      "description": "Installed fixed-tilt solar PV capacity, summed over all nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "solar-hsat": {
+      "name": "Tracking Solar", "unit": "MW",
+      "description": "Installed single-axis tracking solar PV capacity, summed over all nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "CCGT": {
+      "name": "Gas Power", "unit": "MW",
+      "description": "Installed combined-cycle gas turbine (CCGT) capacity, summed over all nodes.",
+      "display": {"unit": "GW", "factor": 1e-3}
+    },
+    "battery": {
+      "name": "Battery Storage", "unit": "MWh",
+      "description": "Installed battery storage energy capacity, summed over all nodes.",
+      "display": {"unit": "GWh", "factor": 1e-3}
+    },
+    "H2": {
+      "name": "Hydrogen Storage", "unit": "MWh",
+      "description": "Installed hydrogen storage energy capacity, summed over all nodes.",
+      "display": {"unit": "TWh", "factor": 1e-6}
+    }
+  },
+  "sets": {
+    "snapshot": {"description": "Time steps of the model (3-hourly)."},
+    "technology": {
+      "description": "Carriers, summed over all nodes.",
+      "labels": {
+        "CCGT": "Gas Power", "OCGT": "Gas Peakers", "biomass": "Biomass", "oil": "Oil", "waste": "Waste",
+        "lignite": "Lignite", "nuclear": "Nuclear", "coal": "Coal", "geothermal": "Geothermal",
+        "onwind": "Onshore Wind", "offwind-ac": "Offshore Wind", "offwind-dc": "Offshore Wind (DC)",
+        "offwind-float": "Floating Wind", "solar": "Solar", "solar-hsat": "Tracking Solar",
+        "ror": "Run of River", "hydro": "Hydro Reservoir", "PHS": "Pumped Hydro",
+        "H2 Electrolysis": "Electrolysis", "H2 Fuel Cell": "Fuel Cell",
+        "battery charger": "Battery Charger", "battery discharger": "Battery Discharger"
+      },
+      "colors": {
+        "CCGT": "#a85522", "biomass": "#baa741", "oil": "#c9c9c9", "waste": "#e3d37d", "lignite": "#826837",
+        "nuclear": "#ff8c00", "coal": "#545454", "OCGT": "#e0986c", "geothermal": "#ba91b1",
+        "offwind-dc": "#74c6f2", "offwind-float": "#b5e2fa", "solar": "#f9d002", "onwind": "#235ebc",
+        "solar-hsat": "#fdb915", "offwind-ac": "#6895dd", "ror": "#3dbfb0", "PHS": "#51dbcc",
+        "hydro": "#298c81", "H2 Electrolysis": "#ff29d9", "H2 Fuel Cell": "#c251ae",
+        "battery charger": "#88a75b", "battery discharger": "#5d4e29"
+      }
+    }
+  },
+  "outputs": {
+    "generation": {
+      "unit": "MW",
+      "display": {"unit": "GW", "factor": 1e-3},
+      "description": "Europe-wide electricity generation per carrier: every generator plus hydro and PHS dispatch."
+    },
+    "capacity": {
+      "unit": "MW",
+      "display": {"unit": "GW", "factor": 1e-3},
+      "description": "Europe-wide installed power capacity per carrier: generators, hydro/PHS, battery charger and discharger, electrolysis and fuel cell."
+    }
+  },
+  "plots": {
+    "generation": {"type": "stacked_timeseries", "output": "generation", "x": "snapshot", "stack": "technology"},
+    "capacity": {"type": "bar", "output": "capacity", "x": "technology"},
+    "total generation": {"type": "timeseries", "output": "generation", "x": "snapshot"}
+  }
+}

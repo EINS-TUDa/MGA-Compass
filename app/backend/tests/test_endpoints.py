@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
@@ -13,7 +14,7 @@ from mgaserver.main import app
 
 @pytest.fixture(scope="module")
 def client(dataset_dir):
-    # The app loads conftest's dataset bundle through its normal startup path.
+    # The app loads conftest's near-optimal set through its normal startup path.
     with TestClient(app) as c:
         yield c
 
@@ -67,7 +68,19 @@ class TestInitEndpoint:
     def test_optimal_point_minimizes_obj_label(self, client, points_df, manifest):
         response = client.get("/init")
         data = response.json()
-        assert data["point"][manifest.obj_label] == pytest.approx(float(points_df[manifest.obj_label].min()))
+        assert data["point"][manifest.cost.name] == pytest.approx(float(points_df[manifest.cost.name].min()))
+
+    def test_units_and_descriptions_come_from_the_manifest(self, client, manifest):
+        dimensions = client.get("/init").json()["dimensions"]
+        for poi in manifest.pois:
+            assert dimensions[poi.name]["unit"] == poi.unit
+            assert dimensions[poi.name]["info"] == poi.description
+        assert dimensions[manifest.cost.name]["unit"] == manifest.display[manifest.cost.name].unit
+
+    def test_slack_and_kind_are_not_dimensions(self, client):
+        dimensions = client.get("/init").json()["dimensions"]
+        assert "slack" not in dimensions
+        assert "kind" not in dimensions
 
     def test_response_does_not_contain_datasets(self, client):
         response = client.get("/init")
@@ -90,16 +103,16 @@ class TestInitPlotEndpoint:
         response = client.get("/init_plot")
         data = response.json()
         assert "obj_label" in data
-        assert data["obj_label"] == manifest.obj_label
+        assert data["obj_label"] == manifest.cost.name
 
     def test_datasets_match_config(self, client, manifest):
         response = client.get("/init_plot")
         assert set(response.json()["datasets"]) == set(manifest.plots.keys())
 
-    def test_labels_and_colors_match_config(self, client, manifest):
+    def test_labels_and_colors_come_from_the_sets(self, client):
         data = client.get("/init_plot").json()
-        assert data["labels"] == manifest.category_labels
-        assert data["colors"] == manifest.category_colors
+        assert data["labels"] == {"gas": "Gas Power"}
+        assert data["colors"] == {"gas": "#a85522"}
 
 
 @pytest.fixture
@@ -224,12 +237,12 @@ class TestNavigateValidation:
 
 class TestPlotEndpoint:
     @pytest.fixture(autouse=True)
-    def mock_get_plot_data(self):
+    def mock_plot_data(self):
         _result = {
             "x_dim": ["gas", "coal"],
             "data": [{"gas": [10.0], "coal": [30.0]}, {"gas": [20.0], "coal": [40.0]}],
         }
-        with patch("mgaserver.main.get_plot_data", return_value=_result):
+        with patch("mgaserver.main.plot_data", return_value=_result):
             yield _result
 
     def test_returns_200(self, client):
@@ -255,15 +268,36 @@ class TestPlotEndpoint:
         response = client.post("/plot_data", json=payload)
         assert response.json()["betas"] == pytest.approx([0.0, 1.0])
 
-    def test_x_dim_from_get_plot_data(self, client, mock_get_plot_data):
+    def test_x_dim_from_plot_data(self, client, mock_plot_data):
         payload = {"name": "capacity", "breakpoints": [{"beta": 0.0, "alpha": {"0": 1.0}}]}
         response = client.post("/plot_data", json=payload)
-        assert response.json()["x_dim"] == mock_get_plot_data["x_dim"]
+        assert response.json()["x_dim"] == mock_plot_data["x_dim"]
 
-    def test_data_from_get_plot_data(self, client, mock_get_plot_data):
+    def test_data_from_plot_data(self, client, mock_plot_data):
         payload = {"name": "capacity", "breakpoints": [{"beta": 0.0, "alpha": {"0": 1.0}}, {"beta": 1.0, "alpha": {"1": 1.0}}]}
         response = client.post("/plot_data", json=payload)
-        assert response.json()["data"] == mock_get_plot_data["data"]
+        assert response.json()["data"] == mock_plot_data["data"]
+
+
+class TestPlotEndpointReadsTheSet:
+    """/plot_data without mocks: reads the outputs of the points it mixes."""
+
+    def test_bar_plot(self, client):
+        payload = {"name": "capacity", "breakpoints": [{"beta": 0.0, "alpha": {"0": 0.5, "2": 0.5}}]}
+        data = client.post("/plot_data", json=payload).json()
+        assert data["x_dim"] == ["gas", "coal"]
+        assert data["data"] == [[1.0, 1.0]]
+
+    def test_stacked_timeseries_uses_nanosecond_timestamps_and_display_units(self, client):
+        payload = {"name": "generation", "breakpoints": [{"beta": 0.0, "alpha": {"1": 1.0}}]}
+        data = client.post("/plot_data", json=payload).json()
+        assert data["x_dim"] == pd.date_range("2030-01-01", periods=3, freq="h").as_unit("ns").asi8.tolist()
+        # stored 1.0 MW, shown in GW
+        assert data["data"] == [{"gas": [1e-3, 1e-3, 1e-3], "coal": [1e-3, 1e-3, 1e-3]}]
+
+    def test_unstacked_timeseries_sums_technologies(self, client):
+        payload = {"name": "total generation", "breakpoints": [{"beta": 0.0, "alpha": {"3": 1.0}}]}
+        assert client.post("/plot_data", json=payload).json()["data"] == [[2e-3, 2e-3, 2e-3]]
 
 
 class TestLowerBoundEndpoint:

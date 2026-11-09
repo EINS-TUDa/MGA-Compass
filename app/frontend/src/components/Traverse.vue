@@ -7,7 +7,7 @@ defineProps({
     type: Boolean,
     required: true,
   },
-  path: {
+  breakpoints: {
     type: Array,
     required: true,
   },
@@ -22,7 +22,7 @@ const beta = defineModel('beta', {
 <template>
   <section class="pane" :class="{ 'is-grayed': !active }">
     <div class="window-box chart-box">
-      <Chart :active="active" :beta="beta" :path="path" />
+      <Chart :active="active" :beta="beta" :breakpoints="breakpoints" />
     </div>
 
     <div class="window-box slider-box">

@@ -1,0 +1,888 @@
+"""Exploring a near-optimal set from Python, e.g. in a notebook.
+
+:func:`load` reads a set in the near-optimal set format (``mga_format``) and
+returns a :class:`Space`: the set's designs in PoI space, ready to navigate::
+
+    import mga_compass as mc
+
+    space = mc.load("model-energy/")
+    space            # the PoIs and the cost, with their units and ranges
+    space.points     # one row per design
+    space.optimum    # the cheapest design
+
+    result = space.navigate(space.optimum, {
+        "wind": ("increase", 6),     # by at least 6, in wind's unit
+        "TOTEX": ("keep", "3%"),     # within 3% of the start's cost
+    })
+    result           # start and target side by side, and what had to be adjusted
+    result.traverse  # the path from start to target: cost along it, with a lower bound
+    space.navigate(result, {...})    # carry on from the target
+
+    space.outputs()                       # the set's detailed outputs
+    space.output("generation", result)    # one of them, for the target
+"""
+from __future__ import annotations
+
+import html
+import math
+import numbers
+import textwrap
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
+from typing import Literal, Union
+
+import numpy as np
+import pandas as pd
+
+import mga_format
+
+from .core import (
+    alpha_2_point, describe_changes, interpolate, linear_lower_bounds, navigate, point_2_alpha, upper_envelope,
+)
+from .near_optimal import category_styles, display_factor, display_units, mix_output, navigable_points
+from .schemes import Alpha, Breakpoint, ConstraintChange, Constraints
+from .solvers import default_solver_options
+
+Units = Literal["display", "model"]
+Direction = Literal["increase", "decrease", "keep"]
+#: How far to move a PoI or the cost: a number in its unit, or a percentage of
+#: its value at the start, such as ``"20%"``.
+Delta = Union[float, str]
+#: What to ask of one PoI or the cost: ``(direction, delta)``, or a direction
+#: alone, meaning a delta of 0.
+Request = Union[Direction, tuple[Direction, Delta]]
+
+_URL_SCHEMES = ("http://", "https://", "file://")
+_DIRECTIONS = {"increase": ">=", "decrease": "<=", "keep": "=="}
+_WORDS = {">=": "increase by", "<=": "decrease by", "==": "keep within ±"}
+
+
+def load(
+    source: str | Path,
+    directory: str | Path | None = None,
+    *,
+    units: Units = "display",
+    slack: float | None = None,
+    solver_name: str = "highs",
+    solver_options: dict | None = None,
+) -> Space:
+    """Load a near-optimal set as a :class:`Space`.
+
+    `source` is the set's directory, its zip archive, or the URL of a published
+    archive (``https://`` or ``file://``). An archive is unpacked into
+    `directory`, replacing whatever is there; the set's outputs are read from
+    that directory later, so it has to stay. The set is checked against its
+    manifest's checksums before anything is used.
+
+    See :class:`Space` for `units`, `slack`, `solver_name` and `solver_options`.
+    """
+    text = str(source)
+    if text.startswith(_URL_SCHEMES) or Path(source).suffix == ".zip":
+        if directory is None:
+            raise ValueError(f"{text} is an archive: pass `directory`, where to unpack it")
+        if text.startswith(_URL_SCHEMES):
+            nos = mga_format.fetch(text, directory)
+        else:
+            nos = mga_format.unpack(source, directory)
+    else:
+        if directory is not None:
+            raise ValueError(f"{text} is a set's directory already: `directory` is only for archives")
+        directory = source
+        nos = mga_format.read(directory)
+    return Space(nos, directory, units=units, slack=slack, solver_name=solver_name, solver_options=solver_options)
+
+
+class Space:
+    """The designs of a near-optimal set in PoI space, to navigate.
+
+    Navigation moves within the convex hull of these designs: every mix of
+    them is a design too, at most as expensive as the same mix of their costs.
+
+    - `units`: ``"display"`` (default) gives every PoI and the cost in the unit
+      the set says to show it in (its manifest's ``display``, e.g. GW instead of
+      MW); ``"model"`` keeps the units of the model. Navigation finds the same
+      designs either way; values and deltas are just in these units.
+    - `slack`: the slack level to explore, one of the set's. By default its
+      largest, using all designs. A smaller one keeps the optimum and the designs
+      found at slack levels up to it.
+    - `solver_name`, `solver_options`: the LP solver navigation uses; the options
+      default to :func:`~mga_compass.solvers.default_solver_options`.
+    """
+
+    def __init__(
+        self,
+        nos: mga_format.NearOptimalSet,
+        directory: str | Path,
+        *,
+        units: Units = "display",
+        slack: float | None = None,
+        solver_name: str = "highs",
+        solver_options: dict | None = None,
+    ) -> None:
+        if units not in ("display", "model"):
+            raise ValueError(f"units must be 'display' or 'model', got {units!r}")
+        manifest = nos.manifest
+        self.nos = nos
+        self.directory = Path(directory)
+        self.unit_system: Units = units
+        self.slack = _slack_level(manifest.slacks, slack)
+        self.cost: str = manifest.cost.name
+        self.pois: list[str] = manifest.poi_names
+        self.title: str = manifest.title
+        """What the set is of, from its manifest; may be empty."""
+        self.description: str = manifest.description
+        """The model behind the set, from its manifest; may be empty."""
+        self.solver_name = solver_name
+        self.solver_options = default_solver_options(solver_name) if solver_options is None else solver_options
+
+        points = navigable_points(nos)[nos.points["slack"] <= self.slack]
+        duals = nos.duals.loc[points.index, self.pois]
+        if units == "display":
+            factors = pd.Series({column: display_factor(nos, column) for column in points.columns})
+            points = points * factors
+            # A dual is cost per PoI unit: scaled by the cost's factor over the PoI's.
+            duals = duals * (factors[self.cost] / factors[self.pois])
+            self.units: dict[str, str] = display_units(nos)
+            self.optimal_cost = manifest.cost.optimum * factors[self.cost]
+        else:
+            self.units = {poi.name: poi.unit for poi in manifest.pois} | {self.cost: manifest.cost.unit}
+            self.optimal_cost = manifest.cost.optimum
+        self.points: pd.DataFrame = points
+        """One row per design (index: its point id), one column per PoI plus the cost."""
+        self.duals: pd.DataFrame = duals
+        """Each design's duals (index: its point id), one column per PoI: a
+        subgradient of the cost at the design, in cost units per PoI unit."""
+
+    @property
+    def optimum(self) -> pd.Series:
+        """The cheapest design: its PoI values and its cost."""
+        return self.points.loc[self.points[self.cost].idxmin()]
+
+    def summary(self) -> pd.DataFrame:
+        """Each PoI and the cost: its unit, the range of the designs, and its value
+        at the optimum."""
+        return pd.DataFrame({
+            "unit": pd.Series(self.units),
+            "min": self.points.min(),
+            "max": self.points.max(),
+            "optimum": self.optimum,
+            "description": pd.Series({poi.name: poi.description for poi in self.nos.manifest.pois}),
+        }).reindex([*self.pois, self.cost]).fillna({"description": ""})
+
+    def plot_ranges(self, axes=None):
+        """Each PoI's range over the space's designs, as a bar from its smallest
+        to its largest value, with the optimum marked: one panel per unit. A PoI of
+        a single component takes the colour the set gives that component. Needs
+        matplotlib (``pip install mga-compass[notebook]``). Returns the panels' axes."""
+        axes = _unit_panels(self, axes)
+        optimum = self.optimum
+        colors = _poi_colors(self)
+        for ax, (unit, pois) in zip(axes, _pois_by_unit(self).items()):
+            low, high = self.points[pois].min(), self.points[pois].max()
+            x = np.arange(len(pois))
+            ax.bar(x, high - low, bottom=low, width=0.5, alpha=0.6,
+                   color=[colors.get(poi, "C0") for poi in pois])
+            ax.plot(x, optimum[pois], "D", color="black", label="optimum")
+            ax.set_xticks(x, pois)
+            ax.set_ylabel(unit)
+        axes[0].legend()
+        return axes
+
+    def plot_projection(self, x: str, y: str, navigation: Navigation | None = None, ax=None):
+        """The space projected onto two of its columns, PoIs or the cost: the
+        outline of the designs' convex hull there, the designs, and the optimum.
+        With `navigation`, also its start, target and the path between them.
+
+        The space is the convex hull of the designs, and the projection of a
+        convex hull is the hull of the projected points: the outline is exact for
+        the space navigation searches. Designs inside it lie deeper along the
+        other columns. The true near-optimal region of the model is larger; the
+        hull is an inner approximation of it. Needs matplotlib and scipy
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        columns = list(self.points.columns)
+        for name in (x, y):
+            if name not in columns:
+                raise ValueError(f"{name!r} is not a PoI or the cost; choose from {columns}")
+        if x == y:
+            raise ValueError("x and y must be different columns")
+        plt = _pyplot()
+        try:
+            from scipy.spatial import ConvexHull, QhullError
+        except ImportError:
+            raise ImportError("plot_projection needs scipy: pip install 'mga-compass[notebook]'") from None
+        if ax is None:
+            _, ax = plt.subplots(layout="constrained")
+
+        projected = self.points[[x, y]].to_numpy()
+        distinct = np.unique(projected, axis=0)
+        try:
+            outline = distinct[ConvexHull(distinct).vertices]  # counter-clockwise
+        except (QhullError, ValueError):  # fewer than 3 points, or all on a line
+            order = np.lexsort((distinct[:, 1], distinct[:, 0]))
+            outline = distinct[order[[0, -1]]]
+        if len(outline) > 2:
+            ax.fill(outline[:, 0], outline[:, 1], color="C0", alpha=0.15, label="space (hull of the designs)")
+        closed = np.vstack([outline, outline[:1]])
+        ax.plot(closed[:, 0], closed[:, 1], color="C0")
+        ax.scatter(projected[:, 0], projected[:, 1], s=12, color="C0", alpha=0.6, label="designs")
+        ax.plot([self.optimum[x]], [self.optimum[y]], "D", color="black", label="optimum")
+        if navigation is not None:
+            path = np.array([[bp.point[x], bp.point[y]] for bp in navigation.traverse.breakpoints])
+            ax.plot(path[:, 0], path[:, 1], color="dimgrey", linestyle="--", label="path")
+            ax.plot([navigation.start[x]], [navigation.start[y]], "o", color="C2", label="start")
+            ax.plot([navigation.target[x]], [navigation.target[y]], "o", color="C3", label="target")
+        for axis, name in ((ax.set_xlabel, x), (ax.set_ylabel, y)):
+            unit = self.units.get(name, "")
+            axis(f"{name} [{unit}]" if unit else name)
+        _number_ticks(ax, both=True)
+        ax.legend()
+        return ax
+
+    def navigate(self, start: pd.Series | int | Navigation, request: Mapping[str, Request]) -> Navigation:
+        """Move from design `start` as `request` asks, to the cheapest design that
+        meets it.
+
+        `start` is a design (a row of :attr:`points`, :attr:`optimum`, or any
+        mix of designs with all its values), a point id, or the result of an
+        earlier navigation, to carry on from its target.
+
+        `request` maps PoIs, and the cost if wanted, to ``(direction, delta)``:
+
+        - ``("increase", d)``: raise it by at least `d`, then as far as possible;
+        - ``("decrease", d)``: lower it by at least `d`, then as far as possible;
+        - ``("keep", d)``: keep it within `d` of its start value, then as close
+          to it as possible.
+
+        `d` is in the unit of :attr:`units`, or a percentage of the start value
+        such as ``"20%"``; a direction alone means ``d = 0``. The order of
+        `request` is the priority order: every request is met first, then each
+        is pushed ("as far", "as close") as well as the ones before it allow,
+        so a keep listed before an increase limits it more than one after it.
+        When a request cannot be met in full, it is met as far as possible and
+        :attr:`Navigation.changes` says how. PoIs left out are free: they move
+        however the requests make cheapest.
+
+        The path from start to target is computed too: :attr:`Navigation.traverse`.
+        """
+        if isinstance(start, Navigation):
+            start = start.target
+        elif isinstance(start, numbers.Integral) and not isinstance(start, bool):
+            start = self.points.loc[start]
+        start = self._design(start)
+        requested = self._constraints(start, request)
+        applied, target = navigate(self.points, requested, self.cost, self.solver_name, self.solver_options)
+        target = target[list(self.points.columns)].rename("target")
+        return Navigation(self, start, target, requested, applied, self.traverse(start, target))
+
+    def traverse(self, start: pd.Series, target: pd.Series) -> Traverse:
+        """The path from design `start` to design `target`: see :class:`Traverse`."""
+        start, target = self._design(start), self._design(target)
+        breakpoints = interpolate(self.points, start, target, self.cost,
+                                  solver_name=self.solver_name, solver_options=self.solver_options)
+        return Traverse(self, breakpoints)
+
+    def outputs(self) -> pd.DataFrame:
+        """The set's detailed outputs, one row each: the unit (in this space's
+        units), the index sets besides ``point``, and the description."""
+        manifest = self.nos.manifest
+        return pd.DataFrame({
+            "unit": [self._output_unit(name) for name in manifest.outputs],
+            "index": [", ".join(output.index[1:]) for output in manifest.outputs.values()],
+            "description": [output.description for output in manifest.outputs.values()],
+        }, index=pd.Index(list(manifest.outputs), name="output"))
+
+    def plots(self) -> pd.DataFrame:
+        """The plots the set declares for its outputs, one row each: the type, the
+        output, the set along x and the set stacked, if any. Draw one with
+        :meth:`plot`."""
+        plots = self.nos.manifest.plots
+        return pd.DataFrame({
+            "type": [plot.type for plot in plots.values()],
+            "output": [plot.output for plot in plots.values()],
+            "x": [plot.x for plot in plots.values()],
+            "stack": [plot.stack or "" for plot in plots.values()],
+        }, index=pd.Index(list(plots), name="plot"))
+
+    def plot(self, name: str, design: Navigation | Alpha | pd.Series | int, ax=None):
+        """Draw plot `name` of the set (see :meth:`plots`) for a design, as the web
+        platform does: its output summed over the sets other than ``x`` and
+        ``stack``, members in the sets' order, with the sets' labels and colours.
+        `design` is as for :meth:`output`. Needs matplotlib
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        plots = self.nos.manifest.plots
+        if name not in plots:
+            raise ValueError(f"the set has no plot {name!r}; it has {list(plots)}")
+        plot = plots[name]
+        plt = _pyplot()
+        if ax is None:
+            _, ax = plt.subplots(figsize=(9, 4) if plot.type.endswith("timeseries") else (6, 4), layout="constrained")
+        series = self.output(plot.output, design)
+        keep = [plot.x, plot.stack] if plot.stack else [plot.x]
+        data = series.groupby(level=keep, sort=False).sum()
+        labels, colors = category_styles(self.nos)
+
+        def ordered(present, set_name: str) -> list:
+            members = self.nos.sets[set_name][set_name]
+            return [m for m in members if m in set(present)]
+
+        def style(member, k: int) -> dict:
+            return {"label": labels.get(str(member), str(member)), "color": colors.get(str(member), f"C{k % 10}")}
+
+        if plot.stack:
+            frame = data.unstack(plot.stack)
+            frame = frame.loc[ordered(frame.index, plot.x), ordered(frame.columns, plot.stack)]
+        else:
+            data = data.loc[ordered(data.index, plot.x)]
+        if plot.type == "bar":
+            x = np.arange(len(data))
+            ax.bar(x, data.to_numpy(), color=[style(m, k)["color"] for k, m in enumerate(data.index)])
+            ax.set_xticks(x, [style(m, 0)["label"] for m in data.index], rotation=30, ha="right")
+        elif plot.type == "stacked_bar":
+            x = np.arange(len(frame))
+            bottom = np.zeros(len(frame))
+            for k, member in enumerate(frame.columns):
+                ax.bar(x, frame[member].to_numpy(), bottom=bottom, **style(member, k))
+                bottom += frame[member].to_numpy()
+            ax.set_xticks(x, [style(m, 0)["label"] for m in frame.index], rotation=30, ha="right")
+        elif plot.type == "timeseries":
+            ax.plot(data.index, data.to_numpy())
+        else:  # stacked_timeseries
+            styles = [style(m, k) for k, m in enumerate(frame.columns)]
+            ax.stackplot(frame.index, frame.to_numpy().T, labels=[s["label"] for s in styles],
+                         colors=[s["color"] for s in styles], linewidth=0)
+            ax.set_xlim(frame.index[0], frame.index[-1])
+        if plot.stack:
+            ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
+        if plot.type.endswith("timeseries") and pd.api.types.is_datetime64_any_dtype(data.index.get_level_values(0)):
+            import matplotlib.dates as mdates
+
+            locator = mdates.AutoDateLocator()
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        _number_ticks(ax)
+        unit = self._output_unit(plot.output)
+        ax.set_ylabel(f"{plot.output} [{unit}]" if unit else plot.output)
+        ax.set_title(name)
+        return ax
+
+    def output(self, name: str, design: Navigation | Alpha | pd.Series | int) -> pd.Series:
+        """Detailed output `name` (see :meth:`outputs`) of a design, such as
+        hourly generation per technology.
+
+        A design here is a mix of the set's designs, and its output is the same
+        mix of their outputs. `design` is a navigation result (its target), the
+        weights of a design (e.g. ``result.alpha`` or
+        ``result.traverse.alpha_at(0.5)``), a point id, or a design's PoI
+        values, whose cheapest mix is found first.
+
+        Returns a Series indexed by the output's sets in their order (unstack it
+        for a table), in this space's units. Reads only the outputs of the
+        designs in the mix."""
+        outputs = self.nos.manifest.outputs
+        if name not in outputs:
+            raise ValueError(f"the set has no output {name!r}; it has {list(outputs)}")
+        alpha = self._alpha(design)
+        (mixed,) = mix_output(self.directory, self.nos, name, [alpha])
+        factor = display_factor(self.nos, name) if self.unit_system == "display" else 1.0
+        series = (mixed * factor).to_series().rename(name)
+        series.attrs["unit"] = self._output_unit(name)
+        return series
+
+    def _output_unit(self, name: str) -> str:
+        display = self.nos.manifest.display.get(name)
+        if self.unit_system == "display" and display is not None:
+            return display.unit
+        return self.nos.manifest.outputs[name].unit
+
+    def _alpha(self, design: Navigation | Alpha | pd.Series | int) -> Alpha:
+        if isinstance(design, Navigation):
+            return design.alpha
+        if isinstance(design, Alpha):
+            return design
+        if isinstance(design, numbers.Integral) and not isinstance(design, bool):
+            if design not in self.points.index:
+                raise ValueError(f"point {design} is not a design of this space")
+            return Alpha(pd.Series({design: 1.0}))
+        if isinstance(design, pd.Series):
+            return point_2_alpha(self._design(design), self.points, self.cost,
+                                 solver_name=self.solver_name, solver_options=self.solver_options)
+        raise TypeError(f"a design is a navigation result, weights, a point id or PoI values, got {type(design).__name__}")
+
+    def _design(self, design: pd.Series) -> pd.Series:
+        columns = list(self.points.columns)
+        if missing := [c for c in columns if c not in design.index]:
+            raise ValueError(f"the design has no value for {missing}")
+        return design[columns].astype(float).rename("start")
+
+    def _constraints(self, start: pd.Series, request: Mapping[str, Request]) -> Constraints:
+        columns = list(self.points.columns)
+        rows: dict[str, tuple[str, float]] = {}
+        for name, spec in request.items():
+            if name not in columns:
+                raise ValueError(f"{name!r} is neither a PoI nor the cost; choose from {columns}")
+            direction, delta = (spec, 0.0) if isinstance(spec, str) else _pair(name, spec)
+            if direction not in _DIRECTIONS:
+                raise ValueError(f"{name}: direction must be one of {list(_DIRECTIONS)}, got {direction!r}")
+            rows[name] = (_DIRECTIONS[direction], _delta(name, delta, start[name]))
+        for name in columns:
+            rows.setdefault(name, ("", 0.0))  # free
+        names = list(rows)
+        return Constraints(pd.DataFrame({
+            "direction": [rows[n][0] for n in names],
+            "value": start[names].to_numpy(),
+            "delta": [rows[n][1] for n in names],
+        }, index=names))
+
+    def _title(self) -> str:
+        levels = ", ".join(f"{s:g}" for s in sorted(self.nos.manifest.slacks))
+        return (f"Space: {len(self.points)} near-optimal designs in {len(self.pois)} PoIs, "
+                f"slack {self.slack:g} (set's slack levels: {levels})")
+
+    def _formatted_summary(self) -> pd.DataFrame:
+        table = self.summary()
+        scales = self.points.abs().max()
+        for column in ("min", "max", "optimum"):
+            table[column] = [_format_number(v, scales[n]) for n, v in table[column].items()]
+        if not table["description"].astype(bool).any():
+            return table.drop(columns="description")
+        width = table["description"].str.len().max()
+        table["description"] = table["description"].str.ljust(width)  # text reads left-aligned
+        return table
+
+    def __repr__(self) -> str:
+        lines = [self.title] if self.title else []
+        lines += textwrap.wrap(self.description, 90)
+        if lines:
+            lines.append("")
+        return "\n".join([*lines, self._title(), self._formatted_summary().to_string()])
+
+    def _repr_html_(self) -> str:
+        about = f"<h4>{html.escape(self.title)}</h4>" if self.title else ""
+        about += f"<p>{html.escape(self.description)}</p>" if self.description else ""
+        return f"{about}<p>{self._title()}</p>{self._formatted_summary().to_html()}"
+
+
+@dataclass
+class Navigation:
+    """The result of :meth:`Space.navigate`."""
+
+    space: Space
+    #: The design navigation started from.
+    start: pd.Series
+    #: The design it reached: the cheapest one meeting the requests.
+    target: pd.Series
+    #: The requests, as constraints: one row per PoI and the cost, in priority
+    #: order, with direction ``">="``, ``"<="``, ``"=="`` or ``""`` (free).
+    requested: Constraints
+    #: The constraints as navigation could meet them.
+    applied: Constraints
+    #: The path from start to target.
+    traverse: Traverse
+    #: How requests that could not be met in full were adjusted, in words.
+    changes: list[str] = field(init=False)
+
+    @property
+    def alpha(self) -> Alpha:
+        """The target as weights of the space's designs (point id -> weight)."""
+        return self.traverse.breakpoints[-1].alpha
+
+    def __post_init__(self) -> None:
+        self.changes = [
+            _describe(change, self.requested, self.space.units)
+            for change in describe_changes(self.requested, self.applied)
+            if not _negligible(change, self.space.points)
+        ]
+
+    def to_frame(self) -> pd.DataFrame:
+        """Each PoI and the cost: its unit, start and target values, the change,
+        and what was requested of it."""
+        columns = list(self.space.points.columns)
+        return pd.DataFrame({
+            "unit": pd.Series(self.space.units),
+            "start": self.start,
+            "target": self.target,
+            "change": self.target - self.start,
+            "request": pd.Series({name: _request_text(self.requested.loc[name], self.space.units.get(name, ""))
+                                  for name in self.requested.index}),
+        }).reindex(columns)
+
+    def _formatted(self) -> pd.DataFrame:
+        table = self.to_frame()
+        scales = self.space.points.abs().max()
+        for column in ("start", "target"):
+            table[column] = [_format_number(v, scales[n]) for n, v in table[column].items()]
+        table["change"] = [_format_signed(v, scales[n]) for n, v in table["change"].items()]
+        return table
+
+    def _title(self) -> str:
+        asked = sum(self.requested["direction"] != "")
+        return f"Navigation: {asked} request{'s' * (asked != 1)}, {len(self.changes)} adjusted"
+
+    def __repr__(self) -> str:
+        lines = [self._title(), self._formatted().to_string()]
+        if self.changes:
+            lines += ["Adjusted:", *(f"  {change}" for change in self.changes)]
+        lines.append(self.traverse._title())
+        return "\n".join(lines)
+
+    def _repr_html_(self) -> str:
+        html = f"<p>{self._title()}</p>{self._formatted().to_html()}"
+        if self.changes:
+            html += "<p>Adjusted:</p><ul>" + "".join(f"<li>{change}</li>" for change in self.changes) + "</ul>"
+        return html + f"<p>{self.traverse._title()}</p>"
+
+
+@dataclass
+class Traverse:
+    """The path from one design to another, computed by :meth:`Space.traverse`.
+
+    The PoIs move in a straight line from start to target as `beta` goes from 0
+    to 1. The cost along the path is the cheapest mix of the space's designs with
+    those PoIs, refined at breakpoints until it improves by less than 0.1%: an
+    upper bound on the true cost. :attr:`lower_bound` gives a matching lower
+    bound from the designs' duals; the true cost lies between the two.
+    """
+
+    space: Space
+    #: Where the cost curve bends, from ``beta = 0`` (the start) to ``beta = 1``
+    #: (the target), each with its weights and its design.
+    breakpoints: list[Breakpoint]
+
+    @property
+    def betas(self) -> list[float]:
+        return [float(bp.beta) for bp in self.breakpoints]
+
+    def to_frame(self) -> pd.DataFrame:
+        """One row per breakpoint (index: beta): the PoIs, the cost (upper bound)
+        and the cost's lower bound there."""
+        frame = pd.DataFrame([bp.point for bp in self.breakpoints], index=pd.Index(self.betas, name="beta"))
+        frame = frame[list(self.space.points.columns)]
+        frame["lower bound"] = [self.lower_bound_at(beta) for beta in self.betas]
+        return frame
+
+    def at(self, beta: float) -> pd.Series:
+        """The design at `beta` (0 to 1): its PoIs and cost, between the
+        neighbouring breakpoints."""
+        return alpha_2_point(self.alpha_at(beta), self.space.points).rename(beta)
+
+    def alpha_at(self, beta: float) -> Alpha:
+        """The weights of the design at `beta`: the neighbouring breakpoints'
+        weights, mixed linearly."""
+        if not 0 <= beta <= 1:
+            raise ValueError(f"beta must be between 0 and 1, got {beta}")
+        betas = self.betas
+        right = next(i for i, b in enumerate(betas) if b >= beta)
+        if betas[right] == beta or right == 0:
+            return self.breakpoints[right].alpha
+        left = right - 1
+        share = (beta - betas[left]) / (betas[right] - betas[left])
+        mixed = ((1 - share) * self.breakpoints[left].alpha).add(share * self.breakpoints[right].alpha, fill_value=0)
+        return Alpha(mixed / mixed.sum())
+
+    def weights_at(self, beta: float) -> pd.DataFrame:
+        """The set's designs mixed at `beta`, heaviest first (index: point): each
+        one's weight, and the slack, kind and key it has in the set (``key``, the
+        producer's identifier of its solve, only if the set records it). Weights
+        below 1e-9, the solver's round-off, are left out."""
+        alpha = self.alpha_at(beta)
+        alpha = alpha[alpha > 1e-9].sort_values(ascending=False)
+        points = self.space.nos.points
+        columns = [c for c in ("slack", "kind", "key") if c in points.columns]
+        frame = points.loc[[int(p) for p in alpha.index], columns]
+        frame.insert(0, "weight", alpha.to_numpy(dtype=float))
+        return frame
+
+    @cached_property
+    def lower_bound(self) -> pd.Series:
+        """A lower bound on the cost along the path: its value (index: beta) where
+        it bends, at 0, at 1 and in between; it is linear in between.
+
+        The largest of the bounds the designs' duals give, cost >= cost_i +
+        dual_i . (PoIs - PoIs_i), for each design with a weight at some
+        breakpoint, and of the optimal cost: no design is cheaper."""
+        bounds = linear_lower_bounds(self.space.points, self.breakpoints, self.space.duals,
+                                     self.space.cost, optimum=self.space.optimal_cost)
+        envelope = upper_envelope(bounds)
+        return pd.Series([p.value for p in envelope], index=pd.Index([p.beta for p in envelope], name="beta"),
+                         name="lower bound")
+
+    def lower_bound_at(self, beta: float) -> float:
+        """The cost's lower bound at `beta`."""
+        return float(np.interp(beta, self.lower_bound.index, self.lower_bound.to_numpy()))
+
+    def plot(self, ax=None, beta: float | None = None):
+        """Plot the cost along the path, with its lower bound below it, the optimal
+        cost and the space's budget (the optimal cost plus its slack). With
+        `beta`, mark the design there. Needs matplotlib
+        (``pip install mga-compass[notebook]``). Returns the axes."""
+        plt = _pyplot()
+        if ax is None:
+            _, ax = plt.subplots()
+        space = self.space
+        cost, unit = space.cost, space.units.get(space.cost, "")
+        upper = [bp.point[cost] for bp in self.breakpoints]
+        ax.plot(self.betas, upper, marker="o", label=f"{cost} (cheapest mix of designs)")
+        ax.plot(self.lower_bound.index, self.lower_bound.to_numpy(), linestyle="--", label="lower bound")
+        ax.axhline(space.optimal_cost, color="grey", linewidth=0.8, linestyle=":", label="optimal cost")
+        ax.axhline(space.optimal_cost * (1 + space.slack), color="grey", linewidth=0.8, linestyle="-.",
+                   label=f"budget (slack {space.slack:g})")
+        if beta is not None:
+            ax.axvline(beta, color="black", linewidth=0.8, linestyle="--")
+            ax.plot([beta], [self.cost_at(beta)], marker="o", color="black",
+                    label=f"β = {beta:g}: {_with_unit(self.cost_at(beta), unit, max(upper))}")
+        ax.set_xlabel("β: share of the path from start to target")
+        ax.set_ylabel(f"{cost} [{unit}]" if unit else cost)
+        ax.set_xlim(0, 1)
+        ax.legend()
+        return ax
+
+    def plot_pois(self, beta: float | None = None, axes=None):
+        """Bars of each PoI, one panel per unit, in the PoIs' colours.
+
+        Without `beta`, the start (pale) and the target side by side. With
+        `beta`, the design there, with dashed lines at the start's and the
+        target's values: the bar moves between them as `beta` goes from 0 to 1.
+        Returns the panels' axes."""
+        start, target = self.at(0), self.at(1)
+        if beta is None:
+            return _poi_bars(self.space, {"start": start, "target": target}, axes)
+        axes = _poi_bars(self.space, {f"β = {beta:g}": self.at(beta)}, axes)
+        for ax, pois in zip(axes, _pois_by_unit(self.space).values()):
+            x = np.arange(len(pois))
+            ax.hlines(start[pois], x - 0.45, x + 0.45, color="C2", linestyle="--", label="start")
+            ax.hlines(target[pois], x - 0.45, x + 0.45, color="C3", linestyle="--", label="target")
+        handles, _ = axes[0].get_legend_handles_labels()
+        axes[0].legend(handles=[*axes[0].get_legend().legend_handles, *handles])
+        return axes
+
+    def plot_radar(self, beta: float = 1.0, ax=None):
+        """A radar chart of the PoIs at the start and at `beta`, by default the
+        target, each PoI scaled from the space's smallest (0) to largest value (1).
+        Returns the axes."""
+        plt = _pyplot()
+        if ax is None:
+            _, ax = plt.subplots(subplot_kw={"projection": "polar"})
+        pois = self.space.pois
+        low, high = self.space.points[pois].min(), self.space.points[pois].max()
+        span = (high - low).replace(0, np.nan)
+        angles = np.linspace(0, 2 * np.pi, len(pois), endpoint=False)
+        closed = np.append(angles, angles[0])
+        label = "target" if beta == 1 else f"β = {beta:g}"
+        # The colours of the start and target lines in plot_pois; another design in black.
+        for name, design, color in (("start", self.at(0), "C2"), (label, self.at(beta), "C3" if beta == 1 else "black")):
+            scaled = ((design[pois] - low) / span).fillna(0.5).to_numpy()
+            values = np.append(scaled, scaled[0])
+            ax.plot(closed, values, color=color, label=name)
+            ax.fill(closed, values, color=color, alpha=0.15)
+        ax.set_xticks(angles, pois)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0.25, 0.5, 0.75], [])
+        ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
+        return ax
+
+    def cost_at(self, beta: float) -> float:
+        """The cost at `beta`: the upper bound, linear between breakpoints."""
+        return float(np.interp(beta, self.betas, [bp.point[self.space.cost] for bp in self.breakpoints]))
+
+    def largest_gap(self) -> float:
+        """How far the cost is above its lower bound at most, anywhere on the path.
+        Both are linear between their bends, so checking those is enough."""
+        betas = sorted({*self.betas, *self.lower_bound.index})
+        return max(self.cost_at(beta) - self.lower_bound_at(beta) for beta in betas)
+
+    def _title(self) -> str:
+        inner = len(self.breakpoints) - 2
+        unit = self.space.units.get(self.space.cost, "")
+        scale = self.space.points[self.space.cost].abs().max()
+        return (f"Traverse: {inner} breakpoint{'s' * (inner != 1)} between start and target; "
+                f"the cost is at most {_with_unit(self.largest_gap(), unit, scale)} above its lower bound")
+
+    def _formatted(self) -> pd.DataFrame:
+        table = self.to_frame()
+        scales = self.space.points.abs().max()
+        for column in table.columns:
+            scale = scales.get(column, scales[self.space.cost])
+            table[column] = [_format_number(v, scale) for v in table[column]]
+        table.index = [f"{beta:.3g}" for beta in table.index]
+        table.index.name = "beta"
+        return table
+
+    def __repr__(self) -> str:
+        return f"{self._title()}\n{self._formatted().to_string()}"
+
+    def _repr_html_(self) -> str:
+        return f"<p>{self._title()}</p>{self._formatted().to_html()}"
+
+
+def _pair(name: str, spec) -> tuple:
+    try:
+        direction, delta = spec
+    except (TypeError, ValueError):
+        raise ValueError(f"{name}: a request is (direction, delta) or a direction alone, got {spec!r}") from None
+    return direction, delta
+
+
+def _delta(name: str, delta: Delta, start: float) -> float:
+    if isinstance(delta, str):
+        text = delta.strip()
+        try:
+            if not text.endswith("%"):
+                raise ValueError
+            value = float(text[:-1]) / 100 * abs(start)
+        except ValueError:
+            raise ValueError(f"{name}: a delta given as text must be a percentage such as '20%', got {delta!r}") from None
+    elif isinstance(delta, (int, float)) and not isinstance(delta, bool):
+        value = float(delta)
+    else:
+        raise ValueError(f"{name}: delta must be a number or a percentage such as '20%', got {delta!r}")
+    if not value >= 0:
+        raise ValueError(f"{name}: delta must not be negative, got {delta!r}")
+    return value
+
+
+def _with_unit(value: float, unit: str, scale: float | None = None) -> str:
+    return f"{_format_number(value, scale)} {unit}".rstrip()
+
+
+def _request_text(row: pd.Series, unit: str) -> str:
+    if row["direction"] == "":
+        return ""
+    if row["delta"] == 0:
+        return {">=": "increase", "<=": "decrease", "==": "keep"}[row["direction"]]
+    words = _WORDS[row["direction"]]
+    return f"{words}{_with_unit(row['delta'], unit)}" if words.endswith("±") else f"{words} {_with_unit(row['delta'], unit)}"
+
+
+def _describe(change: ConstraintChange, requested: Constraints, units: dict[str, str]) -> str:
+    name, unit = change.dim, units.get(change.dim, "")
+    value, asked = requested.loc[name, "value"], requested.loc[name, "delta"]
+    direction = requested.loc[name, "direction"]
+    if change.code == "delta_reduced":
+        got = change.values[1]
+        verb = "increase" if direction == ">=" else "decrease"
+        if _format_number(got) == "0":
+            return f"{name}: could not {verb} at all, given the requests before it"
+        return f"{name}: could {verb} by {_with_unit(got, unit)} only, not {_with_unit(asked, unit)}"
+    if change.code == "infeasible_lb":
+        reached = change.values[-1]
+        return (f"{name}: could not increase, given the requests before it; "
+                f"the most possible is {_with_unit(reached, unit)}, {_with_unit(value - reached, unit)} below the start")
+    if change.code == "infeasible_ub":
+        reached = change.values[-1]
+        return (f"{name}: could not decrease, given the requests before it; "
+                f"the least possible is {_with_unit(reached, unit)}, {_with_unit(reached - value, unit)} above the start")
+    if change.code == "delta_widened":
+        widened = change.values[2]
+        return f"{name}: could not be kept within ±{_with_unit(asked, unit)}; kept within ±{_with_unit(widened, unit)}"
+    return f"{name}: {change.code}"
+
+
+def _negligible(change: ConstraintChange, points: pd.DataFrame) -> bool:
+    """A widened tolerance of a rounding error only, e.g. ``keep`` with delta 0."""
+    if change.code != "delta_widened":
+        return False
+    asked, out = change.values[1], change.values[2]
+    column = points[change.dim]
+    return out - asked <= 1e-9 * max(column.abs().max(), 1e-300)
+
+
+def _slack_level(slacks: list[float], slack: float | None) -> float:
+    if slack is None:
+        return max(slacks)
+    for level in slacks:
+        if math.isclose(level, slack):
+            return level
+    raise ValueError(f"slack {slack:g} is not one of the set's slack levels {sorted(slacks)}")
+
+
+def _format_number(value: float, scale: float | None = None) -> str:
+    """About four significant digits, with thousands separators: 18,092, 288.9,
+    0.0104. A value within a rounding error of 0, relative to `scale` (the size
+    of the quantity's values), is shown as 0."""
+    if scale is not None and abs(value) <= 1e-9 * abs(scale):
+        value = 0.0
+    if value == 0 or not math.isfinite(value):
+        return f"{abs(value):g}" if value == 0 else f"{value:g}"
+    decimals = max(0, 3 - math.floor(math.log10(abs(value))))
+    return f"{value:,.{decimals}f}"
+
+
+def _format_signed(value: float, scale: float | None = None) -> str:
+    text = _format_number(value, scale)
+    return text if text.startswith("-") or text == "0" else f"+{text}"
+
+
+def _pyplot():
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError("plotting needs matplotlib: pip install 'mga-compass[notebook]'") from None
+    return plt
+
+
+def _pois_by_unit(space: Space) -> dict[str, list[str]]:
+    """The space's PoIs grouped by unit, in their order."""
+    groups: dict[str, list[str]] = {}
+    for poi in space.pois:
+        groups.setdefault(space.units.get(poi, ""), []).append(poi)
+    return groups
+
+
+def _unit_panels(space: Space, axes=None) -> list:
+    """One axes per unit of the PoIs: `axes` if given, else a new figure."""
+    count = len(_pois_by_unit(space))
+    if axes is None:
+        widths = [len(pois) for pois in _pois_by_unit(space).values()]
+        _, axes = _pyplot().subplots(1, count, figsize=(max(6.0, 1.6 * sum(widths) + 1), 4),
+                                     gridspec_kw={"width_ratios": widths}, squeeze=False, layout="constrained")
+        axes = axes[0]
+    axes = list(np.atleast_1d(axes))
+    if len(axes) != count:
+        raise ValueError(f"need {count} axes, one per unit, got {len(axes)}")
+    for ax in axes:
+        _number_ticks(ax)
+    return axes
+
+
+def _number_ticks(ax, both: bool = False) -> None:
+    """Label the y axis, and with `both` the x axis too, 1,500,000 rather than
+    1.5 with a 1e6 offset."""
+    from matplotlib.ticker import FuncFormatter
+
+    for axis in (ax.xaxis, ax.yaxis) if both else (ax.yaxis,):
+        axis.set_major_formatter(FuncFormatter(lambda value, _: _format_number(value)))
+
+
+def _poi_bars(space: Space, designs: dict[str, pd.Series], axes=None) -> list:
+    """Grouped bars of each PoI for each design: one panel per unit. A bar has its
+    PoI's colour (see :func:`_poi_colors`), paler for the earlier designs."""
+    from matplotlib.patches import Patch
+
+    axes = _unit_panels(space, axes)
+    width = 0.8 / len(designs)
+    colors = _poi_colors(space)
+    opacities = np.linspace(0.35, 1.0, len(designs)) if len(designs) > 1 else [1.0]
+    for ax, (unit, pois) in zip(axes, _pois_by_unit(space).items()):
+        x = np.arange(len(pois))
+        for k, design in enumerate(designs.values()):
+            ax.bar(x + (k - (len(designs) - 1) / 2) * width, design[pois], width,
+                   color=[colors.get(poi, "C0") for poi in pois], alpha=opacities[k])
+        ax.set_xticks(x, pois)
+        ax.set_ylabel(unit)
+    # One swatch per design in grey: the bars' colours belong to the PoIs.
+    axes[0].legend(handles=[Patch(color="dimgrey", alpha=a, label=name) for name, a in zip(designs, opacities)])
+    return axes
+
+
+def _poi_colors(space: Space) -> dict[str, str]:
+    """The colour of each PoI defined by a single component that the set gives a
+    colour (a member of an index set with a ``color`` column)."""
+    _, colors = category_styles(space.nos)
+    found = {}
+    for poi in space.nos.manifest.pois:
+        components = {c for attributes in poi.definition.values() for weights in attributes.values() for c in weights}
+        if len(components) == 1 and (color := colors.get(str(components.pop()))):
+            found[poi.name] = color
+    return found

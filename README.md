@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/github/license/EINS-TUDa/MGA-Compass)
 [![Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://enormous-raphaela-eins-tu-darmstadt-215a3282.koyeb.app/)
 
-**Presentation:** [eins-tuda.github.io/MGA-Compass](https://eins-tuda.github.io/MGA-Compass/)
+**Documentation:** [eins-tuda.github.io/MGA-Compass](https://eins-tuda.github.io/MGA-Compass/) · **Presentations:** [eins-tuda.github.io/MGA-Compass/presentations](https://eins-tuda.github.io/MGA-Compass/presentations/)
 
 Near-optimal solutions cost a small percentage more than the optimum. While slightly expensive, they can be preferable for political feasibility, social acceptance, or environmental impact.
 

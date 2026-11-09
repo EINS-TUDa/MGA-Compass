@@ -120,9 +120,9 @@ from .pypsa_ext import (
     make_closest_point_fn,
     make_oracle_fns,
     generate_mga_files,
-    consolidate_mga_results,
     encode_cache_key,
 )
+from .export import collect_near_optimal_set, export_near_optimal_set, network_fingerprint
 
 __all__ = [
     "VALID_NORMS", "closest_point_on_hull", "gaps",
@@ -132,5 +132,6 @@ __all__ = [
     "CddMethod", "cdd_vertices_of", "BBMethod", "drive",
     "AffineMap", "compute_affine_map", "normalize_oracle_fns", "normalize_from_box_points",
     "make_optimality_fn", "make_furthest_point_fn", "make_closest_point_fn", "make_oracle_fns",
-    "generate_mga_files", "consolidate_mga_results", "encode_cache_key",
+    "generate_mga_files", "encode_cache_key",
+    "collect_near_optimal_set", "export_near_optimal_set", "network_fingerprint",
 ]

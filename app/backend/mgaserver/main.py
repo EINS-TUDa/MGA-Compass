@@ -2,51 +2,48 @@ from contextlib import asynccontextmanager
 import logging
 
 import pandas as pd
-import xarray as xr
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from mga_compass import fetch_bundle, load_bundle
-from mga_compass import Constraints, Alpha, AlphaSumError, Breakpoint, SolverError, navigate, interpolate, get_plot_data, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
+import mga_format
+from mga_compass import Constraints, Alpha, AlphaSumError, Breakpoint, SolverError, navigate, interpolate, describe_changes, linear_lower_bounds, upper_envelope, configure_solver_logging
+from mga_compass.near_optimal import category_styles, display_points, display_units, plot_data
 
 from .api_models import ConstraintRow, ConstraintsPayload, BreakpointResult, NavigateResponse, ConstraintChangeItem, DimensionRange, DimensionEntry, InitResponse, InitPlotResponse, PlotRequest, PlotResponse, LowerBoundRequest, LowerBoundResponse, LowerBoundPointResult
-from .config import settings, Manifest
+from .config import settings
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
 configure_solver_logging(settings.solver_log_path)
 
+nos: mga_format.NearOptimalSet
+# points: one row per point (index: point id), one column per PoI plus the cost
+# column, in the manifest's display units. The whole API speaks display units:
+# what the frontend shows, it also sends back.
 points: pd.DataFrame = pd.DataFrame()
-# Empty, as before the switch to dataset bundles: /lower_bound passes it to
-# linear_lower_bounds, but loading it (from manifest.duals) has stayed disabled.
+obj_label: str = ""
+# Empty: /lower_bound passes it to linear_lower_bounds, but the cost lower bound
+# is not enabled yet, although the set now always carries duals (nos.duals).
 duals: pd.DataFrame = pd.DataFrame()
-output_datasets: dict[str, xr.DataArray]
-manifest: Manifest
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global points, output_datasets, manifest
+    global nos, points, obj_label
     if settings.dataset_url:
-        logger.info("fetching dataset bundle %s into %s", settings.dataset_url, settings.data_dir)
-        fetch_bundle(settings.dataset_url, settings.data_dir)
-    # Verified against the manifest's checksums before anything is read.
-    manifest, points, output_datasets = load_bundle(settings.data_dir)
-
-    # points: DataFrame, one row per MGA solution point.
-    #   Index  : integer (0-based)
-    #   Columns: one per decision variable (e.g. wind, solar, …) + objective (e.g. TOTEX)
-    #   Example:
-    #     wind  solar  hydrogen  battery  TOTEX
-    #     10    20     45        25       35
-    # output_datasets: one xr.DataArray per manifest.output_datasets entry, its
-    #   dims as listed there (e.g. index x snapshot x technology).
-    # The bundle also carries duals (manifest.duals; one row per point, one column
-    # per non-objective dimension); not loaded -- see `duals` above.
+        logger.info("fetching near-optimal set %s into %s", settings.dataset_url, settings.data_dir)
+        nos = mga_format.fetch(settings.dataset_url, settings.data_dir)
+    else:
+        # Verified against the manifest's checksums before anything is read.
+        nos = mga_format.read(settings.data_dir)
+    points = display_points(nos)
+    obj_label = nos.manifest.cost.name
+    # Outputs stay on disk: /plot_data reads only the points a request mixes.
+    logger.info("serving %d points, slack levels %s (navigating the largest)", len(points), nos.manifest.slacks)
     yield
 
 
@@ -75,14 +72,16 @@ async def log_requests(request, call_next):
 @app.get("/init", response_model=InitResponse)
 @limiter.limit("60/minute")
 def get_init(request: Request) -> InitResponse:
-    optimal_point = points.loc[points[manifest.obj_label].idxmin()]
+    optimal_point = points.loc[points[obj_label].idxmin()]
+    info = {poi.name: poi.description for poi in nos.manifest.pois}
+    units = display_units(nos)
     return InitResponse(
-        obj_label=manifest.obj_label,
+        obj_label=obj_label,
         dimensions={
             col: DimensionEntry(
                 range=DimensionRange(min=float(points[col].min()), max=float(points[col].max())),
-                info=manifest.dimension_info.get(col, ""),
-                unit=manifest.dimension_unit.get(col, ""),
+                info=info.get(col, ""),
+                unit=units.get(col, ""),
             )
             for col in points.columns
         },
@@ -93,9 +92,9 @@ def get_init(request: Request) -> InitResponse:
 @app.get("/init_plot", response_model=InitPlotResponse)
 @limiter.limit("60/minute")
 def get_init_plot(request: Request) -> InitPlotResponse:
+    labels, colors = category_styles(nos)
     return InitPlotResponse(
-        datasets=list(manifest.plots.keys()), obj_label=manifest.obj_label,
-        labels=manifest.category_labels, colors=manifest.category_colors,
+        datasets=list(nos.manifest.plots.keys()), obj_label=obj_label, labels=labels, colors=colors,
     )
 
 
@@ -117,12 +116,12 @@ def run_navigation(request: Request, payload: ConstraintsPayload) -> NavigateRes
         raise HTTPException(status_code=422, detail=str(e))
     try:
         logger.info("navigate: calling navigate()")
-        output_constraints, point = navigate(points, input_constraints, manifest.obj_label, settings.solver_name, settings.solver_options)
+        output_constraints, point = navigate(points, input_constraints, obj_label, settings.solver_name, settings.solver_options)
         logger.info("navigate: calling interpolate()")
         logger.info("interpolate point_start:\n%s", input_constraints["value"].to_string())
         logger.info("interpolate point_end:\n%s", point.to_string())
         logger.info("constraints:\n%s", input_constraints[["value", "direction", "delta"]].to_string())
-        breakpoints = interpolate(points, input_constraints["value"], point, manifest.obj_label, solver_name=settings.solver_name, solver_options=settings.solver_options)
+        breakpoints = interpolate(points, input_constraints["value"], point, obj_label, solver_name=settings.solver_name, solver_options=settings.solver_options)
     except (SolverError, AlphaSumError) as e:
         # An HTTPException, unlike an unhandled error, still passes through the
         # CORS middleware, so the frontend sees this message, not a network error.
@@ -144,13 +143,12 @@ def run_navigation(request: Request, payload: ConstraintsPayload) -> NavigateRes
 @app.post("/plot_data", response_model=PlotResponse)
 @limiter.limit("30/minute")
 def get_plot_endpoint(request: Request, payload: PlotRequest) -> PlotResponse:
-    if payload.name not in manifest.plots:
+    if payload.name not in nos.manifest.plots:
         raise HTTPException(status_code=404, detail=f"Plot '{payload.name}' not found")
 
-    plot = manifest.plots[payload.name]
+    plot = nos.manifest.plots[payload.name]
     alphas = [Alpha(pd.Series({int(k): v for k, v in item.alpha.items()})) for item in payload.breakpoints]
-    da = output_datasets[plot.dataset]
-    result = get_plot_data(alphas, plot, da)
+    result = plot_data(settings.data_dir, nos, payload.name, alphas, display=True)
     return PlotResponse(type=plot.type, betas=[item.beta for item in payload.breakpoints], x_dim=result["x_dim"], data=result["data"])
 
 
@@ -165,7 +163,7 @@ def get_lower_bound(request: Request, payload: LowerBoundRequest) -> LowerBoundR
         )
         for item in payload.breakpoints
     ]
-    bounds = linear_lower_bounds(points, breakpoint_objs, duals, manifest.obj_label)
+    bounds = linear_lower_bounds(points, breakpoint_objs, duals, obj_label)
     envelope = upper_envelope(bounds)
     return LowerBoundResponse(points=[LowerBoundPointResult(beta=p.beta, value=p.value) for p in envelope])
 

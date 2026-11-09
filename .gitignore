@@ -2,5 +2,11 @@
 *.obj
 *.pdb
 
-# Dataset bundle the backend downloads at startup (see mga_compass.dataset)
+# Near-optimal set the backend downloads at startup (see mgaserver/config.py)
 app/backend/data/
+
+# Sphinx build output
+docs/_build/
+
+# Near-optimal sets the example notebooks download
+mga-compass/examples/data/

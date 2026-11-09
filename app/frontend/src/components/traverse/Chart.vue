@@ -12,7 +12,7 @@ const props = defineProps({
     type: Number,
     required: true,
   },
-  path: {
+  breakpoints: {
     type: Array,
     required: true,
   },
@@ -78,7 +78,7 @@ const computeYMax = (pd) => {
     } else {
       const keys = Object.keys(slice)
       const len = slice[keys[0]]?.length ?? 0
-      if (pd.type === 'stacked_bar') {
+      if (pd.type === 'stacked_bar' || pd.type === 'stacked_timeseries') {
         for (let i = 0; i < len; i++) {
           const sum = keys.reduce((s, k) => s + (slice[k][i] ?? 0), 0)
           if (sum > max) max = sum
@@ -107,6 +107,7 @@ const renderChart = (notMerge = true) => {
   const isTime = pd.type === 'timeseries' || pd.type === 'stacked_timeseries'
   const isBar = pd.type === 'bar' || pd.type === 'stacked_bar'
   const isStackedBar = pd.type === 'stacked_bar'
+  const isStackedTime = pd.type === 'stacked_timeseries'
 
   // x_dim timestamps are in nanoseconds — convert to milliseconds for JS/echarts
   const xData = isTime ? pd.x_dim.map((ns) => ns / 1e6) : pd.x_dim
@@ -129,9 +130,11 @@ const renderChart = (notMerge = true) => {
       return {
         name: label(name),
         type: isBar ? 'bar' : 'line',
-        stack: isStackedBar ? 'total' : undefined,
+        stack: isStackedBar || isStackedTime ? 'total' : undefined,
         data: isTime ? xData.map((x, i) => [x, values[i]]) : values,
-        lineStyle: color ? { width: 1, color } : { width: 1 },
+        // A stacked time series as filled areas, each in its category's color.
+        areaStyle: isStackedTime ? (color ? { color, opacity: 0.85 } : { opacity: 0.85 }) : undefined,
+        lineStyle: isStackedTime ? { width: 0 } : color ? { width: 1, color } : { width: 1 },
         itemStyle: color ? { color } : undefined,
         symbol: 'none',
       }
@@ -197,8 +200,8 @@ const fmtNum = (v) => {
 const yAxisFormatter = fmtNum
 
 const getObjValueAtBeta = (beta) => {
-  if (!props.path || props.path.length === 0) return null
-  const data = props.path.map((bp) => [bp.beta, Number(bp.point[objLabel.value])])
+  if (!props.breakpoints || props.breakpoints.length === 0) return null
+  const data = props.breakpoints.map((bp) => [bp.beta, Number(bp.point[objLabel.value])])
   if (beta <= data[0][0]) return data[0][1]
   if (beta >= data[data.length - 1][0]) return data[data.length - 1][1]
   for (let i = 0; i < data.length - 1; i++) {
@@ -211,9 +214,9 @@ const getObjValueAtBeta = (beta) => {
 }
 
 const renderObjLabelChart = () => {
-  if (!chartInstance || !props.path || props.path.length < 2) return
+  if (!chartInstance || !props.breakpoints || props.breakpoints.length < 2) return
 
-  const seriesData = props.path.map((bp) => [bp.beta, Number(bp.point[objLabel.value])])
+  const seriesData = props.breakpoints.map((bp) => [bp.beta, Number(bp.point[objLabel.value])])
   const values = seriesData.map((d) => d[1])
   const yMax = Math.max(...values)
   const yMin = Math.min(...values)
@@ -269,12 +272,12 @@ const renderObjLabelChart = () => {
 }
 
 const fetchPlotData = async () => {
-  if (!type.value || !props.path || props.path.length === 0) return
+  if (!type.value || !props.breakpoints || props.breakpoints.length === 0) return
   if (type.value === objLabel.value) {
     renderObjLabelChart()
     return
   }
-  const breakpoints = props.path.map((bp) => ({ beta: bp.beta, alpha: bp.alpha }))
+  const breakpoints = props.breakpoints.map((bp) => ({ beta: bp.beta, alpha: bp.alpha }))
   const data = await post('/plot_data', { name: type.value, breakpoints })
   plotData.value = data
   renderChart()
@@ -290,7 +293,7 @@ watch(() => type.value, () => {
   else fetchPlotData()
 })
 
-watch(() => props.path, () => {
+watch(() => props.breakpoints, () => {
   if (type.value === objLabel.value) renderObjLabelChart()
   else fetchPlotData()
 }, { deep: false })

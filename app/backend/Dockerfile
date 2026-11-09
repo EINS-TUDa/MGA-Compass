@@ -9,10 +9,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 # uv validates/resolves the whole workspace even when syncing just mgaserver, so
 # every member needs its pyproject.toml present -- mga-surveyor only needs that
 # (mgaserver doesn't depend on it, and mga-compass's own dependency on it is
-# behind an extra mgaserver doesn't request), mga-compass needs its full source
-# since it IS an editable dependency of mgaserver.
+# behind an extra mgaserver doesn't request), mga-compass and mga-format need
+# their full source since they ARE editable dependencies of mgaserver.
 COPY pyproject.toml uv.lock ./
 COPY mga-surveyor/pyproject.toml ./mga-surveyor/pyproject.toml
+COPY mga-format/ ./mga-format/
 COPY mga-compass/ ./mga-compass/
 COPY app/backend/pyproject.toml ./app/backend/pyproject.toml
 
@@ -24,8 +25,8 @@ RUN uv sync --frozen --no-dev --package mgaserver
 COPY app/backend/mgaserver/ ./app/backend/mgaserver/
 RUN uv sync --frozen --no-dev --package mgaserver
 
-# No data in the image: at startup the server downloads the dataset bundle at
-# $DATASET_URL into data/ (see mgaserver/config.py and mga_compass.dataset).
+# No data in the image: at startup the server downloads the near-optimal set
+# archive at $DATASET_URL into data/ (see mgaserver/config.py and mga_format.fetch).
 
 WORKDIR /repo/app/backend
 

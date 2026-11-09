@@ -41,16 +41,15 @@ make_oracle_fns builds all three of the above in one call, sharing
 n/dimensions/output_dir -- a convenience for feeding explore.drive's three
 callback parameters directly.
 
-generate_mga_files runs a CddMethod (float) or BBMethod (vertex_method) per
+generate_mga_files runs a BBMethod or CddMethod (float) (vertex_method) per
 slack level (via explore.drive) against a real network, writing every result to .nc files
 under output_dir -- resuming from whatever's already there (cached
 optimal/furthest-point solves are read back, and existing closest-point
 results are folded into each slack level's own explore.drive call as its
-extra_points/extra_halfspaces). consolidate_mga_results is the standalone
-other half: given just an output_dir, it scans for every result .nc file
-there and builds the consolidated points/duals DataFrames, independent of
-a live run. Call both in sequence for the common case of running and then
-reading the result back.
+extra_points/extra_halfspaces). mga_surveyor.export is the other half:
+given just an output_dir, collect_near_optimal_set reads every result .nc
+file there back as a near-optimal set (mga_format), independent of a live
+run.
 """
 from __future__ import annotations
 
@@ -65,7 +64,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pandas as pd
 from linopy import LinearExpression, QuadraticExpression
 from pypsa._options import options
 from pypsa.optimization.mga import _worker_init
@@ -225,7 +223,6 @@ __all__ = [
     "make_closest_point_fn",
     "make_oracle_fns",
     "generate_mga_files",
-    "consolidate_mga_results",
     "encode_cache_key",
 ]
 
@@ -243,10 +240,10 @@ def make_optimality_fn(n: Network, dimensions: dict, output_dir: str | Path, **k
     as `make_furthest_point_fn`/`make_closest_point_fn`'s own
     `resolve_main_objective`. The optimum's own cost is cached too, in
     `n.meta["obj"]`, same as every other result file this module writes --
-    so `consolidate_mga_results` never needs to recompute it. `dimensions`
+    so `export.collect_near_optimal_set` never needs to recompute it. `dimensions`
     itself is cached in `n.meta["dimensions"]` too -- the one piece of
     per-run metadata every other `.nc` file in `output_dir` needs to be
-    interpreted, so `consolidate_mga_results` can read it back from here
+    interpreted, so `export.collect_near_optimal_set` can read it back from here
     instead of needing it passed in again.
 
     If `output_dir/optimal.nc` already exists, its point is read back from
@@ -328,12 +325,25 @@ def _read_meta(nc_path: str | Path) -> dict:
     pandas DataFrames just to reach a handful of scalars PyPSA itself only
     ever stashed as a JSON string in the first place (~1000x slower in
     practice: full-network loads dominate the runtime of anything reading
-    back many cached files, e.g. `consolidate_mga_results` or a
+    back many cached files, e.g. `export.collect_near_optimal_set` or a
     `generate_mga_files` restart's `_read_existing_closest_points`)."""
     from netCDF4 import Dataset  # noqa: PLC0415
 
     with Dataset(nc_path) as ds:
         return json.loads(ds.meta)
+
+
+#: Per-slack-level run summary written by `generate_mga_files`, read by
+#: `export_near_optimal_set` (its fields are the format's `slack_levels` entry).
+RUN_SUMMARY_NAME = "run.json"
+
+
+def _write_run_summary(slack_dir: Path, summary: dict) -> None:
+    """Write one slack level's settings and result to `slack_dir/run.json`,
+    replacing an earlier run's: on a resume the counts and gap cover the whole
+    level, so the latest summary is the complete one."""
+    slack_dir.mkdir(parents=True, exist_ok=True)
+    (slack_dir / RUN_SUMMARY_NAME).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 def _build_furthest_point_solver(
@@ -1428,13 +1438,14 @@ def generate_mga_files(
     verbose: bool = True,
     normalize: bool = True,
     use_objective_cuts: bool = True,
-    vertex_method: str = "cdd",
+    vertex_method: str = "bb",
     **kwargs: Any,
 ) -> None:
-    """Run a `CddMethod` (float arithmetic) or `BBMethod` (see `vertex_method`) per slack level (`explore.drive`, up to
+    """Run a `BBMethod` or `CddMethod` (float arithmetic) (see `vertex_method`) per slack level (`explore.drive`, up to
     `max_iter` iterations each) against a real, already-solved PyPSA
     network `n`, writing every result to `.nc` files under `output_dir`.
-    Doesn't consolidate them into DataFrames -- call `consolidate_mga_results`
+    Doesn't collect them into a near-optimal set -- call
+    `export.collect_near_optimal_set` (or `export_near_optimal_set`)
     afterward for that.
 
     `max_parallel`: no default -- must be chosen explicitly for every
@@ -1466,7 +1477,7 @@ def generate_mga_files(
     box-point solves -- raises if any dimension turns out fixed (no
     achievable range) under that slack budget, see
     `normalize.compute_affine_map`. Everything on disk (`.nc` files,
-    `consolidate_mga_results`'s output) is completely unaffected -- still
+    the near-optimal set collected from them) is completely unaffected -- still
     real units throughout, since the oracle functions themselves are
     unchanged; only what `explore.drive`/the Method sees is
     normalized. Pass `False` to explore raw units instead.
@@ -1583,9 +1594,16 @@ def generate_mga_files(
     corrupted by hand) could otherwise seed the Method with
     points/halfspaces that don't describe a coherent region.
 
-    `vertex_method` (default `"cdd"`): `"cdd"` runs `CddMethod` with its
-    float backend, `"bb"` runs `BBMethod` (Qhull's polar dual). Both reach
-    the same gap; see their docstrings for the trade-offs.
+    `vertex_method` (default `"bb"`): `"bb"` runs `BBMethod` (Qhull's
+    polar dual), `"cdd"` runs `CddMethod` with its float backend. `"bb"` is
+    the default because on PyPSA-Eur it matched exact (rational) vertex
+    enumeration at every iteration at about the same speed, whereas cdd's
+    float backend dropped vertices as cuts accumulated and underestimated
+    the gap in later iterations, which can stop a run before it has
+    converged (see the G-ORACLE paper, arXiv:2610.32759). `"cdd"` remains
+    the only choice that batches trial points (`find_pool_trial_points`)
+    when `max_parallel > 1`; with `"bb"`, `drive` solves one target per
+    iteration.
 
     `solver_name` also becomes each slack level's Method's
     `projection_backend` (the inner-hull projection solver), so it must
@@ -1789,6 +1807,19 @@ def generate_mga_files(
             max_parallel=max_parallel, incremental_bootstrap=True,
         )
         final_gap = method.max_gap()
+        _write_run_summary(slack_dir, {
+            "slack": float(slack),
+            "norm": norm,
+            "normalize": bool(normalize),
+            # tol and gap in the units the caller gave tol in (percent when normalized).
+            "tol": float(slack_tol * gap_scale),
+            "tol_unit": "percent" if normalize else "model",
+            "vertex_method": vertex_method,
+            "objective_cuts": bool(use_objective_cuts),
+            "iterations": len(list(slack_dir.glob("mga_closest_result_*.nc"))),
+            "gap": float(final_gap * gap_scale),
+            "converged": bool(final_gap <= slack_tol),
+        })
         if final_gap > slack_tol:
             # drive() already logged a warning for this (it's the one that
             # knows whether max_iter was actually hit), but that's easy to
@@ -1806,67 +1837,3 @@ def generate_mga_files(
                 "slack=%s: %d inner point(s), final max_gap=%.4f%s",
                 slack, len(method.inner_vertices), final_gap * gap_scale, gap_unit,
             )
-
-
-def consolidate_mga_results(
-    output_dir: str | Path, obj_label: str = "obj",
-) -> tuple[pd.DataFrame, pd.DataFrame, list[Path]]:
-    """Scan `output_dir` for every MGA result `.nc` file this module's
-    factories can produce there (`optimal.nc`, and each slack level's own
-    `mga_furthest_result_*.nc`/`mga_closest_result_*.nc` under
-    `output_dir/slack_*/`) and consolidate their `meta` into
-    `points_df`/`duals_df`, one row per file, 0..N-1 indexed. Standalone --
-    can be called independently of `generate_mga_files`, e.g. to rebuild
-    the dataset from an `output_dir` an earlier (possibly interrupted) run
-    already populated, without re-running anything -- `output_dir` is the
-    only thing this needs: dimension names/order come from `optimal.nc`'s
-    own `meta["dimensions"]` (stashed there by `make_optimality_fn`), not a
-    parameter here, so there's no way to pass mismatched ones by accident.
-
-    Each file is either `make_furthest_point_fn`'s/`make_optimality_fn`'s
-    own export (`meta["coordinates"]`) or `make_closest_point_fn`'s own
-    (`meta["point"]`) -- `duals` absent (all-zero) when that call's own
-    `resolve_main_objective` was `False`. `obj` is read straight out of
-    `meta` too (every writer in this module stashes it there already) --
-    never recomputed via `n.statistics`, which would mean a full
-    `pypsa.Network` load per file for no reason (see `_read_meta`).
-
-    Returns `points_df`, `duals_df`, and the sorted list of NetCDF paths
-    (matching the DataFrames' row order).
-
-    :raises FileNotFoundError: If `output_dir/optimal.nc` doesn't exist --
-        it's the precondition every other function in this module assumes,
-        so there's nothing meaningful to consolidate without it.
-    """
-    output_dir = Path(output_dir)
-    optimal_nc = output_dir / "optimal.nc"
-    if not optimal_nc.exists():
-        msg = f"{optimal_nc} not found -- run generate_mga_files (or at least make_optimality_fn) first."
-        raise FileNotFoundError(msg)
-    keys = list(_read_meta(optimal_nc)["dimensions"].keys())
-
-    nc_paths: set[Path] = {optimal_nc}
-    nc_paths.update(output_dir.glob("slack_*/mga_furthest_result_*.nc"))
-    nc_paths.update(output_dir.glob("slack_*/mga_closest_result_*.nc"))
-
-    all_coords = []
-    all_duals = []
-    all_nc_paths = sorted(nc_paths, key=str)
-    for nc_path in all_nc_paths:
-        meta = _read_meta(nc_path)
-        if "coordinates" in meta:
-            coords = pd.Series(meta["coordinates"])[keys]
-        else:
-            coords = pd.Series(meta["point"])[keys]
-        duals = pd.Series(meta["duals"])[keys] if "duals" in meta else pd.Series(0.0, index=keys)
-        coords = coords.copy()
-        coords[obj_label] = meta["obj"]
-        all_coords.append(coords)
-        all_duals.append(duals)
-
-    points_df = pd.DataFrame(all_coords).reset_index(drop=True)
-    duals_df = pd.DataFrame(all_duals).reset_index(drop=True)
-    points_df.index.name = "index"
-    duals_df.index.name = "index"
-
-    return points_df, duals_df, all_nc_paths
