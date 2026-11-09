@@ -353,11 +353,35 @@ def _validate_output_schema(directory: Path, manifest: Manifest, name: str) -> N
 def read_output(directory: str | Path, name: str, points: list[int] | None = None) -> pd.DataFrame:
     """Read output `name` in its long form, for all points or only `points`.
 
-    Each point's rows are one row group, so reading a few points skips the rest of
-    the file."""
+    Each point's rows are one row group, so reading a few points reads only their
+    row groups. They are found from the row groups' statistics and read directly:
+    a filtered dataset scan would find the same rows, but buffers far more memory
+    on the way (some 200 MB more for a few points of a large output)."""
     path = Path(directory) / _output_path(name)
-    filters = [(POINT, "in", list(points))] if points is not None else None
-    return pq.read_table(path, filters=filters).to_pandas()
+    if points is None:
+        return pq.read_table(path).to_pandas()
+    file = pq.ParquetFile(path)
+    groups = _point_row_groups(file.metadata)
+    if groups is None:  # not one row group per point: let a filter find the rows
+        return pq.read_table(path, filters=[(POINT, "in", list(points))]).to_pandas()
+    wanted = {int(p) for p in points}
+    indices = sorted(group for point, group in groups.items() if point in wanted)
+    if not indices:
+        return file.schema_arrow.empty_table().to_pandas()
+    return file.read_row_groups(indices).to_pandas()
+
+
+def _point_row_groups(metadata: pq.FileMetaData) -> dict[int, int] | None:
+    """{point: its row group} if every row group holds exactly one point, by its
+    statistics, and no point is in two; else None."""
+    column = metadata.schema.names.index(POINT)
+    groups = {}
+    for group in range(metadata.num_row_groups):
+        stats = metadata.row_group(group).column(column).statistics
+        if stats is None or not stats.has_min_max or stats.min != stats.max or stats.min in groups:
+            return None
+        groups[int(stats.min)] = group
+    return groups
 
 
 def validate_output(directory: str | Path, nos: NearOptimalSet, name: str) -> None:
@@ -382,14 +406,8 @@ def validate_output(directory: str | Path, nos: NearOptimalSet, name: str) -> No
         raise NearOptimalSetError(f"output {name!r}: a key combination appears more than once")
     if not df[POINT].is_monotonic_increasing:
         raise NearOptimalSetError(f"output {name!r}: rows must be sorted by {POINT!r}")
-    metadata = pq.ParquetFile(directory / _output_path(name)).metadata
-    column = metadata.schema.names.index(POINT)
-    seen = set()
-    for group in range(metadata.num_row_groups):
-        stats = metadata.row_group(group).column(column).statistics
-        if stats is None or not stats.has_min_max or stats.min != stats.max or stats.min in seen:
-            raise NearOptimalSetError(f"output {name!r}: each point's rows must form one row group")
-        seen.add(stats.min)
+    if _point_row_groups(pq.ParquetFile(directory / _output_path(name)).metadata) is None:
+        raise NearOptimalSetError(f"output {name!r}: each point's rows must form one row group")
 
 
 def write(

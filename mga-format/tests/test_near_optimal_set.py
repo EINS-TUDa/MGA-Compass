@@ -194,6 +194,23 @@ def test_read_output_for_some_points(written):
     assert len(df) == 2 * len(SNAPSHOTS) * len(TECHNOLOGIES)
 
 
+@pytest.mark.parametrize("points", [[3, 1], [0, 4, 4], [2, 99], [], [0, 1, 2, 3, 4]])
+def test_read_output_matches_a_filtered_scan(written, points):
+    path = written / "outputs/generation.parquet"
+    scanned = pq.read_table(path, filters=[("point", "in", points)]).to_pandas()
+    pd.testing.assert_frame_equal(read_output(written, "generation", points=points), scanned)
+
+
+def test_read_output_without_a_row_group_per_point(tmp_path):
+    directory = tmp_path / "set"
+    write(directory, _nos(), _outputs())
+    path = directory / "outputs/capacity.parquet"
+    pq.write_table(pq.read_table(path), path)  # one row group for all points
+    df = read_output(directory, "capacity", points=[1, 3])
+    assert sorted(df["point"].unique()) == [1, 3]
+    assert len(df) == 2 * len(TECHNOLOGIES)
+
+
 def test_write_refuses_existing_directory(written):
     with pytest.raises(FileExistsError):
         write(written, _nos(), _outputs())
