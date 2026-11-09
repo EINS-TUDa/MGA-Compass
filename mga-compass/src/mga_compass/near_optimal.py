@@ -76,7 +76,8 @@ def mix_output(directory: str | Path, nos: NearOptimalSet, output: str, alphas: 
     da = df.set_index(index)["value"].to_xarray()
     for set_name in index[1:]:
         members = nos.sets[set_name][set_name]
-        da = da.reindex({set_name: members[members.isin(df[set_name])].to_numpy()})
+        # Against the distinct keys: isin on every row is slow for string columns.
+        da = da.reindex({set_name: members[members.isin(df[set_name].unique())].to_numpy()})
     da = da.reindex({POINT: used}).fillna(0.0)  # a missing combination contributes nothing
     mixed = []
     for alpha in alphas:
